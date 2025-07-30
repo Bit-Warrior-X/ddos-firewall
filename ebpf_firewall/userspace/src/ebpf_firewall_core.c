@@ -469,7 +469,7 @@ static void *blocked_ips_duration_check_worker(void *arg) {
             }
 
             __u64 exp_ns = *(__u64 *)val;
-            if (exp_ns <= t_now) {
+            if (exp_ns != -1 && exp_ns <= t_now) {
                 // Resize array if full
                 if (delete_count >= delete_capacity) {
                     delete_capacity = delete_capacity ? delete_capacity * 2 : 16; // Start with 16, double when needed
@@ -1559,27 +1559,35 @@ int list_block_ip(char **out) {
 
         /* value is absolute expiration time in ns ---------------------------- */
         __u64 exp_ns = *(__u64 *)val;
-        double remain = exp_ns > t_now ? (double)(exp_ns - t_now) / 1e9 : 0.0;
-
-        /* ---------- NEW: convert ns → human timestamp -------------------- */
-        __u64 real_time_ns = exp_ns + time_offset_ns;
-        /* Apply timezone offset (CST = UTC+8) */
-        real_time_ns += tz_offset_sec * ONE_SECOND_NS;
-        time_t seconds = real_time_ns / ONE_SECOND_NS;
-
-        struct tm tm_info;
-        if (localtime_r(&seconds, &tm_info) == NULL) {
-            LOG_E( "localtime_r error\n");
-            goto error;
+        if (exp_ns == -1) {
+            LOG_D("IP %-15s  Permanent block\n", ip_str);
+            if (sb_append(&buf, &off, &cap,"IP %-15s  Permanent block\n",ip_str) < 0)
+                goto error;
         }
+        
+        else {
+            double remain = exp_ns > t_now ? (double)(exp_ns - t_now) / 1e9 : 0.0;
 
-        strftime(ts_str, sizeof ts_str, "%Y-%m-%d %H:%M:%S", &tm_info);
-        LOG_D("IP %-15s  expires_at=%s  (~%.3f s left)\n",
-           ip_str, ts_str, remain);
+            /* ---------- NEW: convert ns → human timestamp -------------------- */
+            __u64 real_time_ns = exp_ns + time_offset_ns;
+            /* Apply timezone offset (CST = UTC+8) */
+            real_time_ns += tz_offset_sec * ONE_SECOND_NS;
+            time_t seconds = real_time_ns / ONE_SECOND_NS;
 
-        if (sb_append(&buf, &off, &cap,"IP %-15s  expires_at=%s  (~%.3f s left)\n",ip_str, ts_str, remain) < 0)
-            goto error;
+            struct tm tm_info;
+            if (localtime_r(&seconds, &tm_info) == NULL) {
+                LOG_E( "localtime_r error\n");
+                goto error;
+            }
 
+            strftime(ts_str, sizeof ts_str, "%Y-%m-%d %H:%M:%S", &tm_info);
+            LOG_D("IP %-15s  expires_at=%s  (~%.3f s left)\n",
+            ip_str, ts_str, remain);
+
+            if (sb_append(&buf, &off, &cap,"IP %-15s  expires_at=%s  (~%.3f s left)\n",ip_str, ts_str, remain) < 0)
+                goto error;
+            
+        }
         memcpy(key, next, info.key_size);
     } while (!bpf_map_get_next_key(blocked_ips_fd, key, next));
 
@@ -1633,7 +1641,14 @@ int add_block_ip(char *ip, int seconds) {
                           ? now_ns() + global_fw_config.g_config.black_ip_duration 
                           : now_ns() + seconds * ONE_SECOND_NS;
 
-    
+    if (seconds == 0) { // Deault duration
+        expire_duration = now_ns() + global_fw_config.g_config.black_ip_duration;
+    } else if (seconds == -1) { // Permanent duration
+        expire_duration = -1;
+    } else { //Manual set duration
+        expire_duration = now_ns() + seconds * ONE_SECOND_NS;
+    }
+
     __u32 key;
     if (inet_pton(AF_INET, ip, &key) != 1) {
         LOG_E( "Invalid IP address: %s\n", ip);
