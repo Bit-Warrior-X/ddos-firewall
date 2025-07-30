@@ -162,13 +162,12 @@ static void handle_clear_deny_ip(int cfd, char **argv, int argc) {
     int ret = -1;
 
     ret = clear_deny_ip(argv[1]);
-    if (ret == 0) {
-        reply(cfd, "OK %s removed\n", argv[1]);
-    } else if (ret == -ENOENT){
-        reply(cfd, "OK! But ip %s was not registered\n", argv[1]);
-    } else {
-        reply(cfd, "Failed! Clear IP %s is failed\n", argv[1]);
-    }
+    if (ret == 0)
+        reply(cfd, "ok\nsuccess\n");
+    else if (ret == -ENOENT)
+        reply(cfd, "ok\nBut ip %s was not registered\n", argv[1]);
+    else
+        reply(cfd, "failed\nError occured while removing %s in blacklist\n", argv[1]);
 }
 
 static void handle_clear_deny_ip_all(int cfd, char **argv, int argc) {
@@ -188,21 +187,20 @@ static void handle_add_block_ip(int cfd, char **argv, int argc) {
     const char *ip = argv[1];
     int secs = (argc == 3) ? atoi(argv[2]) : 0; // default duration
 
+#if 0
     if (secs < 0) {
         reply(cfd, "Failed! Duration should be greater than 0 seconds\n");
         return;
     }
+#endif
 
     int ret = -1;
     ret = add_block_ip(argv[1], secs);
-    
-    if (ret == 0)
-        reply(cfd, "OK %s blacklisted for %d s\n", ip, secs);
-    else if (ret == 1) {
-        reply(cfd, "OK %s is overwritten and set blacklisted for %d s\n", ip, secs);
-    } else {
-        reply(cfd, "Failed! Add %s to blacklist is failed\n", ip);
-    }
+
+    if (ret == 0 || ret == 1)
+        reply(cfd, "ok\n%s is added in block list\n", argv[1]);
+    else
+        reply(cfd, "failed\nError occured while adding %s to blacklist\n", ip);
 }
 
 
@@ -238,10 +236,11 @@ static void handle_clear_allow_ip_all(int cfd, char **argv, int argc) {
 static void handle_add_allow_ip(int cfd, char **argv, int argc) {
     if (argc != 2) { reply(cfd, "ERR usage: ADD_ALLOW_IP <ip>\n"); return; }
     int ret = add_allow_ip(argv[1]);
+    
     if (ret == 0)
-        reply(cfd, "OK %s whitelisted\n", argv[1]);
+        reply(cfd, "ok\n%s is added in allow list\n", argv[1]);
     else
-        reply(cfd, "Failed! Add %s to whitelist failed\n", argv[1]);
+        reply(cfd, "failed\nError occured while adding %s to allow list\n", argv[1]);
 }
 
 

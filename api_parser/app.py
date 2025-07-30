@@ -25,8 +25,8 @@ def parse_cli_output(output):
     if not lines:
         return {'status': 'error', 'message': 'Empty response from command'}
     
-    if lines[0] == 'ok' and len(lines) > 1 and lines[1] == 'success':
-        return {'status': 'success', 'message': 'Operation completed successfully'}
+    if lines[0] == 'ok' and len(lines) > 1:
+        return {'status': 'success', 'message': '\n'.join(lines[1:])}
     elif lines[0] == 'failed' and len(lines) > 1:
         return {'status': 'error', 'message': '\n'.join(lines[1:])}
     else:
@@ -318,11 +318,10 @@ def add_block_ip():
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
     print (data)
-    
-    command_args = ['l4_firewall_cli', 'BLOCK_IP', '--ip', data['ip']]
+    command_args = ['l4_firewall_cli', 'ADD_BLOCK_IP', data['ip']]
     
     if 'duration' in data:
-        command_args.extend(['--duration', str(data['duration'])])
+        command_args.extend([str(data['duration'])])
     
     print (command_args)
     
@@ -340,7 +339,7 @@ def remove_block_ip():
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
     print (data)
-    command_args = ['l4_firewall_cli', 'UNBLOCK_IP', '--ip', data['ip']]
+    command_args = ['l4_firewall_cli', 'CLEAR_BLOCK_IP', data['ip']]
     print (command_args)
     parsed = execute_cli_command(command_args)
     if parsed['status'] == 'error':
@@ -366,9 +365,9 @@ def add_white_ip():
     data = request.json
     if 'ip' not in data:
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
-    
-    command_args = ['l4_firewall_cli', 'WHITELIST_IP', '--ip', data['ip']]
-    
+    print (data)
+    command_args = ['l4_firewall_cli', 'ADD_ALLOW_IP', data['ip']]
+    print (command_args)
     parsed = execute_cli_command(command_args)
     if parsed['status'] == 'error':
         return jsonify({"status": "error", "message": parsed['message']}), 400
