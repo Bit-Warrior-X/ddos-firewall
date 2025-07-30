@@ -1,0 +1,17 @@
+[Unit]
+Description=eBPF Firewall (Userspace)
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/usr/local/share/ebpf_firewall/
+ExecStart=/usr/local/share/ebpf_firewall/ebpf_firewall_userspace
+Restart=on-failure
+RestartSec=5
+Environment="LD_LIBRARY_PATH=/usr/local/lib"
+Environment="EBPF_FIREWALL_XDP_KO=/usr/local/share/ebpf_firewall/ebpf_firewall_kernel.o"
+Environment="EBPF_FIREWALL_XDP_CONFIG=/usr/local/share/ebpf_firewall/firewall.config"
+
+[Install]
+WantedBy=multi-user.target

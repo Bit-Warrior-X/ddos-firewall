@@ -1,0 +1,15 @@
+[Unit]
+Description=eBPF Firewall Prometheus
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/var/backup/xdp
+ExecStart=/var/backup/xdp/ebpf_firewall_prom
+Restart=on-failure
+RestartSec=5
+Environment="LD_LIBRARY_PATH=/usr/local/lib"
+
+[Install]
+WantedBy=multi-user.target
