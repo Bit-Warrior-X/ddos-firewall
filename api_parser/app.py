@@ -389,5 +389,40 @@ def remove_white_ip():
     
     return jsonify({"status": "success", "message": parsed['message']})
 
+# get config
+@app.route('/API/get_config', methods=['POST'])
+@token_required
+def get_config():
+    config_path = '/usr/local/share/ebpf_firewall/firewall.config'
+    
+    try:
+        # Read the config file
+        with open(config_path, 'r') as f:
+            config_content = f.read()
+        
+        return jsonify({
+            "status": "success",
+            "config": config_content
+        })
+    
+    except FileNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": f"Config file not found at {config_path}"
+        }), 404
+    
+    except PermissionError:
+        return jsonify({
+            "status": "error",
+            "message": f"Permission denied when accessing {config_path}"
+        }), 403
+    
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Failed to read config file: {str(e)}"
+        }), 500
 if __name__ == '__main__':
     app.run(host=SERVER_IP, port=SERVER_PORT, debug=True)
+    
+    
