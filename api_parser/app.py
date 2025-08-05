@@ -8,7 +8,109 @@ app = Flask(__name__)
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
+BLOCKLIST_API_URL = "http://backend/API/L4/get_blocklist_ips"
+WHITELIST_API_URL = "http://backend/API/L4/get_whitelist_ips"
+FIRWALL_DB_NAME = "firewall_control.db"
 
+
+def create_table():
+    """Create SQLite database and table for blocklist if they don't exist"""
+    conn = sqlite3.connect(FIRWALL_DB_NAME)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS blocked_ips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT NOT NULL,
+        type TEXT NOT NULL,
+        duration TEXT,
+        reason TEXT,
+        created TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS white_ips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT NOT NULL,
+        reason TEXT,
+        created TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+    
+def fetch_and_store_blocklist(token):
+    """Fetch blocklist from API and store in database"""
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'}
+    data = {'token': token}
+    
+    try:
+        response = requests.post(BLOCKLIST_API_URL, headers=headers, json=data)
+        response.raise_for_status()
+        blocklist_data = response.json()
+        
+        conn = sqlite3.connect(FIRWALL_DB_NAME)
+        cursor = conn.cursor()
+        
+        # Clear existing entries (optional - you might want to keep history)
+        cursor.execute('DELETE FROM blocked_ips')
+        
+        for entry in blocklist_data:
+            cursor.execute('''
+            INSERT INTO blocked_ips (ip, type, duration, reason, created)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (
+                entry.get('IP', ''),
+                entry.get('TYPE', ''),
+                None if entry.get('Duration') == 'Permanent' else entry.get('Duration'),
+                entry.get('Reason', ''),
+                entry.get('Created', '')
+            ))
+        
+        conn.commit()
+        return True, f"Successfully stored {len(blocklist_data)} blocked IPs"
+    except Exception as e:
+        return False, f"Error processing blocklist: {str(e)}"
+    finally:
+        conn.close()
+
+def fetch_and_store_whitelist(token):
+    """Fetch whitelist from API and store in database"""
+    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'}
+    data = {'token': token}
+    
+    try:
+        response = requests.post(WHITELIST_API_URL, headers=headers, json=data)
+        response.raise_for_status()
+        whitelist_data = response.json()
+        
+        conn = sqlite3.connect(FIRWALL_DB_NAME)
+        cursor = conn.cursor()
+        
+        # Clear existing entries (optional - you might want to keep history)
+        cursor.execute('DELETE FROM white_ips')
+        
+        for entry in whitelist_data:
+            cursor.execute('''
+            INSERT INTO white_ips (ip, reason, created)
+            VALUES (?, ?, ?, ?, ?)
+            ''', (
+                entry.get('IP', ''),
+                entry.get('Reason', ''),
+                entry.get('Created', '')
+            ))
+        
+        conn.commit()
+        return True, f"Successfully stored {len(whitelist_data)} white IPs"
+    except Exception as e:
+        return False, f"Error processing whitelist: {str(e)}"
+    finally:
+        conn.close()
+                
 # Helper decorator for token authentication
 def token_required(f):
     @wraps(f)
@@ -75,6 +177,24 @@ def firewall_main():
     attach_mode = data.get('attach_mode', 'native')
     command_args = ['l4_firewall_cli', actions[action], interface, attach_mode]
     
+    # Initialize database and fetch blocklist for start/restart actions
+    if action in ['start', 'restart']:
+        create_table()
+        success, message = fetch_and_store_blocklist(token)
+        if not success:
+            return jsonify({
+                "status": "error",
+                "message": f"Firewall {action} failed during blocklist processing",
+                "details": message
+            }), 500
+        success, message = fetch_and_store_whitelist(token)
+        if not success:
+            return jsonify({
+                "status": "error",
+                "message": f"Firewall {action} failed during whitelist processing",
+                "details": message
+            }), 500
+            
     parsed = execute_cli_command(command_args)
     if parsed['status'] == 'error':
         return jsonify({
@@ -85,14 +205,30 @@ def firewall_main():
             "output": parsed.get('output', '')
         }), 400
     
-    return jsonify({
+    response = {
         "status": "success",
         "action": action,
         "command": ' '.join(command_args),
         "message": parsed['message'],
         "interface": interface,
         "attach_mode": attach_mode
-    })
+    }
+        
+    # Add blocklist/Whitelist info if this was a start/restart
+    if action in ['start', 'restart']:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM blocked_ips')
+        blockcount = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM white_ips')
+        whitecount = cursor.fetchone()[0]
+        conn.close()
+        response['blocklist_loaded'] = True
+        response['blocklist_count'] = blockcount
+        response['whitelist_loaded'] = True
+        response['whitelist_count'] = whitecount
+        
+    return jsonify(response)
 
 # TCP SYN Protection
 @app.route('/API/L4/tcp_syn', methods=['POST'])
