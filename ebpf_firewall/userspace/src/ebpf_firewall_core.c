@@ -1546,7 +1546,7 @@ int list_block_ip(char **out) {
 
     const __u64 t_now = now_ns();
     char ip_str[INET_ADDRSTRLEN];
-    char ts_str[32];
+    char ts_str[80];
 
     do {
         if (bpf_map_lookup_elem(blocked_ips_fd, next, val)) {
@@ -1567,7 +1567,7 @@ int list_block_ip(char **out) {
         
         else {
             double remain = exp_ns > t_now ? (double)(exp_ns - t_now) / 1e9 : 0.0;
-
+#if 0
             /* ---------- NEW: convert ns → human timestamp -------------------- */
             __u64 real_time_ns = exp_ns + time_offset_ns;
             /* Apply timezone offset (CST = UTC+8) */
@@ -1581,6 +1581,18 @@ int list_block_ip(char **out) {
             }
 
             strftime(ts_str, sizeof ts_str, "%Y-%m-%d %H:%M:%S", &tm_info);
+#endif
+            time_t rawtime;
+            time(&rawtime); // Get current time in seconds since epoch
+            rawtime += remain;
+
+            struct tm *utc_time = gmtime(&rawtime);
+            if (utc_time == NULL) {
+                LOG_E( "gmtime error\n");
+                goto error;
+            }
+            strftime(ts_str, sizeof(ts_str), "%Y-%m-%d %H:%M:%S UTC", utc_time);
+
             LOG_D("IP %-15s  expires_at=%s  (~%.3f s left)\n",
             ip_str, ts_str, remain);
 

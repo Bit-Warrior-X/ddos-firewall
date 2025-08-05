@@ -4,6 +4,9 @@
 #include <ebpf_firewall_geo.h>
 #include <ebpf_firewall_core.h>
 
+#include <stdio.h>
+#include <sqlite3.h>
+
 // Global configuration
 char token[128];             // Token used for expiration check
 char ifname[IFNAMSIZ];       // Network interface name
@@ -112,6 +115,141 @@ static long get_timezone_offset() {
     return offset;
 }
 
+// Callback function for blocked_ips
+int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColName) {
+    struct bpf_object *obj = (struct bpf_object *)param_obj;
+    
+    LOG_D("Blocked IP Record:\n");
+
+    __u32 ip = 0, duration = 0;
+    __u64 created = 0;
+
+    for(int i = 0; i < argc; i++) {
+        LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+        if (strncmp(azColName[i], "ip", 2) == 0 && argv[i]) {
+            // Store IP address;
+            struct in_addr addr;
+            if (inet_pton(AF_INET, argv[i], &addr))
+                ip = addr.s_addr;
+        }
+        if (strncmp(azColName[i], "duration", 8) == 0 && argv[i]) {
+            // Store duration;
+            if (strncmp(argv[i], "Permanent", strlen("Permanent")) == 0 || strncmp(argv[i], "permanent", strlen("permanent")) == 0) duration = -1;
+            else duration = atoi(argv[i]);
+        }
+        if (strncmp(azColName[i], "created", 7) == 0 && argv[i]) {
+            // Store created;
+            struct tm tm = {0};
+            int yr, mo, dy, hr, mi, sec;
+            if (sscanf(argv[i], "%4d-%2d-%2d %2d:%2d:%2d",
+                    &yr, &mo, &dy, &hr, &mi, &sec) == 6)
+            {
+                struct tm tm = { .tm_year = yr - 1900,
+                                .tm_mon  = mo  - 1,
+                                .tm_mday = dy,
+                                .tm_hour = hr,
+                                .tm_min  = mi,
+                                .tm_sec  = sec };
+                created = timegm(&tm);
+            }
+        }
+    }
+
+    if (ip != 0 && created != 0) {
+        LOG_D("ip = %X, duration = %d, created = %ld\n", ip, duration, created);
+        int blocked_ips_fd;
+        blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
+        if (blocked_ips_fd < 0) {
+            LOG_E( "Failed to find blocked_ips\n");
+            return -1;
+        }
+        
+        __u64 expire_duration;
+        if (duration == -1) expire_duration = -1;
+        else {
+            struct tm tm;
+            time_t t = time(NULL);
+            gmtime_r(&t, &tm);  // Thread-safe UTC conversion
+            __u64 current_epoch = timegm(&tm);  // Direct UTC conversion (non-standard but widely available)
+
+            if (created + duration <= current_epoch) return 0;
+            __u64 seconds =  created + duration - current_epoch;
+            if (seconds < 0) return 0;
+            
+            LOG_D("expect seconds is %d\n", seconds);
+
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            __u64 nowns = (__u64)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+
+            expire_duration = nowns + seconds * ONE_SECOND_NS;
+        }
+
+        bpf_map_update_elem(blocked_ips_fd, &ip, &expire_duration, BPF_ANY);
+    }
+    
+    return 0;
+}
+
+// Callback function for white_ips
+int white_ips_callback(void *param_obj, int argc, char **argv, char **azColName) {
+    struct bpf_object *obj = (struct bpf_object *)param_obj;
+    
+    LOG_D("Whitelisted IP Record:\n");
+    for(int i = 0; i < argc; i++) {
+        LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+        if (strncmp(azColName[i], "ip", 2) == 0 && argv[i]) {
+            // Store IP address;
+        }
+        if (strncmp(azColName[i], "created", 7) == 0 && argv[i]) {
+            // Store created;
+        }
+    }
+    return 0;
+}
+
+static int load_block_white_list(struct bpf_object *obj) {
+    sqlite3 *db;
+    char *err_msg = 0;
+    int rc;
+    
+    // Open database connection
+    rc = sqlite3_open(SQLITE_DB_NAME, &db);
+    
+    if (rc != SQLITE_OK) {
+        LOG_E("Cannot open database: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return -1;
+    }
+    
+    // Read from blocked_ips table
+    char *sql_blocked = "SELECT * FROM blocked_ips;";
+    
+    LOG_D("Reading blocked IPs...\n");
+    rc = sqlite3_exec(db, sql_blocked, blocked_ips_callback, obj, &err_msg);
+    
+    if (rc != SQLITE_OK) {
+        LOG_E("SQL error (blocked_ips): %s\n", err_msg);
+        sqlite3_free(err_msg);
+        return -1;
+    }
+    
+    // Read from white_ips table
+    char *sql_white = "SELECT * FROM white_ips;";
+    
+    LOG_D("Reading whitelisted IPs...\n");
+    rc = sqlite3_exec(db, sql_white, white_ips_callback, obj, &err_msg);
+    
+    if (rc != SQLITE_OK) {
+        LOG_E("SQL error (white_ips): %s\n", err_msg);
+        sqlite3_free(err_msg);
+    }
+    
+    // Close database connection
+    sqlite3_close(db);
+    
+    return 0;
+}
 
 /* 
  * Initialize the time offset:
@@ -450,6 +588,11 @@ int load_config(struct bpf_object *obj) {
             LOG_E("Failed to update geoip_trie_map");
             return -1;
         }
+    }
+
+    if (load_block_white_list(obj) < 0) {
+        LOG_E("Failed to load white/block list ips from sqlite db");
+        return -1;
     }
 
     LOG_I("Setup config success\n");

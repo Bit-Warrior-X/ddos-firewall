@@ -46,7 +46,7 @@ USR_INC_DIR  := userspace/include
 INSTALL_DIR := /usr/local/share/ebpf_firewall
 
 # Libraries
-USR_LIBS     := -lbpf -lxdp -lnetfilter_conntrack -lpthread -lcrypto
+USR_LIBS     := -lbpf -lxdp -lnetfilter_conntrack -lpthread -lcrypto -lsqlite3
 USR_PROMLIBS := -lprom -lpromhttp -lmicrohttpd -pthread
 
 
