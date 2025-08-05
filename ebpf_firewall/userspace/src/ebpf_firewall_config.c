@@ -196,15 +196,47 @@ int white_ips_callback(void *param_obj, int argc, char **argv, char **azColName)
     struct bpf_object *obj = (struct bpf_object *)param_obj;
     
     LOG_D("Whitelisted IP Record:\n");
+     __u32 ip = 0;
+    __u64 created = 0;
+
     for(int i = 0; i < argc; i++) {
         LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
         if (strncmp(azColName[i], "ip", 2) == 0 && argv[i]) {
             // Store IP address;
+            struct in_addr addr;
+            if (inet_pton(AF_INET, argv[i], &addr))
+                ip = addr.s_addr;
         }
         if (strncmp(azColName[i], "created", 7) == 0 && argv[i]) {
             // Store created;
+            struct tm tm = {0};
+            int yr, mo, dy, hr, mi, sec;
+            if (sscanf(argv[i], "%4d-%2d-%2d %2d:%2d:%2d",
+                    &yr, &mo, &dy, &hr, &mi, &sec) == 6)
+            {
+                struct tm tm = { .tm_year = yr - 1900,
+                                .tm_mon  = mo  - 1,
+                                .tm_mday = dy,
+                                .tm_hour = hr,
+                                .tm_min  = mi,
+                                .tm_sec  = sec };
+                created = timegm(&tm);
+            }
         }
     }
+
+    if (ip != 0 && created != 0) {
+        LOG_D("ip = %X created = %ld\n", ip, created);
+        int white_ips_fd;
+        white_ips_fd = bpf_object__find_map_fd_by_name(obj, "allowed_ips");
+        if (white_ips_fd < 0) {
+            LOG_E( "Failed to find allow_ips\n");
+            return -1;
+        }
+        __u8 val = 1;
+        bpf_map_update_elem(white_ips_fd, &ip, &val, BPF_ANY);
+    }
+
     return 0;
 }
 
