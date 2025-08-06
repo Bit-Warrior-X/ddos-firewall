@@ -155,7 +155,7 @@ int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColNam
         }
     }
 
-    if (ip != 0 && created != 0) {
+    if (ip != 0) {
         LOG_D("ip = %X, duration = %d, created = %ld\n", ip, duration, created);
         int blocked_ips_fd;
         blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
@@ -225,7 +225,7 @@ int white_ips_callback(void *param_obj, int argc, char **argv, char **azColName)
         }
     }
 
-    if (ip != 0 && created != 0) {
+    if (ip != 0) {
         LOG_D("ip = %X created = %ld\n", ip, created);
         int white_ips_fd;
         white_ips_fd = bpf_object__find_map_fd_by_name(obj, "allowed_ips");
