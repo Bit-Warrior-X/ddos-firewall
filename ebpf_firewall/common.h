@@ -10,7 +10,7 @@
 //#define CONFIG_FILE                 "firewall.config"
 #define XDP_CORE_FILE               "EBPF_FIREWALL_XDP_KO"
 #define CONFIG_FILE                 "EBPF_FIREWALL_XDP_CONFIG"
-#define SQLITE_DB_NAME              "firewall_control.db"
+#define SQLITE_DB_NAME              "/usr/local/share/ebpf_firewall/firewall_control.db"
 #define SOCK_PATH                   "/tmp/ebpf_fw.sock"
 
 #define ONE_SECOND_NS               1000000000ULL

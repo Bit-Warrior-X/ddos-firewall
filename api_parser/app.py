@@ -1,6 +1,8 @@
+import requests
 from flask import Flask, request, jsonify
 from functools import wraps
 import subprocess
+import sqlite3
 
 app = Flask(__name__)
 
@@ -8,9 +10,9 @@ app = Flask(__name__)
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
-BLOCKLIST_API_URL = "http://backend/API/L4/get_blocklist_ips"
-WHITELIST_API_URL = "http://backend/API/L4/get_whitelist_ips"
-FIRWALL_DB_NAME = "firewall_control.db"
+BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_blocklist_ips"
+WHITELIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_whitelist_ips"
+FIRWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
 
 
 def create_table():
@@ -23,7 +25,7 @@ def create_table():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ip TEXT NOT NULL,
         type TEXT NOT NULL,
-        duration TEXT,
+        duration INTEGER,
         reason TEXT,
         created TEXT,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -45,43 +47,66 @@ def create_table():
     
 def fetch_and_store_blocklist(token):
     """Fetch blocklist from API and store in database"""
-    headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'}
+    headers = {'Content-Type': 'application/json'}
     data = {'token': token}
+    conn = None
     
     try:
+        # Make API request
         response = requests.post(BLOCKLIST_API_URL, headers=headers, json=data)
         response.raise_for_status()
         blocklist_data = response.json()
         
+        # Connect to database
         conn = sqlite3.connect(FIRWALL_DB_NAME)
         cursor = conn.cursor()
         
-        # Clear existing entries (optional - you might want to keep history)
+        # Create table if not exists (added this for robustness)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS blocked_ips (
+            ip TEXT,
+            type TEXT,
+            duration INTEGER,
+            reason TEXT,
+            created TEXT,
+            UNIQUE(ip, reason)
+        )
+        ''')
+        
+        # Clear existing entries
         cursor.execute('DELETE FROM blocked_ips')
         
+        # Insert new entries
         for entry in blocklist_data:
             cursor.execute('''
-            INSERT INTO blocked_ips (ip, type, duration, reason, created)
+            INSERT OR IGNORE INTO blocked_ips (ip, type, duration, reason, created)
             VALUES (?, ?, ?, ?, ?)
             ''', (
-                entry.get('IP', ''),
-                entry.get('TYPE', ''),
-                None if entry.get('Duration') == 'Permanent' else entry.get('Duration'),
+                entry.get('IP'),
+                entry.get('TYPE'),
+                entry.get('Duration', -1),  # Default to -1 (Permanent) if not specified
                 entry.get('Reason', ''),
                 entry.get('Created', '')
             ))
         
         conn.commit()
         return True, f"Successfully stored {len(blocklist_data)} blocked IPs"
+    
+    except requests.exceptions.RequestException as e:
+        return False, f"API request failed: {str(e)}"
+    except sqlite3.Error as e:
+        return False, f"Database error: {str(e)}"
     except Exception as e:
         return False, f"Error processing blocklist: {str(e)}"
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 def fetch_and_store_whitelist(token):
     """Fetch whitelist from API and store in database"""
     headers = {'Content-Type': 'application/json', 'Authorization': f'Bearer {token}'}
     data = {'token': token}
+    conn = None  # Initialize conn as None
     
     try:
         response = requests.post(WHITELIST_API_URL, headers=headers, json=data)
@@ -97,7 +122,7 @@ def fetch_and_store_whitelist(token):
         for entry in whitelist_data:
             cursor.execute('''
             INSERT INTO white_ips (ip, reason, created)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?)
             ''', (
                 entry.get('IP', ''),
                 entry.get('Reason', ''),
@@ -109,7 +134,8 @@ def fetch_and_store_whitelist(token):
     except Exception as e:
         return False, f"Error processing whitelist: {str(e)}"
     finally:
-        conn.close()
+        if conn is not None:  # Only close if connection was established
+            conn.close()
                 
 # Helper decorator for token authentication
 def token_required(f):
@@ -180,14 +206,15 @@ def firewall_main():
     # Initialize database and fetch blocklist for start/restart actions
     if action in ['start', 'restart']:
         create_table()
-        success, message = fetch_and_store_blocklist(token)
+        user_token = data['token']
+        success, message = fetch_and_store_blocklist(user_token)
         if not success:
             return jsonify({
                 "status": "error",
                 "message": f"Firewall {action} failed during blocklist processing",
                 "details": message
             }), 500
-        success, message = fetch_and_store_whitelist(token)
+        success, message = fetch_and_store_whitelist(user_token)
         if not success:
             return jsonify({
                 "status": "error",
@@ -216,7 +243,7 @@ def firewall_main():
         
     # Add blocklist/Whitelist info if this was a start/restart
     if action in ['start', 'restart']:
-        conn = sqlite3.connect(DB_NAME)
+        conn = sqlite3.connect(FIRWALL_DB_NAME)
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM blocked_ips')
         blockcount = cursor.fetchone()[0]
