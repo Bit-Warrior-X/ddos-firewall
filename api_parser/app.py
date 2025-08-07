@@ -543,9 +543,9 @@ def remove_white_ip():
     data = request.json
     if 'ip' not in data:
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
-    
-    command_args = ['l4_firewall_cli', 'UNWHITELIST_IP', '--ip', data['ip']]
-    
+    print (data)
+    command_args = ['l4_firewall_cli', 'CLEAR_ALLOW_IP', data['ip']]
+    print (command_args)
     parsed = execute_cli_command(command_args)
     if parsed['status'] == 'error':
         return jsonify({"status": "error", "message": parsed['message']}), 400
@@ -585,6 +585,17 @@ def get_config():
             "status": "error",
             "message": f"Failed to read config file: {str(e)}"
         }), 500
+        
+@app.route('/API/health_check', methods=['POST'])
+@token_required
+def health_check():
+    command_args = ['l4_firewall_cli', 'HEALTH_CHECK']
+    print(command_args)
+    parsed = execute_cli_command(command_args)
+    if parsed['status'] == 'error':
+        return jsonify({"status": "error", "message": parsed['message']})
+    
+    return jsonify({"status": "success", "message": parsed['message']})
 if __name__ == '__main__':
     app.run(host=SERVER_IP, port=SERVER_PORT, debug=True)
     

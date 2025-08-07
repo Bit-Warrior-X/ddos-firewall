@@ -44,7 +44,9 @@ static void usage(void) {
 "  LIST_ALLOW_IP : Dump whitelist ip list\n"
 "  CLEAR_ALLOW_IP <ip> : Remove ip from whitelist\n"
 "  CLEAR_ALLOW_IP_ALL : Remove all ips from blacklist\n"
-"  ADD_ALLOW_IP <ip> : Add ip to whitelist.\n", stderr);
+"  ADD_ALLOW_IP <ip> : Add ip to whitelist.\n"
+"  HEALTH_CHECK : Check the health status of ebpf-firewall\n"
+, stderr);
     exit(EXIT_FAILURE);
 }
 
@@ -458,7 +460,7 @@ static int send_and_print(const char *msg) {
     struct sockaddr_un addr = { .sun_family = AF_UNIX };
     strncpy(addr.sun_path, SOCK_PATH, sizeof addr.sun_path - 1);
     if (connect(fd, (struct sockaddr *)&addr, sizeof addr) == -1) {
-        fprintf(stderr, "failed\nFirewall is not running\n");
+        printf("failed\nFirewall is not running\n");
         close(fd); return 2;
     }
 
