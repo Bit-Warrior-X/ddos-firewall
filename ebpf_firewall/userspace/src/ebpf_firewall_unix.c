@@ -252,7 +252,7 @@ static void handle_tcp_syn_set(int cfd, char **argv, int argc) {
 
     int ret = tcp_syn_set(tcp_syn_valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -265,7 +265,7 @@ static void handle_tcp_ack_set(int cfd, char **argv, int argc) {
 
     int ret = tcp_ack_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -278,7 +278,7 @@ static void handle_tcp_rst_set(int cfd, char **argv, int argc) {
 
     int ret = tcp_rst_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -291,7 +291,7 @@ static void handle_icmp_set(int cfd, char **argv, int argc) {
 
     int ret = icmp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -304,7 +304,7 @@ static void handle_udp_set(int cfd, char **argv, int argc) {
 
     int ret = udp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -317,7 +317,7 @@ static void handle_gre_set(int cfd, char **argv, int argc) {
 
     int ret = gre_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -330,7 +330,7 @@ static void handle_tcp_set_seg(int cfd, char **argv, int argc) {
 
     int ret = tcp_seg_set(valid);
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -343,7 +343,7 @@ static void handle_set_geo(int cfd, char **argv, int argc) {
 
     int ret = geo_set(valid, argv[2]);
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
@@ -356,11 +356,14 @@ static void handle_set_conn_limit(int cfd, char **argv, int argc) {
 
     int ret = tcp_conn_limit_set(valid, atoi(argv[2]));
     if (ret == 0)
-        reply(cfd, "ok\nsuccess\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
 
+static void handle_health_check(int cfd, char **argv, int argc) {
+    reply(cfd, "ok\nsuccess\n");
+}
 /* Table‐driven dispatch */
 struct cmd_entry { const char *name; void (*fn)(int,char**,int); };
 static const struct cmd_entry cmds[] = {
@@ -384,7 +387,8 @@ static const struct cmd_entry cmds[] = {
     {"GRE",    handle_gre_set},
     {"SET_TCP_SEG", handle_tcp_set_seg},
     {"SET_GEO", handle_set_geo},
-    {"SET_CONN_LIMIT", handle_set_conn_limit}
+    {"SET_CONN_LIMIT", handle_set_conn_limit},
+    {"HEALTH_CHECK", handle_health_check}
 };
 
 static void dispatch(int cfd, char *line) {
