@@ -4,6 +4,7 @@
 #include <ebpf_firewall_config.h>
 #include <ebpf_firewall_conntrack.h>
 #include <ebpf_firewall_geo.h>
+#include <ebpf_firewall_core.h>
 
 #include <arpa/inet.h> 
 #include <netinet/in.h> 
@@ -11,6 +12,7 @@
 #include <openssl/evp.h>
 #include <openssl/err.h>
 #include <base64.h>
+#include <fcntl.h>
 
 extern char token[128];             // Token used for expiration check
 extern char ifname[IFNAMSIZ];       // Network interface name
@@ -795,6 +797,43 @@ static void * fixed_ip_ringbuf_poll_worker(void * arg)
     return NULL;
 }
 
+
+static void * send_check_blocklist_worker(void * arg)
+{
+    int err;
+    
+    int signal_sent = 0;
+    // Wait until terminated.
+    while (!exiting) {
+        struct global_attack_stats * g_attack_stats = &global_fw_config.g_attack_stats;
+        if ((g_attack_stats->syn_attack || 
+            g_attack_stats->ack_attack || 
+            g_attack_stats->rst_attack ||
+            g_attack_stats->icmp_attack ||
+            g_attack_stats->udp_attack ||
+            g_attack_stats->gre_attack) && signal_sent == 0) {
+                const char * message = "command:check_blocklist\nstatus:start\n";
+                send_message_to_api_parser(message);
+                signal_sent = 1;
+        }
+
+        if ((g_attack_stats->syn_attack == 0 && 
+            g_attack_stats->ack_attack == 0 && 
+            g_attack_stats->rst_attack == 0 &&
+            g_attack_stats->icmp_attack == 0  &&
+            g_attack_stats->udp_attack == 0 &&
+            g_attack_stats->gre_attack == 0) && signal_sent == 1) {
+                const char * message = "command:check_blocklist\nstatus:stop\n";
+                send_message_to_api_parser(message);
+                signal_sent = 0;
+        }
+
+        sleep(1);
+    }
+
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     
     int ifindex, err;
@@ -1015,6 +1054,12 @@ int main(int argc, char **argv) {
     pthread_t fixed_ip_ringbuf_thr;
     if (pthread_create(&fixed_ip_ringbuf_thr, NULL, fixed_ip_ringbuf_poll_worker, fixed_ip_ringbuf) != 0) {
         LOG_E("pthread_create for fixed_ip_ringbuf_thr %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    pthread_t send_check_blocklist_thr;
+    if (pthread_create(&send_check_blocklist_thr, NULL, send_check_blocklist_worker, NULL) != 0) {
+        LOG_E("pthread_create for send_check_blocklist_thr %s\n", strerror(errno));
         goto cleanup;
     }
 
