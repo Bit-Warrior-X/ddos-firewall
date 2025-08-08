@@ -3,17 +3,28 @@ from flask import Flask, request, jsonify
 from functools import wraps
 import subprocess
 import sqlite3
+import os
+import threading
+import time
+import base64
+from collections import defaultdict
+from typing import Dict, Any, List, Optional
 
 app = Flask(__name__)
 
 # Configuration
+FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
+FIRWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
+
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
 BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_blocklist_ips"
 WHITELIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_whitelist_ips"
-FIRWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
+REPORT_LOG_API_URL = "https://login.dnscrxyz.com/api/l4/report_log"
+CHECK_BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/check_blocklist"
 
+user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
 def create_table():
     """Create SQLite database and table for blocklist if they don't exist"""
@@ -552,6 +563,30 @@ def remove_white_ip():
     
     return jsonify({"status": "success", "message": parsed['message']})
 
+
+def encode_base64(data):
+    """
+    Encodes the given data (string or bytes) to Base64.
+    
+    Args:
+        data: Input data to be encoded (string or bytes)
+        
+    Returns:
+        Base64 encoded string
+    """
+    if isinstance(data, str):
+        # Convert string to bytes using UTF-8 encoding
+        data_bytes = data.encode('utf-8')
+    else:
+        # Assume it's already bytes
+        data_bytes = data
+    
+    # Encode to Base64 bytes, then decode to string
+    encoded_bytes = base64.b64encode(data_bytes)
+    encoded_str = encoded_bytes.decode('utf-8')
+    
+    return encoded_str
+
 # get config
 @app.route('/API/get_config', methods=['POST'])
 @token_required
@@ -562,10 +597,11 @@ def get_config():
         # Read the config file
         with open(config_path, 'r') as f:
             config_content = f.read()
-        
+            
+        encoded_bytes = encode_base64(config_content)
         return jsonify({
             "status": "success",
-            "config": config_content
+            "config": encoded_bytes
         })
     
     except FileNotFoundError:
@@ -596,7 +632,115 @@ def health_check():
         return jsonify({"status": "error", "message": parsed['message']})
     
     return jsonify({"status": "success", "message": parsed['message']})
+
+def send_http_request(url: str, payload: Optional[Dict[str, Any]] = None) -> requests.Response:
+    """Sends HTTP POST request with JSON payload."""
+    headers = {'Content-Type': 'application/json'}
+    
+    # Ensure payload is a dictionary and create a safe copy
+    request_payload = dict(payload) if payload is not None else {}
+    
+    # Add token (ensure it's a string, not a set)
+    if isinstance(user_token, set):
+        request_payload['token'] = next(iter(user_token))  # Get first element if it's a set
+    else:
+        request_payload['token'] = str(user_token)
+    
+    try:
+        response = requests.post(
+            url,
+            headers=headers,
+            json=request_payload,
+            timeout=5
+        )
+        response.raise_for_status()
+        print(f"[HTTP] Success: {response.status_code} - {response.text}")
+        return response
+    except requests.exceptions.RequestException as e:
+        print(f"[HTTP] Error: {e}")
+        raise
+
+def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
+    """Parses raw FIFO data into command dictionaries."""
+    commands = []
+    current_command = {}
+    
+    for line in raw_data.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+            
+        if ':' in line:
+            key, value = line.split(':', 1)
+            key = key.strip().lower()
+            value = value.strip()
+            
+            if key == 'command':
+                if current_command:
+                    commands.append(current_command)
+                current_command = {'command': value}
+            else:
+                current_command[key] = value
+    
+    if current_command:
+        commands.append(current_command)
+    
+    return commands
+
+def process_command(cmd: Dict[str, str]) -> None:
+    """Processes a single command dictionary."""
+    try:
+        if cmd['command'] == 'report_log':
+            payload = {
+                'type': str(cmd.get('type', 'unknown')),
+                'data': str(cmd.get('data', ''))
+            }
+            send_http_request(REPORT_LOG_API_URL, payload)
+        elif cmd['command'] == 'check_blocklist':
+            # For check_blocklist, we just need to send the token
+            payload = {
+                'status': str(cmd.get('status', 'unknown'))
+            }
+            send_http_request(CHECK_BLOCKLIST_API_URL, payload)
+        else:
+            print(f"[API_PARSER] Unknown command: {cmd['command']}")
+    except Exception as e:
+        print(f"[API_PARSER] Error processing command {cmd}: {str(e)}")
+                
+def fifo_reader_thread() -> None:
+    """Main thread function that reads from FIFO and processes commands."""
+    if not os.path.exists(FIFO_PATH):
+        os.mkfifo(FIFO_PATH)
+    
+    print(f"[API_PARSER] FIFO listener started. Waiting for data at {FIFO_PATH}...")
+    
+    while True:
+        try:
+            with open(FIFO_PATH, 'r') as fifo:
+                while True:
+                    raw_data = fifo.read().strip()
+                    if raw_data:
+                        print(f"[API_PARSER] Received raw data:\n{raw_data}")
+                        for cmd in parse_fifo_message(raw_data):
+                            print(f"[API_PARSER] Processing command: {cmd}")
+                            process_command(cmd)
+        except (IOError, OSError) as e:
+            print(f"[API_PARSER] FIFO error: {str(e)}. Retrying in 1 second...")
+            time.sleep(1)
+                        
+def start_fifo_listener():
+    """Start the FIFO reader thread."""
+    thread = threading.Thread(target=fifo_reader_thread, daemon=True)
+    thread.start()
+    return thread
+
 if __name__ == '__main__':
+    fifo_thread = start_fifo_listener()
+    print(f"[API_PARSER] Running (PID: {os.getpid()})...")
+    
     app.run(host=SERVER_IP, port=SERVER_PORT, debug=True)
     
-    
+    print("\n[API_PARSER] Shutting down...")
+    if os.path.exists(FIFO_PATH):
+        os.unlink(FIFO_PATH)  # Clean up FIFO on exit
+

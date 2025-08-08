@@ -66,5 +66,7 @@ int geo_set(int valid,
 
 int tcp_conn_limit_set(int valid, 
             int count);            
+
+int send_message_to_api_parser(const char *message);
             
 #endif

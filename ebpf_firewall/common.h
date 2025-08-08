@@ -12,6 +12,7 @@
 #define CONFIG_FILE                 "EBPF_FIREWALL_XDP_CONFIG"
 #define SQLITE_DB_NAME              "/usr/local/share/ebpf_firewall/firewall_control.db"
 #define SOCK_PATH                   "/tmp/ebpf_fw.sock"
+#define FIFO_PATH                   "/tmp/firewall_to_api_parser.fifo"
 
 #define ONE_SECOND_NS               1000000000ULL
 #define BLOCK_DURATION_NS           (3600ULL * 1000000000ULL)  // 1 hour
