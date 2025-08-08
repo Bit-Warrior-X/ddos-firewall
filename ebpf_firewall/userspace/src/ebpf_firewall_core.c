@@ -2103,3 +2103,21 @@ int tcp_conn_limit_set(int valid,
     
     return 0;
 }
+
+
+int send_message_to_api_parser(const char *message) {
+    int fd = open(FIFO_PATH, O_WRONLY);  // Blocks until reader is ready
+    if (fd == -1) {
+        perror("Failed to open FIFO");
+        return -1;
+    }
+
+    ssize_t written = write(fd, message, strlen(message));
+    if (written == -1) {
+        perror("Failed to write to FIFO");
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
