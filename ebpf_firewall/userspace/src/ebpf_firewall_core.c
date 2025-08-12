@@ -13,6 +13,8 @@
 #include <openssl/err.h>
 #include <base64.h>
 #include <fcntl.h>
+#include <sqlite3.h>
+#include <stdarg.h>
 
 extern char token[128];             // Token used for expiration check
 extern char ifname[IFNAMSIZ];       // Network interface name
@@ -1656,6 +1658,164 @@ done:
 error:
     free(key); free(next); free(val);
     return -1;
+}
+
+/* ===== JSON escaping into the string builder ===== */
+static int json_escape_sb(char **buf, size_t *off, size_t *cap, const unsigned char *s)
+{
+    if (!s) {
+        return sb_append(buf, off, cap, "null");
+    }
+    if (sb_append(buf, off, cap, "\"") < 0) return -1;
+
+    for (const unsigned char *p = s; *p; ++p) {
+        unsigned char c = *p;
+        switch (c) {
+            case '\"': if (sb_append(buf, off, cap, "\\\"") < 0) return -1; break;
+            case '\\': if (sb_append(buf, off, cap, "\\\\") < 0) return -1; break;
+            case '\b': if (sb_append(buf, off, cap, "\\b")  < 0) return -1; break;
+            case '\f': if (sb_append(buf, off, cap, "\\f")  < 0) return -1; break;
+            case '\n': if (sb_append(buf, off, cap, "\\n")  < 0) return -1; break;
+            case '\r': if (sb_append(buf, off, cap, "\\r")  < 0) return -1; break;
+            case '\t': if (sb_append(buf, off, cap, "\\t")  < 0) return -1; break;
+            default:
+                if (c < 0x20) {
+                    if (sb_append(buf, off, cap, "\\u%04x", c) < 0) return -1;
+                } else {
+                    if (sb_append(buf, off, cap, "%c", c) < 0) return -1;
+                }
+        }
+    }
+    if (sb_append(buf, off, cap, "\"") < 0) return -1;
+    return 0;
+}
+
+/* === Core: run the query and return JSON buffer (caller must free) === */
+static char* query_blocked_ips_json(const char *filter_type,
+                                    const char *filter_ip,
+                                    const char *filter_dt /* "x" or "YYYY-MM-DD HH:MM:SS" UTC */)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    char sql[1024] = "SELECT id, ip, type, duration, reason, created, timestamp "
+                        "FROM blocked_ips WHERE 1=1";
+    int bind_type = 0, bind_ip = 0, bind_dt = 0;
+
+    /* Open DB */
+    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
+        LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
+        if (db) sqlite3_close(db);
+        return NULL;
+    }
+
+    /* Build WHERE clause with parameters */
+    if (strcmp(filter_type, "x") != 0) {
+        strncat(sql, " AND type = ?", sizeof(sql) - strlen(sql) - 1);
+        bind_type = 1;
+    }
+    if (strcmp(filter_ip, "x") != 0) {
+        strncat(sql, " AND ip = ?", sizeof(sql) - strlen(sql) - 1);
+        bind_ip = 1;
+    }
+    if (strcmp(filter_dt, "x") != 0) {
+        /* UTC-aware comparison; julianday treats naive strings as UTC-scaled */
+        strncat(sql, " AND julianday(created) >= julianday(?)",
+                sizeof(sql) - strlen(sql) - 1);
+        bind_dt = 1;
+    }
+    strncat(sql, " ORDER BY id ASC", sizeof(sql) - strlen(sql) - 1);
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        LOG_E("Failed to prepare statement: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return NULL;
+    }
+
+    int idx = 1;
+    if (bind_type) sqlite3_bind_text(stmt, idx++, filter_type, -1, SQLITE_TRANSIENT);
+    if (bind_ip)   sqlite3_bind_text(stmt, idx++, filter_ip,   -1, SQLITE_TRANSIENT);
+    if (bind_dt)   sqlite3_bind_text(stmt, idx++, filter_dt,   -1, SQLITE_TRANSIENT);
+
+    /* String builder buffer */
+    size_t cap = 256, off = 0;
+    char *out = (char*)malloc(cap);
+    if (!out) {
+        LOG_E("OOM\n");
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return NULL;
+    }
+    out[0] = '\0';
+
+    if (sb_append(&out, &off, &cap, "[\n") < 0) goto error;
+
+    int first = 1;
+    for (;;) {
+        int rc = sqlite3_step(stmt);
+        if (rc == SQLITE_ROW) {
+            if (!first) {
+                if (sb_append(&out, &off, &cap, ",\n") < 0) goto error;
+            }
+            first = 0;
+
+            int id = sqlite3_column_int(stmt, 0);
+            const unsigned char *ip        = sqlite3_column_text(stmt, 1);
+            const unsigned char *type      = sqlite3_column_text(stmt, 2);
+            const unsigned char *duration  = sqlite3_column_text(stmt, 3);
+            const unsigned char *reason    = sqlite3_column_text(stmt, 4);
+            const unsigned char *created   = sqlite3_column_text(stmt, 5);
+            const unsigned char *timestamp = sqlite3_column_text(stmt, 6);
+
+            if (sb_append(&out, &off, &cap, "  {\"id\": %d, \"ip\": ", id) < 0) goto error;
+            if (json_escape_sb(&out, &off, &cap, ip) < 0) goto error;
+
+            if (sb_append(&out, &off, &cap, ", \"type\": ") < 0) goto error;
+            if (json_escape_sb(&out, &off, &cap, type) < 0) goto error;
+
+            if (sb_append(&out, &off, &cap, ", \"duration\": ") < 0) goto error;
+            if (json_escape_sb(&out, &off, &cap, duration) < 0) goto error;
+
+            if (sb_append(&out, &off, &cap, ", \"reason\": ") < 0) goto error;
+            if (json_escape_sb(&out, &off, &cap, reason) < 0) goto error;
+
+            if (sb_append(&out, &off, &cap, ", \"created\": ") < 0) goto error;
+            if (json_escape_sb(&out, &off, &cap, created) < 0) goto error;
+
+            if (sb_append(&out, &off, &cap, ", \"timestamp\": ") < 0) goto error;
+            if (json_escape_sb(&out, &off, &cap, timestamp) < 0) goto error;
+
+            if (sb_append(&out, &off, &cap, "}") < 0) goto error;
+        } else if (rc == SQLITE_DONE) {
+            break;
+        } else {
+            LOG_E("SQLite step error: %s\n", sqlite3_errmsg(db));
+            goto error;
+        }
+    }
+
+    if (sb_append(&out, &off, &cap, "\n]\n") < 0) goto error;
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return out;
+
+error:
+    if (out) free(out);
+    if (stmt) sqlite3_finalize(stmt);
+    if (db) sqlite3_close(db);
+    return NULL;
+}
+
+int get_block_list_ips(char **out, char *filter_type, char *filter_ip, char * filter_date) {
+    char *json = NULL;
+    json = query_blocked_ips_json(filter_type, filter_ip, filter_date);
+    if (!json) {
+        LOG_E("Query failed.\n");
+        return -1;
+    }
+
+    *out = json;
+    return 0;
 }
 
 int clear_deny_ip(char * ip) {

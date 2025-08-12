@@ -261,11 +261,13 @@ static int load_block_white_list(struct bpf_object *obj) {
     rc = sqlite3_exec(db, sql_blocked, blocked_ips_callback, obj, &err_msg);
     
     if (rc != SQLITE_OK) {
-        LOG_E("SQL error (blocked_ips): %s\n", err_msg);
-        sqlite3_free(err_msg);
-        return -1;
+        LOG_E("SQL error (blocked_ips): %s\n", err_msg ? err_msg : "(unknown)");
+        if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+        rc = -1;
+        goto cleanup;  // <-- ensure DB is closed
     }
-    
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
     // Read from white_ips table
     char *sql_white = "SELECT * FROM white_ips;";
     
@@ -273,14 +275,17 @@ static int load_block_white_list(struct bpf_object *obj) {
     rc = sqlite3_exec(db, sql_white, white_ips_callback, obj, &err_msg);
     
     if (rc != SQLITE_OK) {
-        LOG_E("SQL error (white_ips): %s\n", err_msg);
-        sqlite3_free(err_msg);
+        LOG_E("SQL error (white_ips): %s\n", err_msg ? err_msg : "(unknown)");
+        if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+        rc = -1;
+        goto cleanup;
     }
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
     
+cleanup:    
     // Close database connection
     sqlite3_close(db);
-    
-    return 0;
+    return (rc == 0) ? 0 : -1;
 }
 
 /* 

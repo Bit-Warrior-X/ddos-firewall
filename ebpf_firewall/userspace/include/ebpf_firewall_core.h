@@ -8,6 +8,7 @@ int reload_fw();
 int clear_fw();
 int stats_fw(struct stats_config * stats);
 int list_block_ip(char **out);
+int get_block_list_ips(char **out, char *filter_type, char *filter_ip, char * date);
 int clear_deny_ip(char * ip);
 int clear_deny_ip_all();
 int add_block_ip(char *ip, int seconds);

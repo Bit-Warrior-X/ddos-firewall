@@ -46,6 +46,7 @@ static void usage(void) {
 "  CLEAR_ALLOW_IP_ALL : Remove all ips from blacklist\n"
 "  ADD_ALLOW_IP <ip> : Add ip to whitelist.\n"
 "  HEALTH_CHECK : Check the health status of ebpf-firewall\n"
+"  GET_BLOCKLIST <filter_type> <filter_ip> <filter_date> : Get the filtered block list ips\n"
 , stderr);
     exit(EXIT_FAILURE);
 }
