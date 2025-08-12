@@ -38,7 +38,7 @@ def create_table():
         type TEXT NOT NULL,
         duration INTEGER,
         reason TEXT,
-        created TEXT,
+        created DATETIME DEFAULT CURRENT_TIMESTAMP,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     ''')
@@ -48,7 +48,7 @@ def create_table():
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         ip TEXT NOT NULL,
         reason TEXT,
-        created TEXT,
+        created DATETIME DEFAULT CURRENT_TIMESTAMP,
         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
     )
     ''')
@@ -79,7 +79,7 @@ def fetch_and_store_blocklist(token):
             type TEXT,
             duration INTEGER,
             reason TEXT,
-            created TEXT,
+            created DATETIME,
             UNIQUE(ip, reason)
         )
         ''')
@@ -159,17 +159,22 @@ def token_required(f):
     return decorated_function
 
 def parse_cli_output(output):
-    """Parse the CLI output into status and message"""
-    lines = output.strip().split('\n')
+    """Parse CLI output where the first line is the status ('ok'/'failed')
+    and everything from the second line to the end is the message."""
+    lines = output.strip().splitlines()  # handles \n, \r\n, \r
     if not lines:
         return {'status': 'error', 'message': 'Empty response from command'}
-    
-    if lines[0] == 'ok' and len(lines) > 1:
-        return {'status': 'success', 'message': '\n'.join(lines[1:])}
-    elif lines[0] == 'failed' and len(lines) > 1:
-        return {'status': 'error', 'message': '\n'.join(lines[1:])}
+
+    first = lines[0].strip().split(':', 1)[0].lower()  # tolerate "ok:" / "failed:"
+    if first == 'ok':
+        status = 'success'
+    elif first == 'failed':
+        status = 'error'
     else:
         return {'status': 'error', 'message': 'Unexpected response format'}
+
+    message = '\n'.join(lines[1:]) if len(lines) > 1 else ''
+    return {'status': status, 'message': message}
 
 def execute_cli_command(command_args):
     try:
@@ -179,7 +184,6 @@ def execute_cli_command(command_args):
             text=True,
             check=False
         )
-        
         output = result.stdout.strip()
         return parse_cli_output(output)
     except subprocess.TimeoutExpired:
@@ -632,6 +636,35 @@ def health_check():
         return jsonify({"status": "error", "message": parsed['message']})
     
     return jsonify({"status": "success", "message": parsed['message']})
+
+
+@app.route('/API/L4/get_blocklist', methods=['POST'])
+@token_required
+def get_blocklist():
+    data = request.json
+    print (data)
+    
+    filter_type = "x"
+    if 'filter_type' in data:
+        filter_type = data["filter_type"]
+     
+    filter_ip = "x"
+    if 'filter_ip' in data:
+        filter_ip = data["filter_ip"]
+        
+    filter_date = "x"
+    if 'filter_date' in data:
+        filter_date = data["filter_date"]
+        #filter_date = "\"" + filter_date + "\""
+        
+    command_args = ['l4_firewall_cli', 'GET_BLOCKLIST', filter_type, filter_ip, filter_date]
+    print (command_args)
+    parsed = execute_cli_command(command_args)
+    if parsed['status'] == 'error':
+        return jsonify({"status": "error", "message": parsed['message']}), 400
+    
+    return jsonify({"status": "success", "message": parsed['message']})
+
 
 def send_http_request(url: str, payload: Optional[Dict[str, Any]] = None) -> requests.Response:
     """Sends HTTP POST request with JSON payload."""

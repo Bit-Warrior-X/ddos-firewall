@@ -364,6 +364,24 @@ static void handle_set_conn_limit(int cfd, char **argv, int argc) {
 static void handle_health_check(int cfd, char **argv, int argc) {
     reply(cfd, "ok\nsuccess\n");
 }
+
+//l4_cli GET_BLOCKLIST auto 1.1.2.4 '2025-8-12 12:30:29'
+static void handle_getblocklist(int cfd, char **argv, int argc) {
+    if (argc != 4) { reply(cfd, "failed\nUsage failed\n"); return; }
+
+    int ret = -1;
+    char * data = NULL;
+
+    ret = get_block_list_ips(&data, argv[1], argv[2], argv[3]);
+
+    if (ret == -1) {
+        reply(cfd, "failed\nFailed to get filtered blocklist\n");    
+    } else {
+        reply(cfd, "ok\n%s\n", data);
+    }
+    if (data) free (data);
+}
+
 /* Table‐driven dispatch */
 struct cmd_entry { const char *name; void (*fn)(int,char**,int); };
 static const struct cmd_entry cmds[] = {
@@ -388,7 +406,8 @@ static const struct cmd_entry cmds[] = {
     {"SET_TCP_SEG", handle_tcp_set_seg},
     {"SET_GEO", handle_set_geo},
     {"SET_CONN_LIMIT", handle_set_conn_limit},
-    {"HEALTH_CHECK", handle_health_check}
+    {"HEALTH_CHECK", handle_health_check},
+    {"GET_BLOCKLIST", handle_getblocklist}
 };
 
 static void dispatch(int cfd, char *line) {
