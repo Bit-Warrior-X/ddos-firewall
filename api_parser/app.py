@@ -9,6 +9,7 @@ import time
 import base64
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -656,32 +657,77 @@ def health_check():
     return jsonify({"status": "success", "message": parsed['message']})
 
 
+def _is_x(val) -> bool:
+    return val is None or str(val).strip().lower() == "x"
+
+def _norm_dt(s: str) -> str:
+    """
+    Accepts 'YYYY-MM-DD', 'YYYY-MM-DD HH:MM:SS', or ISO-8601.
+    Returns 'YYYY-MM-DD HH:MM:SS' (SQLite CURRENT_TIMESTAMP format).
+    """
+    s = str(s).strip()
+    # Try ISO-8601 first (handles 'Z' and timezone offsets)
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Try full datetime
+    try:
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        pass
+    # Try date-only
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        raise ValueError("Invalid date/time format for filter_date")
+    
 @app.route('/API/L4/get_blocklist', methods=['POST'])
 @token_required
 def get_blocklist():
-    data = request.json
-    print (data)
-    
-    filter_type = "x"
-    if 'filter_type' in data:
-        filter_type = data["filter_type"]
-     
-    filter_ip = "x"
-    if 'filter_ip' in data:
-        filter_ip = data["filter_ip"]
-        
-    filter_date = "x"
-    if 'filter_date' in data:
-        filter_date = data["filter_date"]
-        #filter_date = "\"" + filter_date + "\""
-        
-    command_args = ['l4_firewall_cli', 'GET_BLOCKLIST', filter_type, filter_ip, filter_date]
-    print (command_args)
-    parsed = execute_cli_command(command_args)
-    if parsed['status'] == 'error':
-        return jsonify({"status": "error", "message": parsed['message']}), 400
-    
-    return jsonify({"status": "success", "message": parsed['message']})
+    data = request.get_json(force=True) or {}
+
+    filter_type = data.get("filter_type", "x")
+    filter_ip   = data.get("filter_ip", "x")
+    filter_date = data.get("filter_date", "x")
+
+    sql = """
+        SELECT id, ip, type, duration, reason, created, timestamp
+        FROM blocked_ips
+        WHERE 1=1
+    """
+    params = []
+
+    if not _is_x(filter_type):
+        sql += " AND type = ?"
+        params.append(str(filter_type).strip())
+
+    if not _is_x(filter_ip):
+        sql += " AND ip = ?"
+        params.append(str(filter_ip).strip())
+
+    if not _is_x(filter_date):
+        try:
+            dt_str = _norm_dt(filter_date)
+        except ValueError as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
+        # created > given time
+        sql += " AND created > ?"
+        params.append(dt_str)
+
+    sql += " ORDER BY created DESC"
+
+    try:
+        with sqlite3.connect(FIREWALL_DB_NAME, timeout=5) as con:
+            con.row_factory = sqlite3.Row
+            cur = con.cursor()
+            cur.execute(sql, params)
+            rows = [dict(r) for r in cur.fetchall()]
+    except Exception as ex:
+        return jsonify({"status": "error", "message": f"DB error: {ex}"}), 500
+
+    return jsonify({"status": "success", "data": rows})
 
 
 def send_http_request(url: str, payload: Optional[Dict[str, Any]] = None) -> requests.Response:
