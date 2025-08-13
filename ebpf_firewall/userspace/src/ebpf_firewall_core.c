@@ -117,13 +117,14 @@ static void * global_attack_check_worker(void * arg) {
         __u32 key = 0;
         time_t now = time(NULL);     /* current epoch seconds */
 
+        /*
         struct global_firewall_config g_fw_config = {0};
         if (bpf_map_lookup_elem(bss_map_fd, &key, &g_fw_config) != 0) {
             LOG_E("bpf_map_lookup_elem %s\n", strerror(errno));
             goto cleanup;
-        }
+        }*/
         
-        struct global_attack_stats * global_attack_stats_val =&g_fw_config.g_attack_stats;
+        struct global_attack_stats * global_attack_stats_val =&global_fw_config.g_attack_stats;
         
         __u64 total_syn_cnt = 0;
         if (bpf_map_lookup_elem(global_syn_pkt_counter_map_fd, &key, values)) {
@@ -269,16 +270,19 @@ static void * global_attack_check_worker(void * arg) {
 
         if (total_syn_cnt >= global_fw_config.g_syn_config.syn_threshold) syn_attack = true;
         else syn_attack = false;
+
         if (syn_attack != global_attack_stats_val->syn_attack) {
             if (syn_attack == true) {
                 if (now >= global_attack_stats_val->syn_protect_expire) {
                     global_attack_stats_val->syn_protect_expire = now + global_fw_config.g_syn_config.syn_protect_duration;
+                    //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
                     print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START, 0);
                     global_attack_stats_val->syn_attack = syn_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->syn_protect_expire) {
+                    //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
                     print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END, 0);
                     global_attack_stats_val->syn_attack = syn_attack;
                     need_to_update = true;
@@ -292,19 +296,19 @@ static void * global_attack_check_worker(void * arg) {
             if (ack_attack == true) {
                 if (now >= global_attack_stats_val->ack_protect_expire) {
                     global_attack_stats_val->ack_protect_expire = now + global_fw_config.g_ack_config.ack_protect_duration;
+                    //LOG_D("Send backend to now is %lld, ack_protect_expire %lld\n", now, global_attack_stats_val->ack_protect_expire);
                     print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START, 0);
                     global_attack_stats_val->ack_attack = ack_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->ack_protect_expire) {
+                    //LOG_D("Send backend to now is %lld, ack_protect_expire %lld\n", now, global_attack_stats_val->ack_protect_expire);
                     print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END, 0);
                     global_attack_stats_val->ack_attack = ack_attack;
                     need_to_update = true;
                 }
             }
-            global_attack_stats_val->ack_attack = ack_attack;
-            need_to_update = true;
         }
 
         if (total_rst_cnt >= global_fw_config.g_rst_config.rst_threshold) rst_attack = true;
@@ -324,8 +328,6 @@ static void * global_attack_check_worker(void * arg) {
                     need_to_update = true;
                 }
             }
-            global_attack_stats_val->rst_attack = rst_attack;
-            need_to_update = true;
         }
 
         if (total_icmp_cnt >= global_fw_config.g_icmp_config.icmp_threshold) icmp_attack = true;
@@ -345,8 +347,6 @@ static void * global_attack_check_worker(void * arg) {
                     need_to_update = true;
                 }
             }
-            global_attack_stats_val->icmp_attack = icmp_attack;
-            need_to_update = true;
         }
 
         if (total_udp_cnt >= global_fw_config.g_udp_config.udp_threshold) udp_attack = true;
@@ -366,8 +366,6 @@ static void * global_attack_check_worker(void * arg) {
                     need_to_update = true;
                 }
             }
-            global_attack_stats_val->udp_attack = udp_attack;
-            need_to_update = true;
         }
 
         if (total_gre_cnt >= global_fw_config.g_gre_config.gre_threshold) gre_attack = true;
@@ -387,12 +385,10 @@ static void * global_attack_check_worker(void * arg) {
                     need_to_update = true;
                 }
             }
-            global_attack_stats_val->gre_attack = gre_attack;
-            need_to_update = true;
         }
 
         if (need_to_update == true) {
-            bpf_map_update_elem(bss_map_fd, &key, &g_fw_config, BPF_ANY);
+            bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
         }
 
         LOG_T("STATS: SYN:%llu/%llu ACK:%llu/%llu RST:%llu/%llu PSH:%llu FIN:%llu URG:%llu SYN+ACK:%llu FIN+ACK:%llu RST+ACK:%llu ICMP:%llu/%llu UDP:%llu/%llu GRE:%llu/%llu\n",
@@ -807,6 +803,7 @@ static void * send_check_blocklist_worker(void * arg)
     // Wait until terminated.
     while (!exiting) {
         struct global_attack_stats * g_attack_stats = &global_fw_config.g_attack_stats;
+
         if ((g_attack_stats->syn_attack || 
             g_attack_stats->ack_attack || 
             g_attack_stats->rst_attack ||
@@ -816,7 +813,12 @@ static void * send_check_blocklist_worker(void * arg)
                 const char * message = "command:check_blocklist\nstatus:start\n";
                 send_message_to_api_parser(message);
                 signal_sent = 1;
-                LOG_D("Send backend to start checking blocklist");
+                LOG_D("Send backend to start checking blocklist %d %d %d %d %d %d\n", g_attack_stats->syn_attack, 
+                                                g_attack_stats->ack_attack,
+                                                g_attack_stats->rst_attack,
+                                                g_attack_stats->icmp_attack,
+                                                g_attack_stats->udp_attack,
+                                                g_attack_stats->gre_attack);
         }
 
         if ((g_attack_stats->syn_attack == 0 && 
@@ -828,7 +830,12 @@ static void * send_check_blocklist_worker(void * arg)
                 const char * message = "command:check_blocklist\nstatus:stop\n";
                 send_message_to_api_parser(message);
                 signal_sent = 0;
-                LOG_D("Send backend to stop checking blocklist");
+                LOG_D("Send backend to stop checking blocklist %d %d %d %d %d %d\n", g_attack_stats->syn_attack, 
+                                                g_attack_stats->ack_attack,
+                                                g_attack_stats->rst_attack,
+                                                g_attack_stats->icmp_attack,
+                                                g_attack_stats->udp_attack,
+                                                g_attack_stats->gre_attack);
         }
 
         sleep(1);
