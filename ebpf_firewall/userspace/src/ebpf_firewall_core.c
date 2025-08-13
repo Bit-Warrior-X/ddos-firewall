@@ -2350,7 +2350,7 @@ int append_block_ip_to_sqlite(const char *ip_str, const char *reason) {
     strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
 
     char duration_str[1024];
-    snprintf(duration_str, 1024, "%lld", global_fw_config.g_config.black_ip_duration / BLOCK_DURATION_NS);
+    snprintf(duration_str, 1024, "%lld", global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS);
 
     /* Prepare INSERT statement */
     const char *sql =
