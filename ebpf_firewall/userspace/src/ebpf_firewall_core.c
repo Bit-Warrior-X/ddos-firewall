@@ -572,7 +572,6 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
         }
 
         LOG_D("Received fixed ip ringbuf handle event [%d] duration is [%llu]s\n", e->over_fixed, (__u64)e->duration / ONE_SECOND_NS);
-
         
         __u64 expected_pps = 0;
 
@@ -655,7 +654,7 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
         }
         
         if (e->over_fixed == 1)
-            LOG_A("[OVER FIXED] %s %s %llu pps\n", str_fixed_ip_ring_buf_type[e->fixed_type], src, expected_pps);
+            LOG_C("[OVER FIXED] %s %s %llu pps\n", str_fixed_ip_ring_buf_type[e->fixed_type], src, expected_pps);
 
     } else {
         LOG_E("Unknown fixed ip type\n");
@@ -817,6 +816,7 @@ static void * send_check_blocklist_worker(void * arg)
                 const char * message = "command:check_blocklist\nstatus:start\n";
                 send_message_to_api_parser(message);
                 signal_sent = 1;
+                LOG_D("Send backend to start checking blocklist");
         }
 
         if ((g_attack_stats->syn_attack == 0 && 
@@ -828,6 +828,7 @@ static void * send_check_blocklist_worker(void * arg)
                 const char * message = "command:check_blocklist\nstatus:stop\n";
                 send_message_to_api_parser(message);
                 signal_sent = 0;
+                LOG_D("Send backend to stop checking blocklist");
         }
 
         sleep(1);
@@ -1764,7 +1765,6 @@ static char* query_blocked_ips_json(const char *filter_type,
             const unsigned char *duration  = sqlite3_column_text(stmt, 3);
             const unsigned char *reason    = sqlite3_column_text(stmt, 4);
             const unsigned char *created   = sqlite3_column_text(stmt, 5);
-            const unsigned char *timestamp = sqlite3_column_text(stmt, 6);
 
             if (sb_append(&out, &off, &cap, "  {\"id\": %d, \"ip\": ", id) < 0) goto error;
             if (json_escape_sb(&out, &off, &cap, ip) < 0) goto error;
@@ -1780,9 +1780,6 @@ static char* query_blocked_ips_json(const char *filter_type,
 
             if (sb_append(&out, &off, &cap, ", \"created\": ") < 0) goto error;
             if (json_escape_sb(&out, &off, &cap, created) < 0) goto error;
-
-            if (sb_append(&out, &off, &cap, ", \"timestamp\": ") < 0) goto error;
-            if (json_escape_sb(&out, &off, &cap, timestamp) < 0) goto error;
 
             if (sb_append(&out, &off, &cap, "}") < 0) goto error;
         } else if (rc == SQLITE_DONE) {
@@ -2324,5 +2321,56 @@ int send_message_to_api_parser(const char *message) {
     }
 
     close(fd);
+    return 0;
+}
+
+int append_block_ip_to_sqlite(const char *ip_str, const char *reason) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+
+    /* Open database */
+    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
+        LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    /* Current UTC time string */
+    char created[32];
+    time_t now = time(NULL);           // seconds since epoch (UTC base)
+    struct tm gmt;
+    gmtime_r(&now, &gmt);               // convert to UTC struct tm
+    strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
+
+    char duration_str[1024];
+    snprintf(duration_str, 1024, "%lld", global_fw_config.g_config.black_ip_duration / BLOCK_DURATION_NS);
+
+    /* Prepare INSERT statement */
+    const char *sql =
+        "INSERT INTO blocked_ips (ip, type, duration, reason, created) "
+        "VALUES (?, 'Auto', ?, ?, ?);";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        LOG_E("Failed to prepare insert: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return -1;
+    }
+
+    /* Bind parameters */
+    sqlite3_bind_text(stmt, 1, ip_str, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, duration_str , -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, reason, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, created, -1, SQLITE_STATIC);
+
+    /* Execute */
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        LOG_E("Failed to insert data: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
     return 0;
 }

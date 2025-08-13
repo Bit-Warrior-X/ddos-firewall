@@ -14,7 +14,7 @@ app = Flask(__name__)
 
 # Configuration
 FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
-FIRWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
+FIREWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
 
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
@@ -28,7 +28,7 @@ user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
 def create_table():
     """Create SQLite database and table for blocklist if they don't exist"""
-    conn = sqlite3.connect(FIRWALL_DB_NAME)
+    conn = sqlite3.connect(FIREWALL_DB_NAME)
     cursor = conn.cursor()
     
     cursor.execute('''
@@ -55,6 +55,23 @@ def create_table():
     
     conn.commit()
     conn.close()
+
+def clear_all_tables():
+    """Remove all rows from blocked_ips and white_ips tables."""
+    conn = sqlite3.connect(FIREWALL_DB_NAME)
+    cursor = conn.cursor()
+    
+    # Delete all records from both tables
+    cursor.execute("DELETE FROM blocked_ips")
+    cursor.execute("DELETE FROM white_ips")
+    
+    # Optionally reset AUTOINCREMENT counters
+    cursor.execute("DELETE FROM sqlite_sequence WHERE name='blocked_ips'")
+    cursor.execute("DELETE FROM sqlite_sequence WHERE name='white_ips'")
+    
+    conn.commit()
+    conn.close()
+
     
 def fetch_and_store_blocklist(token):
     """Fetch blocklist from API and store in database"""
@@ -69,7 +86,7 @@ def fetch_and_store_blocklist(token):
         blocklist_data = response.json()
         
         # Connect to database
-        conn = sqlite3.connect(FIRWALL_DB_NAME)
+        conn = sqlite3.connect(FIREWALL_DB_NAME)
         cursor = conn.cursor()
         
         # Create table if not exists (added this for robustness)
@@ -124,7 +141,7 @@ def fetch_and_store_whitelist(token):
         response.raise_for_status()
         whitelist_data = response.json()
         
-        conn = sqlite3.connect(FIRWALL_DB_NAME)
+        conn = sqlite3.connect(FIREWALL_DB_NAME)
         cursor = conn.cursor()
         
         # Clear existing entries (optional - you might want to keep history)
@@ -220,6 +237,7 @@ def firewall_main():
     
     # Initialize database and fetch blocklist for start/restart actions
     if action in ['start', 'restart']:
+        clear_all_tables()
         create_table()
         user_token = data['token']
         success, message = fetch_and_store_blocklist(user_token)
@@ -258,7 +276,7 @@ def firewall_main():
         
     # Add blocklist/Whitelist info if this was a start/restart
     if action in ['start', 'restart']:
-        conn = sqlite3.connect(FIRWALL_DB_NAME)
+        conn = sqlite3.connect(FIREWALL_DB_NAME)
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM blocked_ips')
         blockcount = cursor.fetchone()[0]

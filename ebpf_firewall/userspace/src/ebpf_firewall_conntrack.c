@@ -114,9 +114,9 @@ static int event_cb(enum nf_conntrack_msg_type type,
         inet_ntop(AF_INET, &in, src_str, sizeof(src_str));
 
         __u32 con_count = 0;
-        if (bpf_map_lookup_elem(connection_map_fd, &sip, &con_count) == 0) {
-            LOG_D("Connection count [%s] is %d\n", src_str, con_count);
-        }
+        //if (bpf_map_lookup_elem(connection_map_fd, &sip, &con_count) == 0) {
+        //    LOG_D("Connection count [%s] is %d\n", src_str, con_count);
+        //}
 
         if (type == NFCT_T_UPDATE)
             con_count ++;
@@ -127,7 +127,7 @@ static int event_cb(enum nf_conntrack_msg_type type,
         }
 
         if (con_count >= global_fw_config.g_tcp_connection_config.limit_cnt) {
-            LOG_A("TCP connection reaches to limit [%s] -> %d", src_str, con_count);
+            LOG_C("TCP connection reaches to limit [%s] -> %d\n", src_str, con_count);
 
             // Add source ip to block list
             // now = bpf_ktime_get_ns()
