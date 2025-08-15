@@ -245,12 +245,12 @@ static void handle_add_allow_ip(int cfd, char **argv, int argc) {
 
 
 static void handle_tcp_syn_set(int cfd, char **argv, int argc) {
-    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
+    if (argc != 9) { reply(cfd, "failed\nUsage failed %d\n", argc); return; }
     int tcp_syn_valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) tcp_syn_valid = 1;
     else tcp_syn_valid = 0;
 
-    int ret = tcp_syn_set(tcp_syn_valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
+    int ret = tcp_syn_set(tcp_syn_valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]), atoi(argv[8]));
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else
@@ -258,12 +258,12 @@ static void handle_tcp_syn_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_tcp_ack_set(int cfd, char **argv, int argc) {
-    if (argc != 7) { reply(cfd, "failed\nUsage failed\n"); return; }
+    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
     else valid = 0;
 
-    int ret = tcp_ack_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
+    int ret = tcp_ack_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else
@@ -271,12 +271,12 @@ static void handle_tcp_ack_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_tcp_rst_set(int cfd, char **argv, int argc) {
-    if (argc != 7) { reply(cfd, "failed\nUsage failed\n"); return; }
+    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
     else valid = 0;
 
-    int ret = tcp_rst_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
+    int ret = tcp_rst_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else
@@ -284,12 +284,12 @@ static void handle_tcp_rst_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_icmp_set(int cfd, char **argv, int argc) {
-    if (argc != 7) { reply(cfd, "failed\nUsage failed\n"); return; }
+    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
     else valid = 0;
 
-    int ret = icmp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
+    int ret = icmp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else
@@ -297,12 +297,12 @@ static void handle_icmp_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_udp_set(int cfd, char **argv, int argc) {
-    if (argc != 7) { reply(cfd, "failed\nUsage failed\n"); return; }
+    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
     else valid = 0;
 
-    int ret = udp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
+    int ret = udp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else
@@ -310,12 +310,12 @@ static void handle_udp_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_gre_set(int cfd, char **argv, int argc) {
-    if (argc != 7) { reply(cfd, "failed\nUsage failed\n"); return; }
+    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
     else valid = 0;
 
-    int ret = gre_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]));
+    int ret = gre_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else
@@ -412,9 +412,9 @@ static const struct cmd_entry cmds[] = {
 
 static void dispatch(int cfd, char *line) {
     /* Tokenize in‑place */
-    char *argv[8];
+    char *argv[10];
     int argc = 0;
-    for (char *tok = strtok(line, " \t\r\n"); tok && argc < 8; tok = strtok(NULL, " \t\r\n"))
+    for (char *tok = strtok(line, " \t\r\n"); tok && argc < 10; tok = strtok(NULL, " \t\r\n"))
         argv[argc++] = tok;
     if (argc == 0) return;
 

@@ -67,6 +67,7 @@ typedef struct {
     int syn_fixed_threshold;
     int syn_fixed_check_duration;
     int challenge_timeout;
+    int syn_protection_duration;
     
     // ACK section
     int ack_valid;
@@ -75,6 +76,7 @@ typedef struct {
     int ack_burst_count_per_sec;
     int ack_fixed_threshold;
     int ack_fixed_check_duration;
+    int ack_protection_duration;
     
     // RST section
     int rst_valid;
@@ -83,6 +85,7 @@ typedef struct {
     int rst_burst_count_per_sec;
     int rst_fixed_threshold;
     int rst_fixed_check_duration;
+    int rst_protection_duration;
     
     // ICMP section
     int icmp_valid;
@@ -91,6 +94,7 @@ typedef struct {
     int icmp_burst_count_per_sec;
     int icmp_fixed_threshold;
     int icmp_fixed_check_duration;
+    int icmp_protection_duration;
     
     // UDP section
     int udp_valid;
@@ -99,6 +103,7 @@ typedef struct {
     int udp_burst_count_per_sec;
     int udp_fixed_threshold;
     int udp_fixed_check_duration;
+    int udp_protection_duration;
     
     // GRE section
     int gre_valid;
@@ -107,6 +112,7 @@ typedef struct {
     int gre_burst_count_per_sec;
     int gre_fixed_threshold;
     int gre_fixed_check_duration;
+    int gre_protection_duration;
     
     // TCP Segment check
     int tcp_seg_check;
@@ -238,6 +244,8 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->syn_fixed_check_duration = atoi(value);
             } else if (strcmp(key, "challenge_timeout") == 0) {
                 config->challenge_timeout = atoi(value);
+            } else if (strcmp(key, "syn_protection_duration") == 0) {
+                config->syn_protection_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "ACK") == 0) {
@@ -253,6 +261,8 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->ack_fixed_threshold = atoi(value);
             } else if (strcmp(key, "ack_fixed_check_duration") == 0) {
                 config->ack_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "ack_protection_duration") == 0) {
+                config->ack_protection_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "RST") == 0) {
@@ -268,6 +278,8 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->rst_fixed_threshold = atoi(value);
             } else if (strcmp(key, "rst_fixed_check_duration") == 0) {
                 config->rst_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "rst_protection_duration") == 0) {
+                config->rst_protection_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "ICMP") == 0) {
@@ -283,6 +295,8 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->icmp_fixed_threshold = atoi(value);
             } else if (strcmp(key, "icmp_fixed_check_duration") == 0) {
                 config->icmp_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "icmp_protection_duration") == 0) {
+                config->icmp_protection_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "UDP") == 0) {
@@ -298,6 +312,8 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->udp_fixed_threshold = atoi(value);
             } else if (strcmp(key, "udp_fixed_check_duration") == 0) {
                 config->udp_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "udp_protection_duration") == 0) {
+                config->udp_protection_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "GRE") == 0) {
@@ -313,6 +329,8 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->gre_fixed_threshold = atoi(value);
             } else if (strcmp(key, "gre_fixed_check_duration") == 0) {
                 config->gre_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "gre_protection_duration") == 0) {
+                config->gre_protection_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "TCP_SEG") == 0) {
@@ -377,6 +395,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "syn_fixed_threshold = %d\n", config->syn_fixed_threshold);
     fprintf(file, "syn_fixed_check_duration = %d\n", config->syn_fixed_check_duration);
     fprintf(file, "challenge_timeout = %d\n", config->challenge_timeout);
+    fprintf(file, "syn_protection_duration = %d\n", config->syn_protection_duration);
     
     // Write ACK section
     fprintf(file, "%s\n", config->ack_comment);
@@ -386,6 +405,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "ack_burst_count_per_sec = %d\n", config->ack_burst_count_per_sec);
     fprintf(file, "ack_fixed_threshold = %d\n", config->ack_fixed_threshold);
     fprintf(file, "ack_fixed_check_duration = %d\n", config->ack_fixed_check_duration);
+    fprintf(file, "ack_protection_duration = %d\n", config->ack_protection_duration);
     
     // Write RST section
     fprintf(file, "%s\n", config->rst_comment);
@@ -395,6 +415,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "rst_burst_count_per_sec = %d\n", config->rst_burst_count_per_sec);
     fprintf(file, "rst_fixed_threshold = %d\n", config->rst_fixed_threshold);
     fprintf(file, "rst_fixed_check_duration = %d\n", config->rst_fixed_check_duration);
+    fprintf(file, "rst_protection_duration = %d\n", config->rst_protection_duration);
     
     // Write ICMP section
     fprintf(file, "%s\n", config->icmp_comment);
@@ -404,6 +425,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "icmp_burst_count_per_sec = %d\n", config->icmp_burst_count_per_sec);
     fprintf(file, "icmp_fixed_threshold = %d\n", config->icmp_fixed_threshold);
     fprintf(file, "icmp_fixed_check_duration = %d\n", config->icmp_fixed_check_duration);
+    fprintf(file, "icmp_protection_duration = %d\n", config->icmp_protection_duration);
     
     // Write UDP section
     fprintf(file, "%s\n", config->udp_comment);
@@ -413,6 +435,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "udp_burst_count_per_sec = %d\n", config->udp_burst_count_per_sec);
     fprintf(file, "udp_fixed_threshold = %d\n", config->udp_fixed_threshold);
     fprintf(file, "udp_fixed_check_duration = %d\n", config->udp_fixed_check_duration);
+    fprintf(file, "udp_protection_duration = %d\n", config->udp_protection_duration);
     
     // Write GRE section
     fprintf(file, "%s\n", config->gre_comment);
@@ -422,6 +445,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "gre_burst_count_per_sec = %d\n", config->gre_burst_count_per_sec);
     fprintf(file, "gre_fixed_threshold = %d\n", config->gre_fixed_threshold);
     fprintf(file, "gre_fixed_check_duration = %d\n", config->gre_fixed_check_duration);
+    fprintf(file, "gre_protection_duration = %d\n", config->gre_protection_duration);
     
     // Write TCP Segment check
     fprintf(file, "\n%s\n", config->tcp_seg_comment);
@@ -527,6 +551,9 @@ int main(int argc, char *argv[]) {
         if (argc != 4) usage();
         int ret = system(FIREWALL_STOP);
         if (ret == 0) {
+            char command[1024];
+            snprintf(command, 1024, "xdp-loader unload --all %s", argv[2]);
+            system(command);
             printf("ok\nsuccess\n");
         } else {
             fprintf(stderr, "failed\n%s\n", strerror(errno));
@@ -554,7 +581,7 @@ int main(int argc, char *argv[]) {
         }
         return EXIT_SUCCESS;
     } else if (strncmp(argv[1], "TCP_SYN", strlen("TCP_SYN")) == 0) {
-        if (argc != 9) usage();
+        if (argc != 10) usage();
 
         // Update the configuration
         //argv[2] tcp_syn set or not
@@ -570,13 +597,14 @@ int main(int argc, char *argv[]) {
         config.syn_fixed_threshold = atoi(argv[6]);
         config.syn_fixed_check_duration = atoi(argv[7]);
         config.challenge_timeout = atoi(argv[8]);
+        config.syn_protection_duration = atoi(argv[9]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");
             return EXIT_FAILURE;
         }
     } else if (strncmp(argv[1], "TCP_ACK", strlen("TCP_ACK")) == 0) {
-        if (argc != 8) usage();
+        if (argc != 9) usage();
 
         // Update the configuration
         //argv[2] tcp_ack set or not
@@ -589,13 +617,14 @@ int main(int argc, char *argv[]) {
         config.ack_burst_count_per_sec = atoi(argv[5]);
         config.ack_fixed_threshold = atoi(argv[6]);
         config.ack_fixed_check_duration = atoi(argv[7]);
+        config.ack_protection_duration = atoi(argv[8]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");
             return EXIT_FAILURE;
         }
     } else if (strncmp(argv[1], "TCP_RST", strlen("TCP_RST")) == 0) {
-        if (argc != 8) usage();
+        if (argc != 9) usage();
 
         int valid = 0;
         if (strncmp(argv[2], "on", 2) == 0) valid = 1;
@@ -606,13 +635,14 @@ int main(int argc, char *argv[]) {
         config.rst_burst_count_per_sec = atoi(argv[5]);
         config.rst_fixed_threshold = atoi(argv[6]);
         config.rst_fixed_check_duration = atoi(argv[7]);
+        config.rst_protection_duration = atoi(argv[8]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");
             return EXIT_FAILURE;
         }
     } else if (strncmp(argv[1], "ICMP", strlen("ICMP")) == 0) {
-        if (argc != 8) usage();
+        if (argc != 9) usage();
 
         int valid = 0;
         if (strncmp(argv[2], "on", 2) == 0) valid = 1;
@@ -623,13 +653,14 @@ int main(int argc, char *argv[]) {
         config.icmp_burst_count_per_sec = atoi(argv[5]);
         config.icmp_fixed_threshold = atoi(argv[6]);
         config.icmp_fixed_check_duration = atoi(argv[7]);
+        config.icmp_protection_duration = atoi(argv[8]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");
             return EXIT_FAILURE;
         }
     } else if (strncmp(argv[1], "UDP", strlen("UDP")) == 0) {
-        if (argc != 8) usage();
+        if (argc != 9) usage();
 
         int valid = 0;
         if (strncmp(argv[2], "on", 2) == 0) valid = 1;
@@ -640,13 +671,14 @@ int main(int argc, char *argv[]) {
         config.udp_burst_count_per_sec = atoi(argv[5]);
         config.udp_fixed_threshold = atoi(argv[6]);
         config.udp_fixed_check_duration = atoi(argv[7]);
+        config.udp_protection_duration = atoi(argv[8]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");
             return EXIT_FAILURE;
         }
     } else if (strncmp(argv[1], "GRE", strlen("GRE")) == 0) {
-        if (argc != 8) usage();
+        if (argc != 9) usage();
 
         int valid = 0;
         if (strncmp(argv[2], "on", 2) == 0) valid = 1;
@@ -657,6 +689,7 @@ int main(int argc, char *argv[]) {
         config.gre_burst_count_per_sec = atoi(argv[5]);
         config.gre_fixed_threshold = atoi(argv[6]);
         config.gre_fixed_check_duration = atoi(argv[7]);
+        config.gre_protection_duration = atoi(argv[8]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");
