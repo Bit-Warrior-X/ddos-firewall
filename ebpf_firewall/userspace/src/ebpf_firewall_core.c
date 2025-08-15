@@ -1975,7 +1975,8 @@ int tcp_syn_set(int valid,
                 int burst_counter,
                 int fixed_threshold,
                 int fixed_duration,
-                int challenge_timeout)
+                int challenge_timeout,
+                int protection_duration)
 {
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
@@ -2000,7 +2001,7 @@ int tcp_syn_set(int valid,
     global_fw_config.g_syn_config.syn_fixed_check_duration = fixed_duration;
     global_fw_config.g_syn_config.challenge_timeout = challenge_timeout;
     global_fw_config.g_syn_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_syn_config.burst_count_threshold);
-    //global_fw_config.g_syn_config.syn_protect_duration = ;
+    global_fw_config.g_syn_config.syn_protect_duration = protection_duration;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
         LOG_E("bpf_map_update_elem");
@@ -2015,7 +2016,8 @@ int tcp_ack_set(int valid,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration)
+                int fixed_duration,
+                int protection_duration)
 {
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
@@ -2039,7 +2041,7 @@ int tcp_ack_set(int valid,
     global_fw_config.g_ack_config.ack_fixed_threshold = fixed_threshold;
     global_fw_config.g_ack_config.ack_fixed_check_duration = fixed_duration;
     global_fw_config.g_ack_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_ack_config.burst_count_threshold);
-    //global_fw_config.g_ack_config.ack_protect_duration = ;
+    global_fw_config.g_ack_config.ack_protect_duration = protection_duration;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
         LOG_E("bpf_map_update_elem");
@@ -2055,7 +2057,8 @@ int tcp_rst_set(int valid,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration)
+                int fixed_duration,
+                int protection_duration)
 {
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
@@ -2079,7 +2082,7 @@ int tcp_rst_set(int valid,
     global_fw_config.g_rst_config.rst_fixed_threshold = fixed_threshold;
     global_fw_config.g_rst_config.rst_fixed_check_duration = fixed_duration;
     global_fw_config.g_rst_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_rst_config.burst_count_threshold);
-    //global_fw_config.g_rst_config.rst_protect_duration = ;
+    global_fw_config.g_rst_config.rst_protect_duration = protection_duration;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
         LOG_E("bpf_map_update_elem");
@@ -2094,7 +2097,8 @@ int icmp_set(int valid,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration)
+                int fixed_duration,
+                int protection_duration)
 {
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
@@ -2118,7 +2122,7 @@ int icmp_set(int valid,
     global_fw_config.g_icmp_config.icmp_fixed_threshold = fixed_threshold;
     global_fw_config.g_icmp_config.icmp_fixed_check_duration = fixed_duration;
     global_fw_config.g_icmp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_icmp_config.burst_count_threshold);
-    //global_fw_config.g_icmp_config.icmp_protect_duration = ;
+    global_fw_config.g_icmp_config.icmp_protect_duration = protection_duration;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
         LOG_E("bpf_map_update_elem");
@@ -2133,7 +2137,8 @@ int udp_set(int valid,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration)
+                int fixed_duration,
+                int protection_duration)
 {
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
@@ -2157,7 +2162,7 @@ int udp_set(int valid,
     global_fw_config.g_udp_config.udp_fixed_threshold = fixed_threshold;
     global_fw_config.g_udp_config.udp_fixed_check_duration = fixed_duration;
     global_fw_config.g_udp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_udp_config.burst_count_threshold);
-    //global_fw_config.g_udp_config.udp_protect_duration = ;
+    global_fw_config.g_udp_config.udp_protect_duration = protection_duration;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
         LOG_E("bpf_map_update_elem");
@@ -2172,7 +2177,8 @@ int gre_set(int valid,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration)
+                int fixed_duration,
+                int protection_duration)
 {
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
@@ -2196,7 +2202,7 @@ int gre_set(int valid,
     global_fw_config.g_gre_config.gre_fixed_threshold = fixed_threshold;
     global_fw_config.g_gre_config.gre_fixed_check_duration = fixed_duration;
     global_fw_config.g_gre_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_gre_config.burst_count_threshold);
-    //global_fw_config.g_gre_config.gre_protect_duration = ;
+    global_fw_config.g_gre_config.gre_protect_duration = protection_duration;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
         LOG_E("bpf_map_update_elem");

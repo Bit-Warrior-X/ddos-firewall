@@ -23,42 +23,48 @@ int tcp_syn_set(int valid,
                 int burst_counter,
                 int fixed_threshold,
                 int fixed_duration,
-                int challenge_timeout);
+                int challenge_timeout,
+                int protection_duration);
 
 int tcp_ack_set(int valid, 
                 int threshold,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration);
+                int fixed_duration,
+                int protection_duration);
 
 int tcp_rst_set(int valid, 
                 int threshold,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration);                
+                int fixed_duration,
+                int protection_duration);                
 
 int icmp_set(int valid, 
                 int threshold,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration);                               
+                int fixed_duration,
+                int protection_duration);                               
 
 int udp_set(int valid, 
                 int threshold,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration);                               
+                int fixed_duration,
+                int protection_duration);                               
 
 int gre_set(int valid, 
                 int threshold,
                 int burst_pkt,
                 int burst_counter,
                 int fixed_threshold,
-                int fixed_duration);
+                int fixed_duration,
+                int protection_duration);
                 
 int tcp_seg_set(int valid);
 

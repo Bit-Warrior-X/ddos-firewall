@@ -225,7 +225,7 @@ def firewall_main():
         'restart': 'RESTART_FW',
         'reload': 'RELOAD_FW'
     }
-    
+    print (data)
     if action not in actions:
         return jsonify({"status": "error", "message": "Invalid action. Valid actions: start, stop, restart, reload"}), 400
     
@@ -235,7 +235,7 @@ def firewall_main():
     
     attach_mode = data.get('attach_mode', 'native')
     command_args = ['l4_firewall_cli', actions[action], interface, attach_mode]
-    
+    print (command_args)
     # Initialize database and fetch blocklist for start/restart actions
     if action in ['start', 'restart']:
         clear_all_tables()
@@ -297,7 +297,7 @@ def firewall_main():
 def tcp_syn():
     data = request.json
     required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter', 
-                      'fixed_threshold', 'fixed_duration', 'challenge_timeout']
+                      'fixed_threshold', 'fixed_duration', 'challenge_timeout', 'protection_duration']
     
     for field in required_fields:
         if field not in data:
@@ -305,7 +305,7 @@ def tcp_syn():
     
     command_args = [
         'l4_firewall_cli', 'TCP_SYN',  data['status'], str(data['threshold']), str(data['burst_pkt']), str(data['burst_counter']), str(data['fixed_threshold']),
-        str(data['fixed_duration']), str(data['challenge_timeout'])
+        str(data['fixed_duration']), str(data['challenge_timeout']), str(data['protection_duration'])
     ]
     
     print (command_args)
@@ -321,7 +321,7 @@ def tcp_syn():
 def tcp_ack():
     data = request.json
     required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter',
-                      'fixed_threshold', 'fixed_duration']
+                      'fixed_threshold', 'fixed_duration', 'protection_duration']
     
     for field in required_fields:
         if field not in data:
@@ -329,7 +329,7 @@ def tcp_ack():
     
     command_args = [
         'l4_firewall_cli', 'TCP_ACK',
-        data['status'], str(data['threshold']), str(data['burst_pkt']), str(data['burst_counter']), str(data['fixed_threshold']), str(data['fixed_duration'])
+        data['status'], str(data['threshold']), str(data['burst_pkt']), str(data['burst_counter']), str(data['fixed_threshold']), str(data['fixed_duration']), str(data['protection_duration'])
     ]
     print (command_args)
     parsed = execute_cli_command(command_args)
@@ -344,7 +344,7 @@ def tcp_ack():
 def tcp_rst():
     data = request.json
     required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter',
-                      'fixed_threshold', 'fixed_duration']
+                      'fixed_threshold', 'fixed_duration', 'protection_duration']
     
     for field in required_fields:
         if field not in data:
@@ -352,7 +352,7 @@ def tcp_rst():
     
     command_args = [
         'l4_firewall_cli', 'TCP_RST',
-        data['status'], str(data['threshold']), str(data['burst_pkt']), str(data['burst_counter']), str(data['fixed_threshold']), str(data['fixed_duration'])
+        data['status'], str(data['threshold']), str(data['burst_pkt']), str(data['burst_counter']), str(data['fixed_threshold']), str(data['fixed_duration']), str(data['protection_duration'])
     ]
     print (command_args)
     parsed = execute_cli_command(command_args)
@@ -367,7 +367,7 @@ def tcp_rst():
 def icmp():
     data = request.json
     required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter',
-                      'fixed_threshold', 'fixed_duration']
+                      'fixed_threshold', 'fixed_duration', 'protection_duration']
     
     for field in required_fields:
         if field not in data:
@@ -380,7 +380,8 @@ def icmp():
         str(data['burst_pkt']),
         str(data['burst_counter']),
         str(data['fixed_threshold']),
-        str(data['fixed_duration'])
+        str(data['fixed_duration']), 
+        str(data['protection_duration'])
     ]
     print (command_args)
     parsed = execute_cli_command(command_args)
@@ -395,7 +396,7 @@ def icmp():
 def udp():
     data = request.json
     required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter',
-                      'fixed_threshold', 'fixed_duration']
+                      'fixed_threshold', 'fixed_duration', 'protection_duration']
     
     for field in required_fields:
         if field not in data:
@@ -408,7 +409,8 @@ def udp():
         str(data['burst_pkt']),
         str(data['burst_counter']),
         str(data['fixed_threshold']),
-        str(data['fixed_duration'])
+        str(data['fixed_duration']),
+        str(data['protection_duration'])
     ]
     print (command_args)
     parsed = execute_cli_command(command_args)
@@ -424,7 +426,7 @@ def udp():
 def gre():
     data = request.json
     required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter',
-                      'fixed_threshold', 'fixed_duration']
+                      'fixed_threshold', 'fixed_duration', 'protection_duration']
     
     for field in required_fields:
         if field not in data:
@@ -437,7 +439,8 @@ def gre():
         str(data['burst_pkt']),
         str(data['burst_counter']),
         str(data['fixed_threshold']),
-        str(data['fixed_duration'])
+        str(data['fixed_duration']),
+        str(data['protection_duration'])
     ]
     print (command_args)
     parsed = execute_cli_command(command_args)
