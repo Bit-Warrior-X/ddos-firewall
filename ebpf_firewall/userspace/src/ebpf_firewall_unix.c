@@ -173,10 +173,10 @@ static void handle_clear_deny_ip(int cfd, char **argv, int argc) {
 static void handle_clear_deny_ip_all(int cfd, char **argv, int argc) {
     int ret = -1;
     ret = clear_deny_ip_all();
-    if (ret == 0) {
-        reply(cfd, "OK! Cleared all ips from blacklist\n", argv[1]);
+    if (ret == 0) {        
+        reply(cfd, "ok\nsuccess\n");
     } else {
-        reply(cfd, "Failed! Clear all black ips failed\n");
+        reply(cfd, "failed\nError occured while removing all ips in blacklist\n", argv[1]);
     }
 }
 
@@ -198,7 +198,7 @@ static void handle_add_block_ip(int cfd, char **argv, int argc) {
     ret = add_block_ip(argv[1], secs);
 
     if (ret == 0 || ret == 1)
-        reply(cfd, "ok\n%s is added in block list\n", argv[1]);
+        reply(cfd, "ok\nsuccess\n");
     else
         reply(cfd, "failed\nError occured while adding %s to blacklist\n", ip);
 }

@@ -518,7 +518,7 @@ def add_block_ip():
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
     print (data)
-    command_args = ['l4_firewall_cli', 'ADD_BLOCK_IP', data['ip']]
+    command_args = ['l4_firewall_cli', 'ADD_BLOCK_IP', data['ip'], '-1']
     
     if 'duration' in data:
         command_args.extend([str(data['duration'])])
@@ -550,9 +550,10 @@ def remove_block_ip():
 @app.route('/API/L4/remove_block_ip_all', methods=['POST'])
 @token_required
 def remove_block_ip_all():
-    command_args = ['l4_firewall_cli', 'CLEAR_BLOCKED_IPS']
-    
+    command_args = ['l4_firewall_cli', 'CLEAR_BLOCK_IP_ALL']
+     
     parsed = execute_cli_command(command_args)
+    print (parsed)
     if parsed['status'] == 'error':
         return jsonify({"status": "error", "message": parsed['message']}), 400
     
@@ -589,6 +590,18 @@ def remove_white_ip():
     
     return jsonify({"status": "success", "message": parsed['message']})
 
+@app.route('/API/L4/remove_white_ip_all', methods=['POST'])
+@token_required
+def remove_white_ip_all():
+    data = request.json
+    print (data)
+    command_args = ['l4_firewall_cli', 'CLEAR_ALLOW_IP_ALL']
+    print (command_args)
+    parsed = execute_cli_command(command_args)
+    if parsed['status'] == 'error':
+        return jsonify({"status": "error", "message": parsed['message']}), 400
+    
+    return jsonify({"status": "success", "message": parsed['message']})
 
 def encode_base64(data):
     """
