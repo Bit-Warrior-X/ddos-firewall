@@ -91,13 +91,13 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
         send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_SYN_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_TCP_SYN_ATTACK_BURST_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in syn busrst method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in syn busrst method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp syn attack burst mode");
     } else if (reason == EVENT_TCP_SYN_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_SYN_ATTACK_FIXED_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in syn fixed threshold method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in syn fixed threshold method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp syn attack fixed threshold mode");
     }
     
@@ -111,13 +111,13 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
         send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_ACK_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_TCP_ACK_ATTACK_BURST_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in ack busrst method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in ack busrst method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp ack attack burst mode");
     } else if (reason == EVENT_TCP_ACK_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_ACK_ATTACK_FIXED_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in ack fixed threshold method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in ack fixed threshold method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp ack attack fixed threshold mode");
     }
 
@@ -131,13 +131,13 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
         send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_RST_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_TCP_RST_ATTACK_BURST_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in rst busrst method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in rst busrst method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp rst attack burst mode");
     } else if (reason == EVENT_TCP_RST_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_RST_ATTACK_FIXED_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in rst fixed threshold method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in rst fixed threshold method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp rst attack fixed threshold mode");
     }
 
@@ -151,13 +151,13 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
         send_message_to_api_parser(message);
     } else if (reason == EVENT_ICMP_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_ICMP_ATTACK_BURST_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in icmp busrst method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in icmp busrst method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in icmp attack burst mode");
     } else if (reason == EVENT_ICMP_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_ICMP_ATTACK_FIXED_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in icmp fixed threshold method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in icmp fixed threshold method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in icmp attack fixed threshold mode");
     }
 
@@ -171,13 +171,13 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
         send_message_to_api_parser(message);
     } else if (reason == EVENT_UDP_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_UDP_ATTACK_BURST_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in udp busrst method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in udp busrst method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in udp attack burst mode");
     } else if (reason == EVENT_UDP_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_UDP_ATTACK_FIXED_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in udp fixed threshold method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in udp fixed threshold method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in udp attack fixed threshold mode");
     }
 
@@ -191,20 +191,20 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
         send_message_to_api_parser(message);
     } else if (reason == EVENT_GRE_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_GRE_ATTACK_BURST_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in gre busrst method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in gre busrst method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in gre attack burst mode");
     } else if (reason == EVENT_GRE_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_GRE_ATTACK_FIXED_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in gre fixed threshold method\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in gre fixed threshold method\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in gre attack fixed threshold mode");
     }
     
     else if (reason == EVENT_IP_FRAG_MIDDLE_BLOCK) {
         LOG_C("EVENT_IP_FRAG_MIDDLE_BLOCK %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:critical\ndata:TCP segmentation attack is detected for %s\n", src);
-        send_message_to_api_parser(temp);
+        //snprintf(temp, 1024, "command:report_log\ntype:critical\ndata:TCP segmentation attack is detected for %s\n", src);
+        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, "Attacking in tcp segmentation");
     }
 }
