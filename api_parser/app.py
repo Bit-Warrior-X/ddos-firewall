@@ -20,10 +20,14 @@ FIREWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
-BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_blocklist_ips"
-WHITELIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_whitelist_ips"
-REPORT_LOG_API_URL = "https://login.dnscrxyz.com/api/l4/report_log"
-CHECK_BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/check_blocklist"
+#BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_blocklist_ips"
+BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/blacklist"
+#WHITELIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_whitelist_ips"
+WHITELIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/whitelist"
+#REPORT_LOG_API_URL = "https://login.dnscrxyz.com/api/l4/report_log"
+REPORT_LOG_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/report"
+#CHECK_BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/check_blocklist"
+CHECK_BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/check_blacklist"
 
 user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
