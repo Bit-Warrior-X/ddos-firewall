@@ -7,9 +7,15 @@ import os
 import threading
 import time
 import base64
+import shutil
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+
+from l7_nginx_config import (
+    CONFIG_HTTP_REPORT_IP_PATH, normalize_methods, replace_or_append,
+    write_atomic, backup_path, nginx_test, nginx_reload
+)
 
 app = Flask(__name__)
 
@@ -607,6 +613,63 @@ def remove_white_ip_all():
     
     return jsonify({"status": "success", "message": parsed['message']})
 
+@app.route('/API/L7/allow_request_method', methods=['POST'])
+@token_required
+def allow_request_method():
+    data = request.get_json(silent=True) or {}
+    print (data)
+    status = str(data.get("status", "")).strip().lower()
+    method_field = data.get("method")
+    
+    if status not in {"on", "off"}:
+        return jsonify({"status": "error", "message": "Invalid 'status'. Use 'on' or 'off'."}), 400
+    
+    methods_str, err = normalize_methods(method_field)
+    if err:
+        return jsonify({"status": "error", "message": err}), 400
+    
+    try:
+        with open(CONFIG_HTTP_REPORT_IP_PATH, "r") as f:
+            original = f.read()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to read config: {e}"}), 400
+    
+    updated = replace_or_append(original, "report_module_check", f"{status};")
+    updated = replace_or_append(updated, "report_available_methods", f"{methods_str};")
+    
+    backup = backup_path(CONFIG_HTTP_REPORT_IP_PATH)
+    try:
+        shutil.copy2(CONFIG_HTTP_REPORT_IP_PATH, backup)
+        write_atomic(CONFIG_HTTP_REPORT_IP_PATH, updated)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write new config: {e}"}), 400
+    
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        # Roll back on test failure
+        shutil.copy2(backup, CONFIG_PATH)
+        return jsonify({
+            "status": "error",
+            "message": test_msg  # already trimmed (e.g., invalid method "AAA" in "report_available_methods")
+        }), 400
+        
+    # Reload nginx AFTER successful test
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        # (Optional) You could roll back file here; behavior depends on your preference.
+        # The running nginx keeps old config if reload fails, so leaving the file changed is usually OK.
+        return jsonify({
+            "status": "error",
+            "message": reload_msg  # trimmed message for reload failure
+        }), 400
+
+    # All good
+    return jsonify({
+        "status": "success",
+        "message": "nginx configuration successfully updated and applied."
+    }), 200
+
+   
 def encode_base64(data):
     """
     Encodes the given data (string or bytes) to Base64.
@@ -629,7 +692,7 @@ def encode_base64(data):
     encoded_str = encoded_bytes.decode('utf-8')
     
     return encoded_str
-
+    
 # get config
 @app.route('/API/get_config', methods=['POST'])
 @token_required
