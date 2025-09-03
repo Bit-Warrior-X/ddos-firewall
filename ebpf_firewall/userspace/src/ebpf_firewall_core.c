@@ -880,6 +880,11 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    if (init_unix_nginx_socket() < 0) {
+        LOG_E( "Failed to init unix nginx socket\n");
+        goto cleanup;
+    }
+
     if (init_time_offset() < 0) {
         LOG_E( "Failed to initialize time offset\n");
         goto cleanup;
@@ -1097,6 +1102,7 @@ cleanup:
     if (attach_id >= 0) bpf_xdp_detach(ifindex, attach_mode, NULL);
     
     close_unix_socket();
+    close_unix_nginx_socket();
     close_conntrack();
 
     LOG_I("Program is ended\n");

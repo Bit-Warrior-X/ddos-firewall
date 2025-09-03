@@ -33,6 +33,7 @@ USR_SRCS     := userspace/src/ebpf_firewall_unix.c \
                 userspace/src/ebpf_firewall_config.c \
                 userspace/src/ebpf_firewall_conntrack.c \
                 userspace/src/ebpf_firewall_geo.c \
+                userspace/src/ebpf_firewall_unix_nginx.c \
 				userspace/src/base64.c
 
 USR_CLI      := userspace/src/ebpf_firewall_cli.c
