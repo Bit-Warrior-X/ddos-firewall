@@ -11,10 +11,14 @@ import shutil
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+import ipaddress
 
 from l7_nginx_config import (
-    CONFIG_HTTP_REPORT_IP_PATH, normalize_methods, replace_or_append,
-    write_atomic, backup_path, nginx_test, nginx_reload
+    CONFIG_HTTP_REPORT_IP_PATH,
+    CONFIG_BACKEND_LIST_PATH,
+    normalize_methods, replace_or_append,
+    write_atomic, backup_path, 
+    nginx_test, nginx_reload
 )
 
 app = Flask(__name__)
@@ -666,9 +670,117 @@ def allow_request_method():
     # All good
     return jsonify({
         "status": "success",
-        "message": "nginx configuration successfully updated and applied."
+        "message": "nginx configuration successfully updated for allow http request method and applied."
     }), 200
 
+@app.route('/API/L7/backend_list', methods=['POST'])
+@token_required
+def update_backend_list():
+    """
+    Accepts JSON like:
+    {
+      "data": [
+        {"name": "backend1", "ip": "10.10.10.10", "port": 8080, "weight": 2},
+        {"name": "backend2", "ip": "11.11.11.11", "port": 80,   "weight": 2}
+      ]
+    }
+    """
+    payload = request.get_json(silent=True) or {}
+    print (payload)
+    # Accept either {"data":[...]} or a raw list as the body, to be flexible.
+    items = payload.get("data", payload if isinstance(payload, list) else None)
+    if not isinstance(items, list) or not items:
+        return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
+
+    # Validate and normalize entries
+    servers = []
+    seen = set()
+    idx = 0
+    
+    for item in items:
+        idx += 1
+        if not isinstance(item, dict):
+            return jsonify({"status": "error", "message": f"Entry #{idx} must be an object."}), 400
+
+        name   = str(item.get("name", "")).strip()
+        ip_raw = str(item.get("ip", "")).strip()
+        port   = item.get("port")
+        weight = item.get("weight", 1)
+
+        # ip
+        try:
+            ipaddress.ip_address(ip_raw)
+        except Exception:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid IP '{ip_raw}'."}), 400
+
+        # port
+        try:
+            port = int(port)
+            if not (1 <= port <= 65535):
+                raise ValueError()
+        except Exception:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid port '{port}'."}), 400
+
+        # weight
+        try:
+            weight = int(weight)
+            if weight <= 0:
+                raise ValueError()
+        except Exception:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid weight '{weight}' (must be positive integer)."}), 400
+
+        key = (ip_raw, port)
+        if key in seen:
+            return jsonify({"status": "error", "message": f"Duplicate server '{ip_raw}:{port}' detected."}), 400
+        seen.add(key)
+
+        # Comment the name if present for convenience
+        comment = f" # {name}" if name else ""
+        servers.append(f"    server {ip_raw}:{port} weight={weight};{comment}")
+
+    # Render the file content
+    header = (
+        "# THIS FILE IS MANAGED BY /API/L7/backend_list\n"
+        "# DO NOT EDIT MANUALLY — CHANGES WILL BE OVERWRITTEN\n"
+    )
+    body = "upstream backend {\n" + "\n".join(servers) + "\n}\n"
+    new_content = header + body
+
+    # Backup, write, test, (rollback on failure), reload
+    backup = backup_path(CONFIG_BACKEND_LIST_PATH)
+    try:
+        shutil.copy2(CONFIG_BACKEND_LIST_PATH, backup)
+    except Exception:
+        # If the file doesn't exist yet, that's fine; continue without failing
+        pass
+
+    try:
+        write_atomic(CONFIG_BACKEND_LIST_PATH, new_content)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
+
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        # Roll back if test fails
+        try:
+            if os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_BACKEND_LIST_PATH)
+        except Exception:
+            # Even if rollback fails, surface primary error
+            pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        # Optionally keep file (nginx keeps old running config if reload failed)
+        return jsonify({"status": "error", "message": reload_msg}), 400
+
+    return jsonify({
+        "status": "success",
+        "message": "nginx configuration successfully updated for backend list and applied"
+    }), 200
+    
+    
    
 def encode_base64(data):
     """

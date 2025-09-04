@@ -6,6 +6,7 @@ import tempfile
 from datetime import datetime
 
 CONFIG_HTTP_REPORT_IP_PATH = "/usr/local/openresty/nginx/conf/http_report_ip.conf"
+CONFIG_BACKEND_LIST_PATH = "/usr/local/openresty/nginx/conf/backend_list.conf"
 
 def normalize_methods(method_field):
     allowed = {"GET", "HEAD", "POST", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "OPTIONS", "PROPFIND", "PROPPATCH", "LOCK", "UNLOCK", "PATCH", "TRACE", "CONNECT"}
