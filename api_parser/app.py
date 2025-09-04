@@ -12,11 +12,15 @@ from collections import defaultdict
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import ipaddress
+import binascii
 
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
     CONFIG_BACKEND_LIST_PATH,
     CONFIG_HTTP_LUA_ACL_PATH,
+    CONFIG_HEADER_CONF_PATH,
+    CONFIG_HTTP_BASE_HEADER_CONF_PATH,
+    CONFIG_LOCATION_PROXY_SETTING_CONF_PATH,
     normalize_methods, replace_or_append,
     write_atomic, backup_path, 
     nginx_test, nginx_reload
@@ -872,7 +876,116 @@ def acl_system_config():
         "message": "ACL system config updated, nginx test passed, and reload signaled."
     }), 200
    
-   
+@app.route('/API/L7/ngx_base_config', methods=['POST'])
+@token_required
+def ngx_base_config():
+    """
+    Accepts JSON like:
+    {
+      "header": "<base64 string>",   # -> header.conf
+      "http":   "<base64 string>",   # -> http_base_header.conf
+      "proxy":  "<base64 string>"    # -> location_proxy_setting.conf
+    }
+    """
+    payload = request.get_json(silent=True) or {}
+
+    # Validate presence
+    required = ["header", "http", "proxy"]
+    missing = [k for k in required if k not in payload]
+    if missing:
+        return jsonify({"status": "error",
+                        "message": f"Missing required field(s): {', '.join(missing)}"}), 400
+
+    def decode_b64(name, s):
+        if not isinstance(s, str):
+            return None, f"Field '{name}' must be a base64-encoded string."
+        try:
+            # strip to tolerate accidental whitespace/newlines in transport
+            raw = base64.b64decode(s.strip(), validate=True)
+        except (binascii.Error, ValueError) as e:
+            return None, f"Field '{name}' is not valid base64: {e}"
+        try:
+            # nginx configs are text; enforce utf-8
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, f"Field '{name}' decoded bytes are not valid UTF-8 text."
+        # Normalize newlines and ensure trailing newline (typical for conf files)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        if not text.endswith("\n"):
+            text += "\n"
+        return text, None
+
+    header_text, err = decode_b64("header", payload["header"])
+    if err: return jsonify({"status": "error", "message": err}), 400
+    http_text, err   = decode_b64("http",   payload["http"])
+    if err: return jsonify({"status": "error", "message": err}), 400
+    proxy_text, err  = decode_b64("proxy",  payload["proxy"])
+    if err: return jsonify({"status": "error", "message": err}), 400
+
+    # Prepare transactional write across three files
+    targets = [
+        (CONFIG_HEADER_CONF_PATH,                 header_text),
+        (CONFIG_HTTP_BASE_HEADER_CONF_PATH,       http_text),
+        (CONFIG_LOCATION_PROXY_SETTING_CONF_PATH, proxy_text),
+    ]
+
+    backups = []   # list of (path, backup_path, existed_before)
+    written  = []  # list of paths successfully written
+
+    # Backup any existing files first
+    for path, _ in targets:
+        existed = os.path.exists(path)
+        bkp = None
+        if existed:
+            try:
+                bkp = backup_path(path)
+                shutil.copy2(path, bkp)
+            except Exception as e:
+                return jsonify({"status": "error",
+                                "message": f"Failed to create backup for {path}: {e}"}), 400
+        backups.append((path, bkp, existed))
+
+    # Write all three atomically (per file)
+    try:
+        for path, content in targets:
+            write_atomic(path, content)
+            written.append(path)
+    except Exception as e:
+        # If any write fails, attempt rollback of what we wrote
+        for path, bkp, existed in backups:
+            try:
+                if existed and bkp and os.path.exists(bkp):
+                    shutil.copy2(bkp, path)
+                elif not existed and path in written and os.path.exists(path):
+                    os.unlink(path)
+            except Exception:
+                pass
+        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
+
+    # nginx -t, rollback on failure
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        for path, bkp, existed in backups:
+            try:
+                if existed and bkp and os.path.exists(bkp):
+                    shutil.copy2(bkp, path)
+                elif not existed and os.path.exists(path):
+                    os.unlink(path)
+            except Exception:
+                pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    # Reload nginx
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        # Leaving files as-is is usually OK; running nginx keeps old live config if reload fails
+        return jsonify({"status": "error", "message": reload_msg}), 400
+
+    return jsonify({
+        "status": "success",
+        "message": "Base configs updated, nginx test passed, and reload signaled."
+    }), 200
+       
 def encode_base64(data):
     """
     Encodes the given data (string or bytes) to Base64.

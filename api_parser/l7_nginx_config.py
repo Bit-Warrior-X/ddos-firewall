@@ -8,6 +8,9 @@ from datetime import datetime
 CONFIG_HTTP_REPORT_IP_PATH = "/usr/local/openresty/nginx/conf/http_report_ip.conf"
 CONFIG_BACKEND_LIST_PATH = "/usr/local/openresty/nginx/conf/backend_list.conf"
 CONFIG_HTTP_LUA_ACL_PATH = "/usr/local/openresty/nginx/conf/http_lua_acl.conf"
+CONFIG_HEADER_CONF_PATH = "/usr/local/openresty/nginx/conf/header.conf"
+CONFIG_HTTP_BASE_HEADER_CONF_PATH = "/usr/local/openresty/nginx/conf/http_base_header.conf"
+CONFIG_LOCATION_PROXY_SETTING_CONF_PATH = "/usr/local/openresty/nginx/conf/location_proxy_setting.conf"
 
 def normalize_methods(method_field):
     allowed = {"GET", "HEAD", "POST", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "OPTIONS", "PROPFIND", "PROPPATCH", "LOCK", "UNLOCK", "PATCH", "TRACE", "CONNECT"}
