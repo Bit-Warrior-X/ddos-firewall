@@ -7,6 +7,7 @@ from datetime import datetime
 
 CONFIG_HTTP_REPORT_IP_PATH = "/usr/local/openresty/nginx/conf/http_report_ip.conf"
 CONFIG_BACKEND_LIST_PATH = "/usr/local/openresty/nginx/conf/backend_list.conf"
+CONFIG_HTTP_LUA_ACL_PATH = "/usr/local/openresty/nginx/conf/http_lua_acl.conf"
 
 def normalize_methods(method_field):
     allowed = {"GET", "HEAD", "POST", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "OPTIONS", "PROPFIND", "PROPPATCH", "LOCK", "UNLOCK", "PATCH", "TRACE", "CONNECT"}
@@ -32,8 +33,18 @@ def normalize_methods(method_field):
     return " ".join(ordered), None
 
 def replace_or_append(content, key, value_with_semicolon):
-    pattern = rf"(^\s*{re.escape(key)}\s+).*?;[ \t]*$"
-    replacement = rf"\1{value_with_semicolon}"
+    """
+    Replace a single-line directive like:
+      <key> <...>;
+    with:
+      <key> <value_with_semicolon>
+    or append it if not present. Preserves trailing comments.
+    """
+    # Match: start + optional space + key + spaces + (anything up to semicolon) + semicolon
+    # Optional trailing spaces/comments until EOL.
+    pattern = rf"(^\s*{re.escape(key)}\s+)[^;]*;[ \t]*(?:#.*)?$"
+    # IMPORTANT: use \g<1> to avoid ambiguity when replacement starts with a digit.
+    replacement = r"\g<1>" + value_with_semicolon
     new_content, n = re.subn(pattern, replacement, content, flags=re.MULTILINE)
     if n == 0:
         if not new_content.endswith("\n"):

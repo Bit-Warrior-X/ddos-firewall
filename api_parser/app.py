@@ -16,6 +16,7 @@ import ipaddress
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
     CONFIG_BACKEND_LIST_PATH,
+    CONFIG_HTTP_LUA_ACL_PATH,
     normalize_methods, replace_or_append,
     write_atomic, backup_path, 
     nginx_test, nginx_reload
@@ -780,7 +781,97 @@ def update_backend_list():
         "message": "nginx configuration successfully updated for backend list and applied"
     }), 200
     
-    
+_ACL_DEFAULT_STUB = """# Managed by /API/L7/acl_system_config
+# DO NOT EDIT MANUALLY — CHANGES WILL BE OVERWRITTEN
+
+# GeoIP database locations (keep/edit these paths as needed)
+acl_geo_database_path /usr/local/openresty/nginx/lua/geoip2/city.mmdb;
+acl_isp_database_path  /usr/local/openresty/nginx/lua/geoip2/isp.mmdb;
+
+"""
+@app.route('/API/L7/acl_system_config', methods=['POST'])
+@token_required
+def acl_system_config():
+    """
+    Accepts JSON like:
+    {
+      "acl_rule_shm_size": 10,   # megabytes
+      "acl_req_shm_size": 200,   # megabytes
+      "acl_rsp_shm_size": 200,   # megabytes
+      "acl_optimize_period": 10  # seconds
+    }
+    """
+    data = request.get_json(silent=True) or {}
+
+    def pos_int(field):
+        val = data.get(field, None)
+        try:
+            v = int(val)
+            if v <= 0:
+                raise ValueError()
+            return v, None
+        except Exception:
+            return None, f"Invalid '{field}' (must be a positive integer)."
+
+    rule_mb, err = pos_int("acl_rule_shm_size")
+    if err: return jsonify({"status": "error", "message": err}), 400
+    req_mb, err  = pos_int("acl_req_shm_size")
+    if err: return jsonify({"status": "error", "message": err}), 400
+    rsp_mb, err  = pos_int("acl_rsp_shm_size")
+    if err: return jsonify({"status": "error", "message": err}), 400
+    period_s, err = pos_int("acl_optimize_period")
+    if err: return jsonify({"status": "error", "message": err}), 400
+
+    # Load existing config (or seed with defaults if missing)
+    try:
+        if os.path.exists(CONFIG_HTTP_LUA_ACL_PATH):
+            with open(CONFIG_HTTP_LUA_ACL_PATH, "r") as f:
+                original = f.read()
+        else:
+            original = _ACL_DEFAULT_STUB
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to read config: {e}"}), 400
+
+    # Update/insert the four directives (add units and semicolons)
+    updated = replace_or_append(original, "acl_rule_shm_size",     f"{rule_mb}m;")
+    updated = replace_or_append(updated,  "acl_req_shm_size",      f"{req_mb}m;")
+    updated = replace_or_append(updated,  "acl_rsp_shm_size",      f"{rsp_mb}m;")
+    updated = replace_or_append(updated,  "acl_optimize_period",   f"{period_s}s;")
+
+    # Backup -> write -> test -> reload (rollback on test failure)
+    backup = backup_path(CONFIG_HTTP_LUA_ACL_PATH)
+    try:
+        if os.path.exists(CONFIG_HTTP_LUA_ACL_PATH):
+            shutil.copy2(CONFIG_HTTP_LUA_ACL_PATH, backup)
+    except Exception as e:
+        # Not fatal if backup fails, but safer to surface it
+        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
+
+    try:
+        write_atomic(CONFIG_HTTP_LUA_ACL_PATH, updated)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write new config: {e}"}), 400
+
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        # Roll back on test failure
+        try:
+            if os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_HTTP_LUA_ACL_PATH)
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        # nginx keeps old running config if reload failed
+        return jsonify({"status": "error", "message": reload_msg}), 400
+
+    return jsonify({
+        "status": "success",
+        "message": "ACL system config updated, nginx test passed, and reload signaled."
+    }), 200
+   
    
 def encode_base64(data):
     """
