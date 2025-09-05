@@ -21,7 +21,9 @@ from l7_nginx_config import (
     CONFIG_HEADER_CONF_PATH,
     CONFIG_HTTP_BASE_HEADER_CONF_PATH,
     CONFIG_LOCATION_PROXY_SETTING_CONF_PATH,
-    normalize_methods, replace_or_append,
+    CONFIG_SERVER_ACL_PATH,
+    CONFIG_SERVER_LUA_ACL_SET_PATH,
+    normalize_methods, replace_or_append, remove_backup,
     write_atomic, backup_path, 
     nginx_test, nginx_reload
 )
@@ -657,6 +659,7 @@ def allow_request_method():
     if not ok_test:
         # Roll back on test failure
         shutil.copy2(backup, CONFIG_PATH)
+        remove_backup(backup)
         return jsonify({
             "status": "error",
             "message": test_msg  # already trimmed (e.g., invalid method "AAA" in "report_available_methods")
@@ -667,11 +670,14 @@ def allow_request_method():
     if not ok_reload:
         # (Optional) You could roll back file here; behavior depends on your preference.
         # The running nginx keeps old config if reload fails, so leaving the file changed is usually OK.
+        remove_backup(backup)
         return jsonify({
             "status": "error",
             "message": reload_msg  # trimmed message for reload failure
         }), 400
 
+    remove_backup(backup)
+    
     # All good
     return jsonify({
         "status": "success",
@@ -773,13 +779,15 @@ def update_backend_list():
         except Exception:
             # Even if rollback fails, surface primary error
             pass
+        remove_backup(backup)
         return jsonify({"status": "error", "message": test_msg}), 400
 
     ok_reload, reload_msg = nginx_reload()
     if not ok_reload:
         # Optionally keep file (nginx keeps old running config if reload failed)
+        remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
-
+    remove_backup(backup)
     return jsonify({
         "status": "success",
         "message": "nginx configuration successfully updated for backend list and applied"
@@ -864,13 +872,16 @@ def acl_system_config():
                 shutil.copy2(backup, CONFIG_HTTP_LUA_ACL_PATH)
         except Exception:
             pass
+        remove_backup(backup)
         return jsonify({"status": "error", "message": test_msg}), 400
 
     ok_reload, reload_msg = nginx_reload()
     if not ok_reload:
         # nginx keeps old running config if reload failed
+        remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
-
+    
+    remove_backup(backup)
     return jsonify({
         "status": "success",
         "message": "ACL system config updated, nginx test passed, and reload signaled."
@@ -922,6 +933,10 @@ def ngx_base_config():
     proxy_text, err  = decode_b64("proxy",  payload["proxy"])
     if err: return jsonify({"status": "error", "message": err}), 400
 
+    print (header_text)
+    print (http_text)
+    print (proxy_text)
+    
     # Prepare transactional write across three files
     targets = [
         (CONFIG_HEADER_CONF_PATH,                 header_text),
@@ -973,19 +988,245 @@ def ngx_base_config():
                     os.unlink(path)
             except Exception:
                 pass
+            remove_backup(bkp)
+        
         return jsonify({"status": "error", "message": test_msg}), 400
 
     # Reload nginx
     ok_reload, reload_msg = nginx_reload()
     if not ok_reload:
         # Leaving files as-is is usually OK; running nginx keeps old live config if reload fails
+        for path, bkp, existed in backups:
+            try:
+                if existed and bkp and os.path.exists(bkp):
+                    remove_backup(bkp)
+            except Exception:
+                pass
+                
         return jsonify({"status": "error", "message": reload_msg}), 400
 
+    for path, bkp, existed in backups:
+        try:
+            if existed and bkp and os.path.exists(bkp):
+                remove_backup(bkp)
+        except Exception:
+            pass
     return jsonify({
         "status": "success",
         "message": "Base configs updated, nginx test passed, and reload signaled."
     }), 200
-       
+
+import os
+import shutil
+from flask import request, jsonify
+from l7_nginx_config import (
+    CONFIG_SERVER_ACL_PATH,
+    write_atomic,
+    backup_path,
+    nginx_test,
+    nginx_reload,
+)
+
+@app.route('/API/L7/set_acl', methods=['POST'])
+@token_required
+def set_acl():
+    """
+    Accepts JSON like:
+    {
+      "status": "on",   # or "off"
+      "token": "...."
+    }
+    Writes server_acl.conf as: acl on; / acl off;
+    """
+    data = request.get_json(silent=True) or {}
+    status = str(data.get("status", "")).strip().lower()
+
+    if status not in {"on", "off"}:
+        return jsonify({
+            "status": "error",
+            "message": "Invalid 'status'. Use 'on' or 'off'."
+        }), 400
+
+    new_content = f"acl {status};\n"
+
+    # Backup old config
+    backup = None
+    try:
+        if os.path.exists(CONFIG_SERVER_ACL_PATH):
+            backup = backup_path(CONFIG_SERVER_ACL_PATH)
+            shutil.copy2(CONFIG_SERVER_ACL_PATH, backup)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to backup: {e}"}), 400
+
+    # Write new config atomically
+    try:
+        write_atomic(CONFIG_SERVER_ACL_PATH, new_content)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
+
+    # Test nginx
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        # Rollback
+        try:
+            if backup and os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_SERVER_ACL_PATH)
+                remove_backup(backup)
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    # Reload nginx
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        remove_backup(backup)
+        return jsonify({"status": "error", "message": reload_msg}), 400
+    remove_backup(backup)
+    return jsonify({
+        "status": "success",
+        "message": f"ACL successfully set to '{status}' and nginx reloaded."
+    }), 200
+    
+@app.route('/API/L7/acl_rule_management', methods=['POST'])
+@token_required
+def acl_rule_management():
+    """
+    Body:
+    {
+      "data": [
+        {"id": 18, "rules": "<base64 lua table/list for the RHS of `rules = ...`>"},
+        {"id": 21, "rules": "<base64 ...>"}
+      ],
+      "token": "..."
+    }
+
+    For each entry, we generate:
+      location /acl_rule<ID> {
+        access_by_lua_block {
+          ... local cfg = { id = <ID>, rules = <DECODED_RULES> }
+          handle_acl.set_acl_rule(cfg)
+          ...
+        }
+      }
+    """
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("data")
+    if not isinstance(items, list) or not items:
+        return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
+
+    def decode_b64_text(field_name: str, s: str):
+        if not isinstance(s, str):
+            return None, f"'{field_name}' must be a base64-encoded string."
+        try:
+            raw = base64.b64decode(s.strip(), validate=True)
+        except (binascii.Error, ValueError) as e:
+            return None, f"'{field_name}' is not valid base64: {e}"
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None, f"'{field_name}' decoded bytes are not valid UTF-8 text."
+        # Normalize newlines
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return text, None
+
+    # Validate and render per-id blocks
+    blocks = []
+    seen_ids = set()
+    for idx, it in enumerate(items, start=1):
+        if not isinstance(it, dict):
+            return jsonify({"status": "error", "message": f"Entry #{idx} must be an object."}), 400
+
+        # id
+        try:
+            acl_id = int(it.get("id", None))
+            if acl_id <= 0:
+                raise ValueError()
+        except Exception:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'id' (must be positive integer)."}), 400
+        if acl_id in seen_ids:
+            return jsonify({"status": "error", "message": f"Duplicate id '{acl_id}'."}), 400
+        seen_ids.add(acl_id)
+
+        # rules (base64 -> lua snippet for RHS of `rules =`)
+        rules_b64 = it.get("rules", "")
+        rules_text, err = decode_b64_text("rules", rules_b64)
+        if err:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: {err}"}), 400
+
+        # Build an NGINX location block; insert rules_text EXACTLY after `rules = `
+        # NOTE: rules_text should be a valid Lua expression (e.g., { ... }).
+        block = f"""location /acl_rule{acl_id} {{
+    access_by_lua_block {{
+        local is_handle_acl_or, handle_acl = pcall(require, 'resty.handle_acl')
+        if not is_handle_acl_or then
+            ngx.log(ngx.ERR, 'need to build with nginx_http_acl module')
+            return ngx.exit(501)
+        end
+        local cfg = {{
+            id = {acl_id},
+            rules = {rules_text}
+        }}
+
+        local ok, err = handle_acl.set_acl_rule(cfg)
+        if not ok then
+            ngx.log(ngx.ERR, 'failed to set acl rule : ', err)
+            return ngx.exit(403)
+        end
+        ngx.log(ngx.INFO, 'set acl rule success')
+
+        ngx.status = 200
+        ngx.header['Content-Type'] = 'text/plain'
+        ngx.say('Set ACL rule success')
+        return ngx.exit(200)
+    }}
+}}
+"""
+        blocks.append(block)
+
+    # File content: header + all blocks
+    new_content = (
+        "# Managed by /API/L7/acl_rule_management — DO NOT EDIT MANUALLY\n"
+        "# Each location maps to /acl_rule<ID> and sets the ACL rules for that ID via Lua.\n\n"
+        + "\n".join(blocks)
+    )
+
+    # Backup -> write -> nginx -t (rollback on failure) -> reload
+    backup = None
+    try:
+        if os.path.exists(CONFIG_SERVER_LUA_ACL_SET_PATH):
+            backup = backup_path(CONFIG_SERVER_LUA_ACL_SET_PATH)
+            shutil.copy2(CONFIG_SERVER_LUA_ACL_SET_PATH, backup)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
+
+    try:
+        # Ensure trailing newline
+        if not new_content.endswith("\n"):
+            new_content += "\n"
+        write_atomic(CONFIG_SERVER_LUA_ACL_SET_PATH, new_content)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
+
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        # Roll back
+        try:
+            if backup and os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
+                remove_backup(backup)
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        remove_backup(backup)
+        return jsonify({"status": "error", "message": reload_msg}), 400
+
+    remove_backup(backup)
+    return jsonify({"status": "success",
+                    "message": "ACL rule locations updated, nginx test passed, and reload signaled."}), 200    
+    
 def encode_base64(data):
     """
     Encodes the given data (string or bytes) to Base64.

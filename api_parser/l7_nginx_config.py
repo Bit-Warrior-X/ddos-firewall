@@ -11,6 +11,9 @@ CONFIG_HTTP_LUA_ACL_PATH = "/usr/local/openresty/nginx/conf/http_lua_acl.conf"
 CONFIG_HEADER_CONF_PATH = "/usr/local/openresty/nginx/conf/header.conf"
 CONFIG_HTTP_BASE_HEADER_CONF_PATH = "/usr/local/openresty/nginx/conf/http_base_header.conf"
 CONFIG_LOCATION_PROXY_SETTING_CONF_PATH = "/usr/local/openresty/nginx/conf/location_proxy_setting.conf"
+CONFIG_SERVER_ACL_PATH = "/usr/local/openresty/nginx/conf/server_acl.conf"
+CONFIG_SERVER_LUA_ACL_SET_PATH = "/usr/local/openresty/nginx/conf/server_lua_acl_set.conf"
+
 
 def normalize_methods(method_field):
     allowed = {"GET", "HEAD", "POST", "PUT", "DELETE", "MKCOL", "COPY", "MOVE", "OPTIONS", "PROPFIND", "PROPPATCH", "LOCK", "UNLOCK", "PATCH", "TRACE", "CONNECT"}
@@ -133,3 +136,18 @@ def nginx_reload():
         return True, msg
     # failure -> trim
     return False, _trim_nginx_error(proc.stderr)
+
+def remove_backup(path: str) -> bool:
+    """
+    Remove a backup file if it exists.
+    Returns True if removed, False if not present.
+    Raises only unexpected errors.
+    """
+    try:
+        if os.path.exists(path):
+            os.unlink(path)
+            return True
+        return False
+    except Exception as e:
+        # You can log this instead of raising if you prefer silent cleanup
+        raise RuntimeError(f"Failed to remove backup {path}: {e}")
