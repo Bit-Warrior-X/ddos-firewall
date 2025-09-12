@@ -13,6 +13,7 @@ CONFIG_HTTP_BASE_HEADER_CONF_PATH = "/usr/local/openresty/nginx/conf/http_base_h
 CONFIG_LOCATION_PROXY_SETTING_CONF_PATH = "/usr/local/openresty/nginx/conf/location_proxy_setting.conf"
 CONFIG_SERVER_ACL_PATH = "/usr/local/openresty/nginx/conf/server_acl.conf"
 CONFIG_SERVER_LUA_ACL_SET_PATH = "/usr/local/openresty/nginx/conf/server_lua_acl_set.conf"
+CONFIG_LOCATION_LUA_ACL_CHECK_PATH = "/usr/local/openresty/nginx/conf/location_lua_acl_check.conf"
 
 
 def normalize_methods(method_field):

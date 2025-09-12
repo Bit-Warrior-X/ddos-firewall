@@ -13,6 +13,8 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 import ipaddress
 import binascii
+import urllib.request
+import urllib.error
 
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
@@ -23,6 +25,7 @@ from l7_nginx_config import (
     CONFIG_LOCATION_PROXY_SETTING_CONF_PATH,
     CONFIG_SERVER_ACL_PATH,
     CONFIG_SERVER_LUA_ACL_SET_PATH,
+    CONFIG_LOCATION_LUA_ACL_CHECK_PATH,
     normalize_methods, replace_or_append, remove_backup,
     write_atomic, backup_path, 
     nginx_test, nginx_reload
@@ -684,6 +687,12 @@ def allow_request_method():
         "message": "nginx configuration successfully updated for allow http request method and applied."
     }), 200
 
+@app.route('/API/L7/allow_request_method', methods=['GET'])
+@token_required
+def get_allow_request_method():
+    return 200
+    
+
 @app.route('/API/L7/backend_list', methods=['POST'])
 @token_required
 def update_backend_list():
@@ -788,6 +797,8 @@ def update_backend_list():
         remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
     remove_backup(backup)
+    
+    
     return jsonify({
         "status": "success",
         "message": "nginx configuration successfully updated for backend list and applied"
@@ -1087,6 +1098,8 @@ def set_acl():
         "message": f"ACL successfully set to '{status}' and nginx reloaded."
     }), 200
     
+
+ACL_RULE_URL_BASE = "http://127.0.0.1"  # or "http://localhost" if you prefer
 @app.route('/API/L7/acl_rule_management', methods=['POST'])
 @token_required
 def acl_rule_management():
@@ -1131,6 +1144,7 @@ def acl_rule_management():
 
     # Validate and render per-id blocks
     blocks = []
+    ids = []
     seen_ids = set()
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
@@ -1146,6 +1160,7 @@ def acl_rule_management():
         if acl_id in seen_ids:
             return jsonify({"status": "error", "message": f"Duplicate id '{acl_id}'."}), 400
         seen_ids.add(acl_id)
+        ids.append(acl_id)
 
         # rules (base64 -> lua snippet for RHS of `rules =`)
         rules_b64 = it.get("rules", "")
@@ -1223,9 +1238,244 @@ def acl_rule_management():
         remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
 
+    # --- Post-reload validation by hitting each /acl_rule<ID> ---
+    def get_text(url: str, timeout=5):
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+            return status, body
+    
+    failures = []
+    for acl_id in ids:
+        url = f"{ACL_RULE_URL_BASE}/acl_rule{acl_id}"
+        try:
+            status, body = get_text(url, timeout=5)
+            ok = (status == 200) and ("Set ACL rule success" in body)
+            if not ok:
+                failures.append({"id": acl_id, "status": status, "body": body.strip()[:500]})
+        except urllib.error.HTTPError as e:
+            failures.append({"id": acl_id, "status": e.code, "body": (e.read().decode('utf-8', 'replace') if e.fp else str(e))[:500]})
+        except Exception as e:
+            failures.append({"id": acl_id, "status": None, "body": str(e)})
+            
+    if failures:
+        # Roll back to backup config and reload old config
+        try:
+            if backup and os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
+                ok_test_old, msg_old = nginx_test()
+                if ok_test_old:
+                    nginx_reload()
+        except Exception:
+            # even if rollback reload fails, we still report original failures
+            pass
+
+        return jsonify({
+            "status": "error",
+            "message": "One or more ACL rule endpoints failed validation after reload.",
+            "details": failures
+        }), 400
+        
+    # All validated
     remove_backup(backup)
     return jsonify({"status": "success",
                     "message": "ACL rule locations updated, nginx test passed, and reload signaled."}), 200    
+
+
+@app.route('/API/L7/acl_rule_apply', methods=['POST'])
+@token_required
+def acl_rule_apply():
+    """
+    Body:
+    {
+      "data": [
+        {"id": 12, "checking_cond": "allow", "apply_code": "allow", "apply_content": null},
+        {"id": 24, "checking_cond": "block", "apply_code": "block", "apply_content": null},
+        {"id": 12, "checking_cond": "block", "apply_code": "return_code", "apply_content": 403},
+        {"id": 47, "checking_cond": "block", "apply_code": "redirect", "apply_content": "https://www.xxx.com/redirect"},
+        {"id": 25, "checking_cond": "allow", "apply_code": "redirect", "apply_content": "https://www.xxx.com/redirect"}
+      ],
+      "token": "..."
+    }
+
+    Writes /usr/local/openresty/nginx/conf/location_lua_acl_check.conf
+    containing an access_by_lua_block implementing first-match semantics.
+    """
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("data")
+    if not isinstance(items, list) or not items:
+        return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
+    
+    # Validators
+    def valid_url(u: str) -> bool:
+        try:
+            p = urlparse(u)
+            return p.scheme in ("http", "https") and bool(p.netloc)
+        except Exception:
+            return False
+
+    normalized = []  # list of dicts: {id, cond, action}
+    for idx, it in enumerate(items, start=1):
+        if not isinstance(it, dict):
+            return jsonify({"status": "error", "message": f"Entry #{idx} must be an object."}), 400
+        # id
+        try:
+            acl_id = int(it.get("id", None))
+            if acl_id <= 0:
+                raise ValueError()
+        except Exception:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'id' (must be positive integer)."}), 400
+        
+        # checking_cond
+        cond = str(it.get("checking_cond", "")).strip().lower()
+        if cond not in {"allow", "block"}:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: 'checking_cond' must be 'allow' or 'block'."}), 400
+        
+        # apply_code + apply_content
+        code = str(it.get("apply_code", "")).strip().lower()
+        if code not in {"allow", "block", "return_code", "redirect"}:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'apply_code'."}), 400
+
+        content = it.get("apply_content", None)
+        if code in {"allow", "block"}:
+            # should be empty / null; tolerate "" or None
+            if content not in (None, "", []):
+                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be empty for '{code}'."}), 400
+            action = {"kind": code}
+        elif code == "return_code":
+            try:
+                rc = int(content)
+                if not (100 <= rc <= 599):
+                    raise ValueError()
+            except Exception:
+                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid HTTP status code (100..599)."}), 400
+            action = {"kind": "return_code", "code": rc}
+        else:  # redirect
+            url = str(content or "").strip()
+            #if not valid_url(url):
+            #    return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid http(s) URL for 'redirect'."}), 400
+            action = {"kind": "redirect", "url": url}
+
+        normalized.append({"id": acl_id, "cond": cond, "action": action})
+    
+    # Render Lua with first-match semantics
+    # BLOCK and INTERNAL_ERROR are treated as "block", others as "allow".
+    def lua_quote_long(s: str) -> str:
+        # Put string inside Lua long brackets [[...]] safely
+        return f"[[{s}]]"
+    
+    lua_rules_lines = []
+    for r in normalized:
+        act = r["action"]
+        if act["kind"] == "allow":
+            action_lua = '{ kind = "allow" }'
+        elif act["kind"] == "block":
+            action_lua = '{ kind = "block" }'
+        elif act["kind"] == "return_code":
+            action_lua = f'{{ kind = "return_code", code = {act["code"]} }}'
+        else:
+            action_lua = f'{{ kind = "redirect", url = {lua_quote_long(act["url"]) } }}'
+        lua_rules_lines.append(f'    {{ id = {r["id"]}, cond = "{r["cond"]}", action = {action_lua} }},')
+
+    lua_block = f"""access_by_lua_block {{
+    local is_ok, handle_acl = pcall(require, 'resty.handle_acl')
+    if not is_ok then
+        ngx.log(ngx.ERR, 'need to build with nginx_http_acl module')
+        return ngx.exit(501)
+    end
+
+    -- Map engine return to allow/block:
+    -- 1 = ACL_RETURN_BLOCK, 5 = ACL_RETURN_INTERNAL_ERROR -> block
+    -- others -> allow
+    local function is_allow_ret(ret)
+        return not (ret == 1 or ret == 5)
+    end
+
+    -- First-match rules configured by API
+    local rules = {{
+{os.linesep.join(lua_rules_lines)}
+    }}
+
+    for _, r in ipairs(rules) do
+        local ret = handle_acl.process_acl_id(r.id)
+        ngx.log(ngx.INFO, "process_acl_id(", r.id, ") returns ", tonumber(ret))
+        local allow_eval = is_allow_ret(ret)
+        local cond_ok = (r.cond == "allow" and allow_eval) or (r.cond == "block" and not allow_eval)
+        if cond_ok then
+            local k = r.action.kind
+            if k == "allow" then
+                -- allow request: stop evaluating; continue normal nginx flow
+                return
+            elseif k == "block" then
+                return ngx.exit(451)
+            elseif k == "return_code" then
+                local code = tonumber(r.action.code) or 451
+                return ngx.exit(code)
+            elseif k == "redirect" then
+                local url = r.action.url
+                if url and #url > 0 then
+                    return ngx.redirect(url)
+                else
+                    return ngx.exit(451)
+                end
+            else
+                -- unknown action -> safest: block
+                return ngx.exit(451)
+            end
+        end
+    end
+
+    -- No rule matched -> allow
+    return
+}}
+"""
+    new_content = (
+        "# Managed by /API/L7/acl_rule_apply — DO NOT EDIT MANUALLY\n"
+        "# First-match semantics across configured (id, checking_cond -> action).\n\n"
+        + lua_block
+    )
+    
+    if not new_content.endswith("\n"):
+        new_content += "\n"
+
+    # Backup -> write -> test -> reload (with rollback on failure)
+    backup = None
+    try:
+        if os.path.exists(CONFIG_LOCATION_LUA_ACL_CHECK_PATH):
+            backup = backup_path(CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
+            shutil.copy2(CONFIG_LOCATION_LUA_ACL_CHECK_PATH, backup)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
+
+    try:
+        write_atomic(CONFIG_LOCATION_LUA_ACL_CHECK_PATH, new_content)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
+
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        try:
+            if backup and os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
+                remove_backup(backup)
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        return jsonify({"status": "error", "message": reload_msg}), 400
+
+    # Success; optional cleanup of backup
+    remove_backup(backup)
+
+    return jsonify({
+        "status": "success",
+        "message": "ACL rule apply config updated, nginx test passed, and reload signaled."
+    }), 200
+  
+  
     
 def encode_base64(data):
     """
