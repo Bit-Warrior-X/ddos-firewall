@@ -34,7 +34,8 @@ from l7_nginx_config import (
     parse_backend_list,
     file_to_base64,
     parse_acl_system_config,
-    parse_acl_switch
+    parse_acl_switch,
+    parse_acl_rule_management
 )
 
 
@@ -1382,6 +1383,22 @@ def acl_rule_management():
                     "message": "ACL rule locations updated, nginx test passed, and reload signaled."}), 200    
 
 
+@app.route("/API/L7/acl_rule_management", methods=["GET"])
+def acl_rule_management_get():
+    try:
+        data = parse_acl_rule_management(CONFIG_SERVER_LUA_ACL_SET_PATH)
+        return jsonify({
+            "data": data,
+            "token": _extract_token(request)
+        }), 200
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
+    
 @app.route('/API/L7/acl_rule_apply', methods=['POST'])
 @token_required
 def acl_rule_apply():

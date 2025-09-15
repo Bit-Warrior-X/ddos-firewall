@@ -392,3 +392,139 @@ def parse_acl_switch(path: str = CONFIG_SERVER_ACL_PATH) -> str:
 
     # If directive not found, treat as error (or default to 'off' if you prefer)
     raise ValueError("Missing 'acl on|off;' directive in server_acl.conf")
+
+
+_loc_re = re.compile(r'^\s*location\s+/\s*acl_rule(\d+)\s*\{')
+
+def _extract_balanced_curly(text: str, start_idx: int) -> str:
+    """
+    Return the substring from the first '{' at/after start_idx up to its
+    matching '}' (inclusive). We ignore braces inside single/double quotes
+    and Lua long strings [[ ... ]].
+    Raises ValueError if it can't find a balanced block.
+    """
+    i = text.find('{', start_idx)
+    if i == -1:
+        raise ValueError("Opening '{' for rules block not found")
+
+    level = 0
+    in_sq = False  # '
+    in_dq = False  # "
+    in_long = False  # [[ ... ]]
+    j = i
+    n = len(text)
+
+    while j < n:
+        ch = text[j]
+
+        # Handle Lua long strings [[ ... ]]
+        if not in_sq and not in_dq:
+            # open long string?
+            if not in_long and ch == '[' and j + 1 < n and text[j+1] == '[':
+                in_long = True
+                j += 2
+                continue
+            # close long string?
+            if in_long and ch == ']' and j + 1 < n and text[j+1] == ']':
+                in_long = False
+                j += 2
+                continue
+
+        if in_long:
+            j += 1
+            continue
+
+        # Handle normal quotes
+        if not in_dq and ch == "'" and not in_sq:
+            in_sq = True
+            j += 1
+            continue
+        if in_sq:
+            if ch == '\\':  # skip escape
+                j += 2
+                continue
+            if ch == "'":
+                in_sq = False
+            j += 1
+            continue
+
+        if not in_sq and ch == '"' and not in_dq:
+            in_dq = True
+            j += 1
+            continue
+        if in_dq:
+            if ch == '\\':  # skip escape
+                j += 2
+                continue
+            if ch == '"':
+                in_dq = False
+            j += 1
+            continue
+
+        # Not inside any string → count braces
+        if ch == '{':
+            level += 1
+        elif ch == '}':
+            level -= 1
+            if level == 0:
+                return text[i:j+1]
+
+        j += 1
+
+    raise ValueError("Unbalanced '{' ... '}' in rules block")
+
+def parse_acl_rule_management(path: str = CONFIG_SERVER_LUA_ACL_SET_PATH):
+    """
+    Parse server_lua_acl_set.conf and return:
+      [
+        {"id": 18, "rules": "<base64 of rules = { ... } >"},
+        {"id": 21, "rules": "<base64 ... >"},
+        ...
+      ]
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    results = []
+    i = 0
+    L = len(lines)
+
+    while i < L:
+        m = _loc_re.match(lines[i])
+        if not m:
+            i += 1
+            continue
+
+        acl_id = int(m.group(1))
+        # capture the full 'location { ... }' block to search for rules within
+        brace_level = lines[i].count('{') - lines[i].count('}')
+        block_lines = [lines[i]]
+        i += 1
+
+        while i < L and brace_level > 0:
+            line = lines[i]
+            brace_level += line.count('{')
+            brace_level -= line.count('}')
+            block_lines.append(line)
+            i += 1
+
+        block_text = "".join(block_lines)
+
+        # Find 'rules = {' start within this location block
+        rm = re.search(r"rules\s*=\s*\{", block_text)
+        if not rm:
+            # no rules → skip this location
+            continue
+
+        rules_block = _extract_balanced_curly(block_text, rm.start())
+        rules_b64 = base64.b64encode(rules_block.encode("utf-8")).decode("ascii")
+
+        results.append({
+            "id": acl_id,
+            "rules": rules_b64
+        })
+
+    return results
