@@ -35,7 +35,8 @@ from l7_nginx_config import (
     file_to_base64,
     parse_acl_system_config,
     parse_acl_switch,
-    parse_acl_rule_management
+    parse_acl_rule_management,
+    parse_acl_rule_apply
 )
 
 
@@ -1592,6 +1593,20 @@ def acl_rule_apply():
     }), 200
   
   
+@app.route("/API/L7/acl_rule_apply", methods=["GET"])
+def acl_rule_apply_get():
+    try:
+        data = parse_acl_rule_apply(CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
+        return jsonify({
+            "data": data,
+            "token": _extract_token(request)
+        }), 200
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500 
     
 def encode_base64(data):
     """

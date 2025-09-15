@@ -528,3 +528,121 @@ def parse_acl_rule_management(path: str = CONFIG_SERVER_LUA_ACL_SET_PATH):
         })
 
     return results
+
+def _split_top_level_items(table_body: str):
+    """Given content inside the outer {...} of the rules table, return a list of '{...}' items."""
+    items = []
+    n = len(table_body)
+    j = 0
+    in_sq = in_dq = in_long = False
+    level = 0
+    start = None
+    while j < n:
+        ch = table_body[j]
+        # long string
+        if not in_sq and not in_dq:
+            if not in_long and ch == '[' and j + 1 < n and table_body[j+1] == '[':
+                in_long = True; j += 2; continue
+            if in_long and ch == ']' and j + 1 < n and table_body[j+1] == ']':
+                in_long = False; j += 2; continue
+        if in_long:
+            j += 1; continue
+        # quotes
+        if not in_dq and ch == "'" and not in_sq:
+            in_sq = True; j += 1; continue
+        if in_sq:
+            if ch == '\\': j += 2; continue
+            if ch == "'": in_sq = False
+            j += 1; continue
+        if not in_sq and ch == '"' and not in_dq:
+            in_dq = True; j += 1; continue
+        if in_dq:
+            if ch == '\\': j += 2; continue
+            if ch == '"': in_dq = False
+            j += 1; continue
+
+        if ch == '{':
+            if level == 0:
+                start = j
+            level += 1
+        elif ch == '}':
+            level -= 1
+            if level == 0 and start is not None:
+                items.append(table_body[start:j+1])
+                start = None
+        j += 1
+    return items
+
+def parse_acl_rule_apply(path: str = CONFIG_LOCATION_LUA_ACL_CHECK_PATH):
+    """
+    Returns list of dicts:
+      [{ "id": int, "checking_cond": "allow|block", "apply_code": "allow|block|return_code|redirect", "apply_content": <""|int|str> }, ...]
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    # Find the rules table: local rules = { ... }
+    m = re.search(r"local\s+rules\s*=\s*\{", text)
+    if not m:
+        return []
+
+    rules_block = _extract_balanced_curly(text, m.start())
+    inner = rules_block[1:-1]  # strip outer { }
+
+    entries = _split_top_level_items(inner)
+    out = []
+
+    # Regexes for fields
+    id_re    = re.compile(r"\bid\s*=\s*(\d+)")
+    cond_re  = re.compile(r'\bcond\s*=\s*"(?P<cond>allow|block)"', re.IGNORECASE)
+    act_re   = re.compile(r"\baction\s*=\s*\{")
+    kind_re  = re.compile(r'\bkind\s*=\s*"(?P<kind>allow|block|return_code|redirect)"', re.IGNORECASE)
+    code_re  = re.compile(r"\bcode\s*=\s*(\d+)")
+    url_long = re.compile(r"\burl\s*=\s*\[\[(.*?)\]\]", re.S)
+    url_quot = re.compile(r'\burl\s*=\s*"([^"]*)"')
+
+    for item in entries:
+        # id
+        m_id = id_re.search(item)
+        if not m_id:
+            continue
+        rid = int(m_id.group(1))
+
+        # cond
+        m_cond = cond_re.search(item)
+        checking_cond = (m_cond.group("cond").lower() if m_cond else "allow")
+
+        # action { ... }
+        m_act = act_re.search(item)
+        if not m_act:
+            continue
+        act_block = _extract_balanced_curly(item, m_act.start())
+        act_inner = act_block[1:-1]
+
+        # kind
+        m_kind = kind_re.search(act_inner)
+        if not m_kind:
+            continue
+        apply_code = m_kind.group("kind").lower()
+
+        # content
+        apply_content = ""
+        if apply_code == "return_code":
+            m_code = code_re.search(act_inner)
+            if m_code:
+                apply_content = int(m_code.group(1))
+        elif apply_code == "redirect":
+            m_url = url_long.search(act_inner) or url_quot.search(act_inner)
+            if m_url:
+                apply_content = m_url.group(1)
+
+        out.append({
+            "id": rid,
+            "checking_cond": checking_cond,
+            "apply_code": apply_code,
+            "apply_content": apply_content
+        })
+
+    return out
