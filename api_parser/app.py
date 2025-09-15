@@ -16,6 +16,7 @@ import binascii
 import urllib.request
 import urllib.error
 
+
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
     CONFIG_BACKEND_LIST_PATH,
@@ -28,8 +29,11 @@ from l7_nginx_config import (
     CONFIG_LOCATION_LUA_ACL_CHECK_PATH,
     normalize_methods, replace_or_append, remove_backup,
     write_atomic, backup_path, 
-    nginx_test, nginx_reload
+    nginx_test, nginx_reload,
+    
+    get_report_settings,
 )
+
 
 app = Flask(__name__)
 
@@ -687,10 +691,48 @@ def allow_request_method():
         "message": "nginx configuration successfully updated for allow http request method and applied."
     }), 200
 
+def _extract_token(req) -> str:
+    """Get token from Authorization: Bearer <token> or ?token=... (fallback)."""
+    auth = req.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(None, 1)[1].strip()
+    return req.args.get("token", "")  # GET fallback
+
 @app.route('/API/L7/allow_request_method', methods=['GET'])
-@token_required
-def get_allow_request_method():
-    return 200
+#@token_required
+def allow_request_method_get():
+    """
+    GET /API/L7/allow_request_method  -> returns current settings:
+      {
+        "status": "on"|"off",
+        "method": "GET, POST",
+        "block_duration": 300,
+        "token": "<received token>"
+      }
+    """
+    try:
+        status, methods = get_report_settings(CONFIG_HTTP_REPORT_IP_PATH)
+        token = _extract_token(request)
+
+        if token not in VALID_TOKENS:
+            return jsonify({"status": "error", "message": "Invalid token"}), 403
+        
+        # Format methods exactly like you asked: "GET, POST"
+        method_str = ", ".join(methods) if methods else ""
+
+        resp = {
+            "status": status,
+            "method": method_str,
+            "block_duration": 300,   # default as requested
+            "token": token           # echo back the received token
+        }
+        return jsonify(resp), 200
+
+    except FileNotFoundError:
+        return jsonify({"status": "error",
+                        "message": f"Config not found: {CONFIG_HTTP_REPORT_IP_PATH}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
     
 
 @app.route('/API/L7/backend_list', methods=['POST'])

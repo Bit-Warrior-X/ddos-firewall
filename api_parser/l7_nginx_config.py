@@ -152,3 +152,35 @@ def remove_backup(path: str) -> bool:
     except Exception as e:
         # You can log this instead of raising if you prefer silent cleanup
         raise RuntimeError(f"Failed to remove backup {path}: {e}")
+    
+
+_cfg_line = re.compile(r'^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(.*?)\s*;\s*$')
+
+def parse_nginx_kv(path: str = CONFIG_HTTP_REPORT_IP_PATH) -> dict:
+    """
+    Reads simple 'key value;' directives from the given nginx conf.
+    Ignores comments and blank lines. Returns dict {key: value_string}.
+    """
+    kv = {}
+    with open(path, "r") as f:
+        for raw in f:
+            # strip inline comments
+            line = raw.split('#', 1)[0].strip()
+            if not line:
+                continue
+            m = _cfg_line.match(line)
+            if m:
+                key, val = m.group(1), m.group(2)
+                kv[key] = val.strip()
+    return kv
+
+def get_report_settings(path: str = CONFIG_HTTP_REPORT_IP_PATH):
+    """
+    Returns: (status_onoff: 'on'|'off', methods_list: ['GET','POST', ...])
+    Missing keys are handled gracefully with defaults.
+    """
+    kv = parse_nginx_kv(path)
+    status = kv.get("report_module_check", "off").lower()
+    methods_raw = kv.get("report_available_methods", "")
+    methods = [m for m in re.split(r'[,\s]+', methods_raw) if m]
+    return status, methods
