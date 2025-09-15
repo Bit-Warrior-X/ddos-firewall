@@ -16,7 +16,6 @@ import binascii
 import urllib.request
 import urllib.error
 
-
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
     CONFIG_BACKEND_LIST_PATH,
@@ -33,6 +32,7 @@ from l7_nginx_config import (
     
     get_report_settings,
     parse_backend_list,
+    file_to_base64,
 )
 
 
@@ -1085,17 +1085,25 @@ def ngx_base_config():
         "message": "Base configs updated, nginx test passed, and reload signaled."
     }), 200
 
-import os
-import shutil
-from flask import request, jsonify
-from l7_nginx_config import (
-    CONFIG_SERVER_ACL_PATH,
-    write_atomic,
-    backup_path,
-    nginx_test,
-    nginx_reload,
-)
 
+@app.route("/API/L7/ngx_base_config", methods=["GET"])
+def ngx_base_config_get():
+    try:
+        payload = {
+            "header": file_to_base64(CONFIG_HEADER_CONF_PATH),
+            "http": file_to_base64(CONFIG_HTTP_BASE_HEADER_CONF_PATH),
+            "proxy": file_to_base64(CONFIG_LOCATION_PROXY_SETTING_CONF_PATH),
+            "token": _extract_token(request),
+        }
+        return jsonify(payload), 200
+
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 @app.route('/API/L7/set_acl', methods=['POST'])
 @token_required
 def set_acl():

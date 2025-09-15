@@ -3,6 +3,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import base64
 from datetime import datetime
 
 CONFIG_HTTP_REPORT_IP_PATH = "/usr/local/openresty/nginx/conf/http_report_ip.conf"
@@ -262,3 +263,8 @@ def parse_backend_list(path: str = CONFIG_BACKEND_LIST_PATH):
                 "weight": weight
             })
     return servers
+
+def file_to_base64(path: str) -> str:
+    """Read a file as bytes and return a base64-encoded ASCII string."""
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
