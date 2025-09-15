@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import base64
+import math
 from datetime import datetime
 
 CONFIG_HTTP_REPORT_IP_PATH = "/usr/local/openresty/nginx/conf/http_report_ip.conf"
@@ -268,3 +269,102 @@ def file_to_base64(path: str) -> str:
     """Read a file as bytes and return a base64-encoded ASCII string."""
     with open(path, "rb") as f:
         return base64.b64encode(f.read()).decode("ascii")
+    
+
+# --- unit helpers ------------------------------------------------------------
+
+_size_re = re.compile(r"^\s*(\d+)\s*([kKmMgG]?)\s*$")
+_time_re = re.compile(r"^\s*(\d+)\s*([a-zA-Z]+)?\s*$")
+
+def _to_megabytes(val: str) -> int:
+    """
+    Convert '10m', '200M', '1024k', '1g' -> MB (int).
+    If 'k' is used, rounds up to the next MB.
+    """
+    m = _size_re.match(val)
+    if not m:
+        raise ValueError(f"Invalid size value: {val}")
+    num = int(m.group(1))
+    unit = (m.group(2) or "m").lower()
+    if unit == "k":
+        return max(1, math.ceil(num / 1024))  # 1024k -> 1 MB
+    if unit == "m":
+        return num
+    if unit == "g":
+        return num * 1024
+    # No/unknown unit: treat as MB
+    return num
+
+def _to_seconds(val: str) -> int:
+    """
+    Convert '10s', '1500ms', '2m', '1h' -> seconds (int, ceil for sub-second).
+    """
+    m = _time_re.match(val)
+    if not m:
+        raise ValueError(f"Invalid time value: {val}")
+    num = int(m.group(1))
+    unit = (m.group(2) or "s").lower()
+
+    if unit in ("s", "sec", "secs", "second", "seconds"):
+        return num
+    if unit in ("ms", "msec", "millisecond", "milliseconds"):
+        return max(1, math.ceil(num / 1000))
+    if unit in ("m", "min", "mins", "minute", "minutes"):
+        return num * 60
+    if unit in ("h", "hr", "hrs", "hour", "hours"):
+        return num * 3600
+    # Unknown unit -> assume seconds
+    return num
+
+# --- parser ------------------------------------------------------------------
+
+def parse_acl_system_config(path: str = CONFIG_SERVER_LUA_ACL_SET_PATH) -> dict:
+    """
+    Parse http_lua_acl.conf and return:
+      {
+        "acl_rule_shm_size": <MB:int>,
+        "acl_req_shm_size": <MB:int>,
+        "acl_rsp_shm_size": <MB:int>,
+        "acl_optimize_period": <seconds:int>
+      }
+    Ignores comments and blank lines.
+    """
+    wanted = {
+        "acl_rule_shm_size": None,
+        "acl_req_shm_size":  None,
+        "acl_rsp_shm_size":  None,
+        "acl_optimize_period": None,
+    }
+
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    with open(path, "r") as f:
+        for raw in f:
+            # strip inline comments
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            # match: key <value> ;
+            m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s+([^;\s]+)\s*;\s*$", line)
+            if not m:
+                continue
+            key, val = m.group(1), m.group(2)
+            if key not in wanted:
+                continue
+            if key == "acl_optimize_period":
+                wanted[key] = _to_seconds(val)
+            else:
+                wanted[key] = _to_megabytes(val)
+
+    # Optional: fallbacks if any directive is missing (tweak/remove if not desired)
+    defaults = {
+        "acl_rule_shm_size": 10,
+        "acl_req_shm_size": 200,
+        "acl_rsp_shm_size": 200,
+        "acl_optimize_period": 10,
+    }
+    for k, v in wanted.items():
+        if v is None:
+            wanted[k] = defaults[k]
+    return wanted

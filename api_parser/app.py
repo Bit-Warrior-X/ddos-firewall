@@ -33,6 +33,7 @@ from l7_nginx_config import (
     get_report_settings,
     parse_backend_list,
     file_to_base64,
+    parse_acl_system_config,
 )
 
 
@@ -956,6 +957,21 @@ def acl_system_config():
         "message": "ACL system config updated, nginx test passed, and reload signaled."
     }), 200
    
+
+@app.route("/API/L7/acl_system_config", methods=["GET"])
+def acl_system_config_get():
+    try:
+        data = parse_acl_system_config(CONFIG_SERVER_LUA_ACL_SET_PATH)
+        data["token"] = _extract_token(request)
+        return jsonify(data), 200
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
+    
 @app.route('/API/L7/ngx_base_config', methods=['POST'])
 @token_required
 def ngx_base_config():
