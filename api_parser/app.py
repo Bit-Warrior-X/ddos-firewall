@@ -32,6 +32,7 @@ from l7_nginx_config import (
     nginx_test, nginx_reload,
     
     get_report_settings,
+    parse_backend_list,
 )
 
 
@@ -733,8 +734,7 @@ def allow_request_method_get():
                         "message": f"Config not found: {CONFIG_HTTP_REPORT_IP_PATH}"}), 500
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-    
-
+     
 @app.route('/API/L7/backend_list', methods=['POST'])
 @token_required
 def update_backend_list():
@@ -845,7 +845,23 @@ def update_backend_list():
         "status": "success",
         "message": "nginx configuration successfully updated for backend list and applied"
     }), 200
-    
+
+@app.route('/API/L7/backend_list', methods=['GET'])
+def backend_list_get():
+    try:
+        data = parse_backend_list(CONFIG_BACKEND_LIST_PATH)
+        return jsonify({
+            "data": data,
+            "token": _extract_token(request)
+        }), 200
+    except FileNotFoundError:
+        return jsonify({
+            "status": "error",
+            "message": f"Config not found: {CONFIG_BACKEND_LIST_PATH}"
+        }), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+        
 _ACL_DEFAULT_STUB = """# Managed by /API/L7/acl_system_config
 # DO NOT EDIT MANUALLY — CHANGES WILL BE OVERWRITTEN
 

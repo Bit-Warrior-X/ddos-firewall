@@ -184,3 +184,81 @@ def get_report_settings(path: str = CONFIG_HTTP_REPORT_IP_PATH):
     methods_raw = kv.get("report_available_methods", "")
     methods = [m for m in re.split(r'[,\s]+', methods_raw) if m]
     return status, methods
+
+def _parse_address(addr: str):
+    """
+    Returns (ip_or_host, port:int|None)
+    Supports IPv6 like [2001:db8::1]:8080
+    """
+    addr = addr.strip()
+    if addr.startswith('['):  # IPv6
+        end = addr.find(']')
+        host = addr[1:end]
+        port = None
+        rest = addr[end+1:]
+        if rest.startswith(':'):
+            port = int(rest[1:])
+        return host, port
+    if ':' in addr:
+        host, port = addr.rsplit(':', 1)
+        return host, int(port)
+    return addr, None  # rare; nginx allows domain w/o port
+
+def parse_backend_list(path: str = CONFIG_BACKEND_LIST_PATH):
+    """
+    Parses lines like:
+      server 10.10.10.12:8080 weight=2; # backend0
+    Returns: list[{"name": str, "ip": str, "port": int, "weight": int}]
+    """
+    servers = []
+    in_block = False
+    with open(path, "r") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith('#'):
+                continue
+            # Track upstream blocks (optional; we’ll parse server lines anywhere)
+            if line.startswith('upstream '):
+                in_block = True
+                continue
+            if in_block and line.startswith('}'):
+                in_block = False
+                continue
+            if 'server ' not in line or line.lstrip().startswith('#'):
+                continue
+
+            # Split out trailing comment for the name
+            before_hash, *after_hash = line.split('#', 1)
+            name = after_hash[0].strip() if after_hash else ""
+
+            # Trim to before ';'
+            before_semicolon = before_hash.split(';', 1)[0]
+
+            # Tokenize after the "server" keyword
+            tokens = before_semicolon.split()
+            # Expect: ["server", "<addr>", "weight=2", "..."]
+            if len(tokens) < 2 or tokens[0] != 'server':
+                continue
+
+            addr = tokens[1]
+            params = " ".join(tokens[2:]) if len(tokens) > 2 else ""
+
+            # Extract weight (default 1)
+            m = re.search(r"\bweight\s*=\s*(\d+)\b", params)
+            weight = int(m.group(1)) if m else 1
+
+            ip, port = _parse_address(addr)
+            if port is None:
+                # If no port is present, assume 80 (adjust if your config differs)
+                port = 80
+
+            if not name:
+                name = f"backend-{ip}-{port}"
+
+            servers.append({
+                "name": name,
+                "ip": ip,
+                "port": port,
+                "weight": weight
+            })
+    return servers
