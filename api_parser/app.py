@@ -34,6 +34,7 @@ from l7_nginx_config import (
     parse_backend_list,
     file_to_base64,
     parse_acl_system_config,
+    parse_acl_switch
 )
 
 
@@ -1181,6 +1182,22 @@ def set_acl():
     }), 200
     
 
+@app.route("/API/L7/set_acl", methods=["GET"])
+def set_acl_get():
+    try:
+        status = parse_acl_switch(CONFIG_SERVER_ACL_PATH)
+        return jsonify({
+            "status": status,          # "on" or "off"
+            "token": _extract_token(request)
+        }), 200
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
+    
 ACL_RULE_URL_BASE = "http://127.0.0.1"  # or "http://localhost" if you prefer
 @app.route('/API/L7/acl_rule_management', methods=['POST'])
 @token_required

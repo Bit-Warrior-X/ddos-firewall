@@ -368,3 +368,27 @@ def parse_acl_system_config(path: str = CONFIG_SERVER_LUA_ACL_SET_PATH) -> dict:
         if v is None:
             wanted[k] = defaults[k]
     return wanted
+
+
+def parse_acl_switch(path: str = CONFIG_SERVER_ACL_PATH) -> str:
+    """
+    Reads `server_acl.conf` and returns 'on' or 'off' from a line like:
+      acl on;
+      acl off;
+    Ignores comments and blank lines.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    patt = re.compile(r"^\s*acl\s+(on|off)\s*;\s*$", re.IGNORECASE)
+    with open(path, "r") as f:
+        for raw in f:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            m = patt.match(line)
+            if m:
+                return m.group(1).lower()
+
+    # If directive not found, treat as error (or default to 'off' if you prefer)
+    raise ValueError("Missing 'acl on|off;' directive in server_acl.conf")
