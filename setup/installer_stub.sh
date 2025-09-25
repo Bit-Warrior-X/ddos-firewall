@@ -128,7 +128,7 @@ install_files() {
     else
         print_warning "ebpf_firewall_cli not found in ${INSTALL_L4_DIR}, skipping symlink"
     fi
-    
+
     # Install API parser: move extracted api_parser content into the install dir.
     if [[ -d "${EXTRACTED_DIR}/api_parser" ]]; then
         print_status "Installing API parser (copying files)..."
@@ -145,6 +145,16 @@ install_files() {
         fi
     fi
 
+    # Install OpenResty (L7)
+    if [[ -f "${EXTRACTED_DIR}/l7/openresty.tar.gz" ]]; then
+        print_status "Installing OpenResty..."
+        mkdir -p /usr/local/openresty
+        tar -xzf "${EXTRACTED_DIR}/l7/openresty.tar.gz" -C /usr/local/openresty --strip-components=1
+        print_status "OpenResty extracted to /usr/local/openresty"
+    else
+        print_warning "l7/openresty.tar.gz not found in payload; skipping OpenResty install"
+    fi
+    
     # Install libraries into LIB_DIR
     print_status "Installing libraries..."
     if [[ -d "${EXTRACTED_DIR}/lib" ]]; then
