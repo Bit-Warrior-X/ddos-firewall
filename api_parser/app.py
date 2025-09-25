@@ -1323,22 +1323,28 @@ def acl_rule_management():
     except Exception as e:
         return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
 
+    print ("step ....1")
+    
     ok_test, test_msg = nginx_test()
     if not ok_test:
         # Roll back
         try:
             if backup and os.path.exists(backup):
                 shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
-                remove_backup(backup)
         except Exception:
             pass
+        
+        remove_backup(backup)
         return jsonify({"status": "error", "message": test_msg}), 400
 
+    print ("step ....2")
+    
     ok_reload, reload_msg = nginx_reload()
     if not ok_reload:
         remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
 
+    print ("step ....3")
     # --- Post-reload validation by hitting each /acl_rule<ID> ---
     def get_text(url: str, timeout=5):
         req = urllib.request.Request(url, method="GET")
@@ -1347,6 +1353,7 @@ def acl_rule_management():
             body = resp.read().decode("utf-8", errors="replace")
             return status, body
     
+    print ("step ....4")
     failures = []
     for acl_id in ids:
         url = f"{ACL_RULE_URL_BASE}/acl_rule{acl_id}"
@@ -1359,7 +1366,8 @@ def acl_rule_management():
             failures.append({"id": acl_id, "status": e.code, "body": (e.read().decode('utf-8', 'replace') if e.fp else str(e))[:500]})
         except Exception as e:
             failures.append({"id": acl_id, "status": None, "body": str(e)})
-            
+    
+    print ("step ....5")            
     if failures:
         # Roll back to backup config and reload old config
         try:
@@ -1372,12 +1380,14 @@ def acl_rule_management():
             # even if rollback reload fails, we still report original failures
             pass
 
+        remove_backup(backup)
         return jsonify({
             "status": "error",
             "message": "One or more ACL rule endpoints failed validation after reload.",
             "details": failures
         }), 400
-        
+    
+    print ("step ....6")    
     # All validated
     remove_backup(backup)
     return jsonify({"status": "success",
@@ -1856,7 +1866,7 @@ if __name__ == '__main__':
     fifo_thread = start_fifo_listener()
     print(f"[API_PARSER] Running (PID: {os.getpid()})...")
     
-    app.run(host=SERVER_IP, port=SERVER_PORT, debug=True)
+    app.run(host=SERVER_IP, port=SERVER_PORT, debug=False, use_reloader=True)
     
     print("\n[API_PARSER] Shutting down...")
     if os.path.exists(FIFO_PATH):
