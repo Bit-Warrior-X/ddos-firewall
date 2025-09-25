@@ -17,6 +17,7 @@
 
 #define PUBKEY_PATH                 "/usr/local/share/ebpf_firewall/server_public_key.pem"
 #define LICENSE_PATH                "/usr/local/share/ebpf_firewall/license.lic"
+#define LICENSE_CHECK_INTERVAL      60
 
 #define ONE_SECOND_NS               1000000000ULL
 #define BLOCK_DURATION_NS           (3600ULL * 1000000000ULL)  // 1 hour

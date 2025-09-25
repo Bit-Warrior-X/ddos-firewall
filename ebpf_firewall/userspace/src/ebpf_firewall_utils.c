@@ -645,6 +645,7 @@ int get_license_status() {
         long long now_ll = (long long)now;
 
         if (now_ll >= expiry_ll) {
+            ret = -2;
             LOG_W("License : Expired, please purchase new license\n");
             goto cleanup;
         }

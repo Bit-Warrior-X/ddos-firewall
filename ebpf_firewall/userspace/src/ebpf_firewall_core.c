@@ -796,6 +796,29 @@ static void * fixed_ip_ringbuf_poll_worker(void * arg)
 }
 
 
+static void * license_check_worker(void * arg) 
+{
+    while (!exiting) {
+        int ret = get_license_status();
+        if (ret < 0) {
+            if (ret == -2) {
+                const char * message = "command:report_log\ntype:critical\ndata:License is expired!\n";
+                send_message_to_api_parser(message);
+            } else {
+                const char * message = "command:report_log\ntype:critical\ndata:Invalid license, user manipulate the license\n";
+                send_message_to_api_parser(message);
+            }
+            
+            LOG_D("Exit process\n");
+            exiting = 1;
+            kill(getpid(), SIGINT);
+
+            break;
+        }
+        sleep(LICENSE_CHECK_INTERVAL);
+    }
+}
+
 static void * send_check_blocklist_worker(void * arg)
 {
     int err;
@@ -1035,6 +1058,7 @@ int main(int argc, char **argv) {
     }
 
     signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
 
     // Get the map file descriptor
     tcp_established_map_fd = bpf_object__find_map_fd_by_name(obj, "tcp_established_map");
@@ -1080,6 +1104,12 @@ int main(int argc, char **argv) {
     pthread_t send_check_blocklist_thr;
     if (pthread_create(&send_check_blocklist_thr, NULL, send_check_blocklist_worker, NULL) != 0) {
         LOG_E("pthread_create for send_check_blocklist_thr %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    pthread_t license_check_thr;
+    if (pthread_create(&license_check_thr, NULL, license_check_worker, NULL) != 0) {
+        LOG_E("pthread_create for license_check_thr %s\n", strerror(errno));
         goto cleanup;
     }
 
@@ -2323,7 +2353,7 @@ int tcp_conn_limit_set(int valid,
     global_fw_config.g_tcp_connection_config.limit_cnt = count;
 
     if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
-        LOG_E("bpf_map_update_elem");
+        LOG_E("bpf_map_update_elem\n");
         return -1;
     }
     
@@ -2332,15 +2362,21 @@ int tcp_conn_limit_set(int valid,
 
 
 int send_message_to_api_parser(const char *message) {
-    int fd = open(FIFO_PATH, O_WRONLY);  // Blocks until reader is ready
+    LOG_D("%s", message);
+
+    int fd = open(FIFO_PATH, O_WRONLY | O_NONBLOCK);  // Blocks until reader is ready
     if (fd == -1) {
-        perror("Failed to open FIFO");
+        if (errno == ENXIO) {
+            LOG_E("No reader available on FIFO\n");
+            return -1;
+        }
+        LOG_E("Failed to open FIFO\n");
         return -1;
     }
 
     ssize_t written = write(fd, message, strlen(message));
     if (written == -1) {
-        perror("Failed to write to FIFO");
+        LOG_E("Failed to write to FIFO\n");
         return -1;
     }
 
