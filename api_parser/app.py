@@ -92,19 +92,55 @@ def create_table():
 
 def clear_all_tables():
     """Remove all rows from blocked_ips and white_ips tables."""
-    conn = sqlite3.connect(FIREWALL_DB_NAME)
-    cursor = conn.cursor()
-    
-    # Delete all records from both tables
-    cursor.execute("DELETE FROM blocked_ips")
-    cursor.execute("DELETE FROM white_ips")
-    
-    # Optionally reset AUTOINCREMENT counters
-    cursor.execute("DELETE FROM sqlite_sequence WHERE name='blocked_ips'")
-    cursor.execute("DELETE FROM sqlite_sequence WHERE name='white_ips'")
-    
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = sqlite3.connect(FIREWALL_DB_NAME)
+        cursor = conn.cursor()
+        
+        # Check if tables exist
+        cursor.execute("""
+            SELECT name FROM sqlite_master 
+            WHERE type='table' AND name IN ('blocked_ips', 'white_ips')
+        """)
+        existing_tables = [row[0] for row in cursor.fetchall()]
+        
+        if not existing_tables:
+            print("Warning: No firewall tables found in the database")
+            return
+        
+        # Delete all records from existing tables
+        if 'blocked_ips' in existing_tables:
+            cursor.execute("DELETE FROM blocked_ips")
+            print("Cleared blocked_ips table")
+        else:
+            print("Warning: blocked_ips table not found")
+            
+        if 'white_ips' in existing_tables:
+            cursor.execute("DELETE FROM white_ips")
+            print("Cleared white_ips table")
+        else:
+            print("Warning: white_ips table not found")
+        
+        # Reset AUTOINCREMENT counters if tables exist
+        if 'blocked_ips' in existing_tables or 'white_ips' in existing_tables:
+            cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('blocked_ips', 'white_ips')")
+        
+        conn.commit()
+        print("Database cleared successfully")
+        
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        if conn:
+            conn.rollback()
+            
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        if conn:
+            conn.rollback()
+            
+    finally:
+        if conn:
+            conn.close()
 
     
 def fetch_and_store_blocklist(token):

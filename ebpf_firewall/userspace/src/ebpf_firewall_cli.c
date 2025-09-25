@@ -9,9 +9,9 @@
 #include <stdbool.h>
 
 
-#define FIREWALL_START "systemctl start ebpf-firewall"
-#define FIREWALL_STOP  "systemctl stop ebpf-firewall"
-#define FIREWALL_RESTART  "systemctl restart ebpf-firewall"
+#define FIREWALL_START "systemctl start ebpf_firewall"
+#define FIREWALL_STOP  "systemctl stop ebpf_firewall"
+#define FIREWALL_RESTART  "systemctl restart ebpf_firewall"
 
 #define MAX_LINE_LENGTH 256
 #define MAX_COMMENT_LENGTH 256
@@ -45,7 +45,7 @@ static void usage(void) {
 "  CLEAR_ALLOW_IP <ip> : Remove ip from whitelist\n"
 "  CLEAR_ALLOW_IP_ALL : Remove all ips from blacklist\n"
 "  ADD_ALLOW_IP <ip> : Add ip to whitelist.\n"
-"  HEALTH_CHECK : Check the health status of ebpf-firewall\n"
+"  HEALTH_CHECK : Check the health status of ebpf_firewall\n"
 "  GET_BLOCKLIST <filter_type> <filter_ip> <filter_date> : Get the filtered block list ips\n"
 "  GET_MACHINE_ID : Get machine id\n"
 

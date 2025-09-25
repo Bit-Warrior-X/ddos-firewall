@@ -1,5 +1,5 @@
-#/home/ebpf-firewall/ddos-firewall/api_parser/venv/bin/python -m pip install --upgrade pip wheel setuptools
-#/home/ebpf-firewall/ddos-firewall/api_parser/venv/bin/python -m pip install requests flask gunicorn
+#/home/usr/local/share/api_parser/venv/bin/python -m pip install --upgrade pip wheel setuptools
+#/home/usr/local/share/api_parser/venv/bin/python -m pip install requests flask gunicorn
 
 # /etc/systemd/system/api_parser.service
 [Unit]
@@ -10,14 +10,14 @@ Wants=network-online.target
 [Service]
 User=root
 Group=root
-WorkingDirectory=/home/ebpf-firewall/ddos-firewall/api_parser
+WorkingDirectory=/usr/local/share/api_parser
 Environment=PYTHONUNBUFFERED=1
 
 # Create the FIFO if missing
 #ExecStartPre=/usr/bin/test -p /tmp/firewall_to_api_parser.fifo || /usr/bin/mkfifo -m 666 /tmp/firewall_to_api_parser.fifo
 
 # Use the venv's python to run gunicorn as a module
-ExecStart=/home/ebpf-firewall/ddos-firewall/api_parser/venv/bin/python -m gunicorn \
+ExecStart=/usr/local/share/api_parser/venv/bin/python -m gunicorn \
           -w 2 -k gthread --threads 4 \
           -b 0.0.0.0:5000 \
           --timeout 60 --graceful-timeout 15 \

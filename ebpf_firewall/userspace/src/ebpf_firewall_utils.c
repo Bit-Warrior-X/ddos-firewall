@@ -522,7 +522,13 @@ int get_license_status() {
     char* lic_b64 = NULL;
     size_t lic_b64_len = 0;
     
-    FILE* f = fopen(LICENSE_PATH, "rb");
+    char* lic_path = getenv(LICENSE_PATH);
+    if (!lic_path) {
+        LOG_E( "ERROR: Failed to read env : %s\n", LICENSE_PATH);
+        return 1;
+    }
+
+    FILE* f = fopen(lic_path, "rb");
     if (!f) { LOG_E("Cannot open license file\n"); return -1; }
     lic_b64 = slurp_fd(f, &lic_b64_len);
     fclose(f);
@@ -573,9 +579,15 @@ int get_license_status() {
     }
 
     /* Load server public key and verify */
-    EVP_PKEY* pub = load_public_key(PUBKEY_PATH);
+    char* pubkey_path = getenv(PUBKEY_PATH);
+    if (!pubkey_path) {
+        LOG_E( "ERROR: Failed to read env : %s\n", PUBKEY_PATH);
+        return -1;
+    }
+
+    EVP_PKEY* pub = load_public_key(pubkey_path);
     if (!pub) {
-        LOG_E("Failed to load public key: %s\n", PUBKEY_PATH);
+        LOG_E("Failed to load public key: %s\n", pubkey_path);
         free(sig); free(sig_b64); free(algo); free(lic_b64); free(lic_json_bin); free(lic_json);
         return -1;
     }

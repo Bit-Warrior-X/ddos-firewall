@@ -15,8 +15,8 @@
 #define NGINX_UNIX_PATH             "/tmp/unix.sock"
 #define FIFO_PATH                   "/tmp/firewall_to_api_parser.fifo"
 
-#define PUBKEY_PATH                 "/usr/local/share/ebpf_firewall/server_public_key.pem"
-#define LICENSE_PATH                "/usr/local/share/ebpf_firewall/license.lic"
+#define PUBKEY_PATH                 "PUBKEY_PATH"
+#define LICENSE_PATH                "LICENSE_PATH"
 #define LICENSE_CHECK_INTERVAL      60
 
 #define ONE_SECOND_NS               1000000000ULL

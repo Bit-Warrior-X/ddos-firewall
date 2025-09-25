@@ -1,0 +1,8 @@
+# requirements.txt for api_parser
+flask>=2.3.0
+gunicorn>=21.2.0
+requests>=2.31.0
+
+# optional but useful
+setuptools>=68.0.0
+wheel>=0.41.0
