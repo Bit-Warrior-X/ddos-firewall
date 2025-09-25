@@ -5,6 +5,7 @@
 #include <ebpf_firewall_conntrack.h>
 #include <ebpf_firewall_geo.h>
 #include <ebpf_firewall_core.h>
+#include <ebpf_firewall_utils.h>
 
 #include <arpa/inet.h> 
 #include <netinet/in.h> 
@@ -854,6 +855,10 @@ int main(int argc, char **argv) {
     struct perf_buffer *pb = NULL;
     struct ring_buffer *ringbuf = NULL;
     struct ring_buffer *fixed_ip_ringbuf = NULL;
+
+    if (get_license_status() < 0) {
+        return 1;
+    }
 
     // Open the BPF object file (compiled from xdp_prog.c).
     char* env_path = getenv(XDP_CORE_FILE);

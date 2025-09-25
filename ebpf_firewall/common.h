@@ -15,6 +15,9 @@
 #define NGINX_UNIX_PATH             "/tmp/unix.sock"
 #define FIFO_PATH                   "/tmp/firewall_to_api_parser.fifo"
 
+#define PUBKEY_PATH                 "/usr/local/share/ebpf_firewall/server_public_key.pem"
+#define LICENSE_PATH                "/usr/local/share/ebpf_firewall/license.lic"
+
 #define ONE_SECOND_NS               1000000000ULL
 #define BLOCK_DURATION_NS           (3600ULL * 1000000000ULL)  // 1 hour
 

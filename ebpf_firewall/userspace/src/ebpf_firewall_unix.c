@@ -10,7 +10,7 @@
 #include <ebpf_firewall_unix.h>
 #include <ebpf_firewall_core.h>
 #include <ebpf_firewall_log.h>
-
+#include <ebpf_firewall_utils.h>
 
 static int srv_fd = -1;
 extern int exiting;
@@ -382,6 +382,22 @@ static void handle_getblocklist(int cfd, char **argv, int argc) {
     if (data) free (data);
 }
 
+static void handle_getmachineid(int cfd, char **argv, int argc) {
+    if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
+
+    int ret = -1;
+    
+    char machine_id[256];
+    ret = get_machine_id(machine_id);
+
+    if (ret == -1) {
+        reply(cfd, "failed\nFailed to get machine_id\n");    
+    } else {
+        reply(cfd, "ok\n%s\n", machine_id);
+    }
+}
+
+
 /* Table‐driven dispatch */
 struct cmd_entry { const char *name; void (*fn)(int,char**,int); };
 static const struct cmd_entry cmds[] = {
@@ -407,7 +423,8 @@ static const struct cmd_entry cmds[] = {
     {"SET_GEO", handle_set_geo},
     {"SET_CONN_LIMIT", handle_set_conn_limit},
     {"HEALTH_CHECK", handle_health_check},
-    {"GET_BLOCKLIST", handle_getblocklist}
+    {"GET_BLOCKLIST", handle_getblocklist},
+    {"GET_MACHINE_ID", handle_getmachineid}
 };
 
 static void dispatch(int cfd, char *line) {
