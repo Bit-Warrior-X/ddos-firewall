@@ -82,6 +82,8 @@ set_permissions() {
     [[ -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_cli" ]] && chmod 777 "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_cli"
     [[ -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_prom" ]] && chmod 777 "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_prom"
     [[ -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_userspace" ]] && chmod 777 "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_userspace"
+    [[ -f "${EXTRACTED_DIR}/machine_id" ]] && chmod 777 "${EXTRACTED_DIR}/machine_id"
+    [[ -f "${EXTRACTED_DIR}/uninstall.sh" ]] && chmod 777 "${EXTRACTED_DIR}/uninstall.sh"
 
     # Reasonable perms for other files (if present)
     [[ -f "${EXTRACTED_DIR}/l4/firewall.config" ]] && chmod 644 "${EXTRACTED_DIR}/l4/firewall.config"
@@ -110,10 +112,13 @@ install_files() {
         cp -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_cli" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_prom" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_userspace" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${EXTRACTED_DIR}/machine_id" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${EXTRACTED_DIR}/uninstall.sh" "/tmp/" 2>/dev/null || true
 
         cp -f "${EXTRACTED_DIR}/l4/ebpf_firewall_kernel.o" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/l4/firewall.config" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/l4/firewall_control.db" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${EXTRACTED_DIR}/initialize" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         if [[ -d "${EXTRACTED_DIR}/l4/geodb" ]]; then
             cp -a "${EXTRACTED_DIR}/l4/geodb" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         fi
@@ -180,8 +185,8 @@ install_files() {
     fi
 
     # Install firewall_lib.conf to ld.so.conf.d if provided
-    if [[ -f "${EXTRACTED_DIR}/firewall_lib.conf" ]]; then
-        cp -f "${EXTRACTED_DIR}/firewall_lib.conf" "/etc/ld.so.conf.d/"
+    if [[ -f "${EXTRACTED_DIR}/lib/firewall_lib.conf" ]]; then
+        cp -f "${EXTRACTED_DIR}/lib/firewall_lib.conf" "/etc/ld.so.conf.d/"
         chmod 644 "/etc/ld.so.conf.d/firewall_lib.conf"
     fi
 
