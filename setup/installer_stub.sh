@@ -119,6 +119,7 @@ install_files() {
         cp -f "${EXTRACTED_DIR}/l4/firewall.config" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/l4/firewall_control.db" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/initialize" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+
         if [[ -d "${EXTRACTED_DIR}/l4/geodb" ]]; then
             cp -a "${EXTRACTED_DIR}/l4/geodb" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         fi
@@ -133,7 +134,6 @@ install_files() {
     else
         print_warning "ebpf_firewall_cli not found in ${INSTALL_L4_DIR}, skipping symlink"
     fi
-
     # Install API parser: move extracted api_parser content into the install dir.
     if [[ -d "${EXTRACTED_DIR}/api_parser" ]]; then
         print_status "Installing API parser (copying files)..."
