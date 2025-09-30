@@ -15,6 +15,9 @@ import ipaddress
 import binascii
 import urllib.request
 import urllib.error
+import sys
+import socket
+import tempfile
 
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
@@ -45,11 +48,11 @@ app = Flask(__name__)
 # Configuration
 FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
 FIREWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
-INIT_FILE = "/usr/local/share/ebpf-firewall/initialize"
-MACHINE_FILE = "/usr/local/share/ebpf-firewall/machine_id"
-LICENSE_PATH = "/usr/local/share/ebpf-firewall/license.lic"
-PUBKEY_PATH = "/usr/local/share/ebpf-firewall/server_public_key.pem"
-TOKEN_FILE = "/usr/local/share/ebpf-firewall/token"
+INIT_FILE = "/usr/local/share/ebpf_firewall/initialize"
+MACHINE_FILE = "/usr/local/share/ebpf_firewall/machine_id"
+LICENSE_PATH = "/usr/local/share/ebpf_firewall/license.lic"
+PUBKEY_PATH = "/usr/local/share/ebpf_firewall/server_public_key.pem"
+TOKEN_FILE = "/usr/local/share/ebpf_firewall/token"
 
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
@@ -63,7 +66,8 @@ REPORT_LOG_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/r
 #CHECK_BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/check_blocklist"
 CHECK_BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/check_blacklist"
 
-BACKEND_DEPLOY_URL = "http://fw.dnscrxyz.com/api/deploy_done"
+#BACKEND_DEPLOY_URL = "http://fw.dnscrxyz.com/api/deploy_done"
+BACKEND_DEPLOY_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_done"
 
 user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
@@ -1951,93 +1955,144 @@ def _atomic_write(path: str, data: bytes, mode: int = 0o600):
         except Exception:
             pass
         
+import os
+import sys
+import shlex
+import base64
+import signal
+import subprocess
+import requests
+
+# ... your other imports and constants:
+# INIT_FILE, MACHINE_FILE, BACKEND_DEPLOY_URL, LICENSE_PATH, PUBKEY_PATH
+# _atomic_write, _get_primary_ip, _pick_token
+
+def _fail_and_stop(reason: str, exit_code: int = 1, sig: int = signal.SIGINT) -> None:
+    """
+    Log reason, ask Gunicorn master to stop (signal parent PID),
+    then exit this process. Works whether we're in main thread or not.
+    """
+    print(f"[INIT] {reason}", flush=True)
+    try:
+        ppid = os.getppid()
+        # If ppid == 1 we're not under Gunicorn (or already orphaned); skip signaling.
+        if ppid != 1:
+            os.kill(ppid, sig)  # SIGINT matches KillSignal in your unit file
+    except Exception as e:
+        print(f"[INIT] Could not signal Gunicorn master: {e}", flush=True)
+
+    # Try graceful, then hard-exit as a fallback (covers worker thread cases)
+    try:
+        sys.exit(exit_code)
+    finally:
+        os._exit(exit_code)
+
 def handle_initialize_file():
     """
     Start-up initializer:
       - Ensure INIT_FILE exists (default '1').
       - If INIT_FILE == '0': call backend /API/deploy_done with ip,machine,token.
-        On success: save license + decoded pubkey, set INIT_FILE to '0'.
-        On failure: exit process.
+        On success: save license + decoded pubkey, set INIT_FILE to '1'.
+        On failure: stop the service (signal Gunicorn master) and exit.
       - If INIT_FILE == '1': skip.
     """
     try:
-        os.makedirs(os.path.dirname(INIT_FILE), exist_ok=True)
+        # Safely create parent dir if it exists in the path
+        dirpath = os.path.dirname(INIT_FILE)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
 
-        # Create default file with '1' if missing
+        # Ensure flag file exists with default '0'
         if not os.path.exists(INIT_FILE):
-            with open(INIT_FILE, "w") as f:
-                f.write("0\n")
-            print(f"[INIT] Created {INIT_FILE} with value 1")
+            with open(INIT_FILE, "w", encoding="utf-8") as f:
+                f.write("0")
+            print(f"[INIT] Created {INIT_FILE} with value 1", flush=True)
 
-        # Read current flag
-        with open(INIT_FILE, "r") as f:
+        # Read flag (tolerant)
+        with open(INIT_FILE, "r", encoding="utf-8", errors="replace") as f:
             flag = (f.read() or "").strip()
 
         if flag != "0":
-            print(f"[INIT] initialize={flag}; nothing to do")
+            print(f"[INIT] initialize={flag}; nothing to do", flush=True)
             return
 
-        # We only proceed when flag == "0"
-        # Read machine id
+        # We only proceed when flag == '0'
         if not os.path.exists(MACHINE_FILE):
-            print(f"[INIT] Missing machine_id file at {MACHINE_FILE}; exiting")
-            sys.exit(1)
-        with open(MACHINE_FILE, "r") as f:
-            machine_id = f.read().strip()
+            _fail_and_stop(f"Missing executable at {MACHINE_FILE}; exiting")
 
+        if not os.access(MACHINE_FILE, os.X_OK):
+            _fail_and_stop(f"Not executable: {MACHINE_FILE}; exiting")
+
+        # Execute MACHINE_FILE and capture stdout
+        try:
+            cmd = shlex.split(MACHINE_FILE)
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=8,
+                check=True,
+            )
+            out_bytes = proc.stdout or b""
+        except subprocess.TimeoutExpired:
+            _fail_and_stop(f"{MACHINE_FILE} timed out")
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or b"").decode("utf-8", "ignore")
+            _fail_and_stop(f"{MACHINE_FILE} failed (rc={e.returncode}): {stderr}")
+        except Exception as e:
+            _fail_and_stop(f"Error running {MACHINE_FILE}: {e}")
+
+        # Decode + sanitize machine id
+        try:
+            machine_id = out_bytes.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            machine_id = out_bytes.decode("utf-8", errors="ignore").strip()
+
+        # Keep only safe chars
+        machine_id = "".join(ch for ch in machine_id if ch.isalnum() or ch in "-_")
         if not machine_id:
-            print("[INIT] Empty machine_id; exiting")
-            sys.exit(1)
+            _fail_and_stop("Empty/invalid machine_id from executable; exiting")
 
-        # Determine current IP
         ip_addr = _get_primary_ip()
         token = _pick_token()
-        payload = {
-            "ip": ip_addr,
-            "machine": machine_id,
-            "token": token,
-        }
-
-        print(f"[INIT] Calling backend: {BACKEND_DEPLOY_URL} with {payload}")
+        payload = {"ip": ip_addr, "machine": machine_id, "token": token}
+        headers = {'Content-Type': 'application/json'}
+        
+        print(f"[INIT] Calling backend: {BACKEND_DEPLOY_URL} with {payload}", flush=True)
         try:
-            r = requests.post(BACKEND_DEPLOY_URL, json=payload, timeout=10)
+            r = requests.post(BACKEND_DEPLOY_URL, headers=headers, json=payload, timeout=10)
             r.raise_for_status()
-            resp = r.json() if r.headers.get("Content-Type", "").startswith("application/json") else {}
+            resp = r.json()
         except Exception as e:
-            print(f"[INIT] Backend request failed: {e}")
-            sys.exit(1)
-
+            _fail_and_stop(f"Backend request failed: {e}")
+        
         status = str(resp.get("status", "")).lower()
-        license_file = resp.get("license")
+        license_text = resp.get("license")
         pub_key_b64 = resp.get("pub_key")
+        
+        if status != "success" or not license_text or not pub_key_b64:
+            _fail_and_stop(f"Backend failure or missing fields: {resp}")
 
-        if status != "success" or not license_file or not pub_key_b64:
-            print(f"[INIT] Backend failure or missing fields: {resp}")
-            sys.exit(1)
-
-        # Save license and pubkey (pubkey is base64-encoded)
         try:
-            _atomic_write(LICENSE_PATH, license_file.encode("utf-8"), mode=0o600)
+            _atomic_write(LICENSE_PATH, license_text.encode("utf-8"), mode=0o600)
             _atomic_write(PUBKEY_PATH, base64.b64decode(pub_key_b64), mode=0o600)
-            print(f"[INIT] Saved license -> {LICENSE_PATH}, pubkey -> {PUBKEY_PATH}")
+            print(f"[INIT] Saved license -> {LICENSE_PATH}, pubkey -> {PUBKEY_PATH}", flush=True)
         except Exception as e:
-            print(f"[INIT] Failed writing license/pubkey: {e}")
-            sys.exit(1)
+            _fail_and_stop(f"Failed writing license/pubkey: {e}")
 
-        # Set INIT_FILE to '0' per your spec
+        # Success: flip INIT_FILE to '1' so we skip next boot
         try:
-            with open(INIT_FILE, "w") as f:
-                f.write("0\n")
-            print(f"[INIT] Updated {INIT_FILE} to 0 (deploy_done success)")
+            with open(INIT_FILE, "w", encoding="utf-8") as f:
+                f.write("1\n")
+            print(f"[INIT] Updated {INIT_FILE} to 1 (deploy_done success)", flush=True)
         except Exception as e:
-            print(f"[INIT] Failed to write {INIT_FILE}: {e}")
-            sys.exit(1)
+            _fail_and_stop(f"Failed to write {INIT_FILE}: {e}")
 
     except SystemExit:
         raise
     except Exception as e:
-        print(f"[INIT] Unexpected error: {e}")
-        sys.exit(1)
+        _fail_and_stop(f"Unexpected error: {e}")
+
+
         
 if __name__ == '__main__':
     handle_initialize_file()

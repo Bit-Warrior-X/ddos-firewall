@@ -15,6 +15,9 @@ import ipaddress
 import binascii
 import urllib.request
 import urllib.error
+import sys
+import socket
+import tempfile
 
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
@@ -45,6 +48,11 @@ app = Flask(__name__)
 # Configuration
 FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
 FIREWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
+INIT_FILE = "/usr/local/share/ebpf_firewall/initialize"
+MACHINE_FILE = "/usr/local/share/ebpf_firewall/machine_id"
+LICENSE_PATH = "/usr/local/share/ebpf_firewall/license.lic"
+PUBKEY_PATH = "/usr/local/share/ebpf_firewall/server_public_key.pem"
+TOKEN_FILE = "/usr/local/share/ebpf_firewall/token"
 
 VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
@@ -57,6 +65,9 @@ WHITELIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/wh
 REPORT_LOG_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/report"
 #CHECK_BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/check_blocklist"
 CHECK_BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/check_blacklist"
+
+#BACKEND_DEPLOY_URL = "http://fw.dnscrxyz.com/api/deploy_done"
+BACKEND_DEPLOY_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_done"
 
 user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
@@ -162,14 +173,16 @@ def fetch_and_store_blocklist(token):
         # Create table if not exists (added this for robustness)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS blocked_ips (
-            ip TEXT,
-            type TEXT,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ip TEXT NOT NULL,
+            type TEXT NOT NULL,
             duration INTEGER,
             reason TEXT,
             created DATETIME,
-            UNIQUE(ip, reason)
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        
         
         # Clear existing entries
         cursor.execute('DELETE FROM blocked_ips')
@@ -706,7 +719,7 @@ def allow_request_method():
     ok_test, test_msg = nginx_test()
     if not ok_test:
         # Roll back on test failure
-        shutil.copy2(backup, CONFIG_PATH)
+        shutil.copy2(backup, CONFIG_HTTP_REPORT_IP_PATH)
         remove_backup(backup)
         return jsonify({
             "status": "error",
@@ -1000,7 +1013,7 @@ def acl_system_config():
 @app.route("/API/L7/acl_system_config", methods=["GET"])
 def acl_system_config_get():
     try:
-        data = parse_acl_system_config(CONFIG_SERVER_LUA_ACL_SET_PATH)
+        data = parse_acl_system_config(CONFIG_HTTP_LUA_ACL_PATH)
         data["token"] = _extract_token(request)
         return jsonify(data), 200
     except FileNotFoundError as e:
@@ -1871,25 +1884,26 @@ def process_command(cmd: Dict[str, str]) -> None:
     except Exception as e:
         print(f"[API_PARSER] Error processing command {cmd}: {str(e)}")
                 
-def fifo_reader_thread() -> None:
-    """Main thread function that reads from FIFO and processes commands."""
+def fifo_reader_thread():
     if not os.path.exists(FIFO_PATH):
         os.mkfifo(FIFO_PATH)
-    
-    print(f"[API_PARSER] FIFO listener started. Waiting for data at {FIFO_PATH}...")
-    
+    print(f"... listening at {FIFO_PATH}")
     while True:
         try:
             with open(FIFO_PATH, 'r') as fifo:
-                while True:
-                    raw_data = fifo.read().strip()
-                    if raw_data:
-                        print(f"[API_PARSER] Received raw data:\n{raw_data}")
-                        for cmd in parse_fifo_message(raw_data):
-                            print(f"[API_PARSER] Processing command: {cmd}")
-                            process_command(cmd)
-        except (IOError, OSError) as e:
-            print(f"[API_PARSER] FIFO error: {str(e)}. Retrying in 1 second...")
+                buf = []
+                for line in fifo:
+                    line = line.rstrip('\n')
+                    if line == "":  # delimiter between commands
+                        raw = "\n".join(buf).strip()
+                        if raw:
+                            for cmd in parse_fifo_message(raw):
+                                process_command(cmd)
+                        buf = []
+                    else:
+                        buf.append(line)
+        except Exception as e:
+            print(f"[API_PARSER] FIFO error: {e}; retrying in 1s")
             time.sleep(1)
                         
 def start_fifo_listener():
@@ -1898,11 +1912,194 @@ def start_fifo_listener():
     thread.start()
     return thread
 
-if __name__ == '__main__':
-    fifo_thread = start_fifo_listener()
-    print(f"[API_PARSER] Running (PID: {os.getpid()})...")
+
+def _get_primary_ip() -> str:
+    """Return primary non-loopback IPv4 used for outbound traffic."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Doesn't need to be reachable; just used to pick the local iface
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        # Fallback
+        return socket.gethostbyname(socket.gethostname())
     
-    app.run(host=SERVER_IP, port=SERVER_PORT, debug=False, use_reloader=True)
+def _pick_token() -> str:
+    """Read API token from TOKEN_FILE."""
+    try:
+        with open(TOKEN_FILE, "r") as f:
+            token = f.read().strip()
+            if token:
+                return token
+    except Exception as e:
+        print(f"[INIT] Failed to read token file {TOKEN_FILE}: {e}")
+    return ""
+
+
+def _atomic_write(path: str, data: bytes, mode: int = 0o600):
+    """Atomic write with secure permissions."""
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp-", dir=d)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except Exception:
+            pass
+        
+import os
+import sys
+import shlex
+import base64
+import signal
+import subprocess
+import requests
+
+# ... your other imports and constants:
+# INIT_FILE, MACHINE_FILE, BACKEND_DEPLOY_URL, LICENSE_PATH, PUBKEY_PATH
+# _atomic_write, _get_primary_ip, _pick_token
+
+def _fail_and_stop(reason: str, exit_code: int = 1, sig: int = signal.SIGINT) -> None:
+    """
+    Log reason, ask Gunicorn master to stop (signal parent PID),
+    then exit this process. Works whether we're in main thread or not.
+    """
+    print(f"[INIT] {reason}", flush=True)
+    try:
+        ppid = os.getppid()
+        # If ppid == 1 we're not under Gunicorn (or already orphaned); skip signaling.
+        if ppid != 1:
+            os.kill(ppid, sig)  # SIGINT matches KillSignal in your unit file
+    except Exception as e:
+        print(f"[INIT] Could not signal Gunicorn master: {e}", flush=True)
+
+    # Try graceful, then hard-exit as a fallback (covers worker thread cases)
+    try:
+        sys.exit(exit_code)
+    finally:
+        os._exit(exit_code)
+
+def handle_initialize_file():
+    """
+    Start-up initializer:
+      - Ensure INIT_FILE exists (default '1').
+      - If INIT_FILE == '0': call backend /API/deploy_done with ip,machine,token.
+        On success: save license + decoded pubkey, set INIT_FILE to '1'.
+        On failure: stop the service (signal Gunicorn master) and exit.
+      - If INIT_FILE == '1': skip.
+    """
+    try:
+        # Safely create parent dir if it exists in the path
+        dirpath = os.path.dirname(INIT_FILE)
+        if dirpath:
+            os.makedirs(dirpath, exist_ok=True)
+
+        # Ensure flag file exists with default '0'
+        if not os.path.exists(INIT_FILE):
+            with open(INIT_FILE, "w", encoding="utf-8") as f:
+                f.write("0")
+            print(f"[INIT] Created {INIT_FILE} with value 1", flush=True)
+
+        # Read flag (tolerant)
+        with open(INIT_FILE, "r", encoding="utf-8", errors="replace") as f:
+            flag = (f.read() or "").strip()
+
+        if flag != "0":
+            print(f"[INIT] initialize={flag}; nothing to do", flush=True)
+            return
+
+        # We only proceed when flag == '0'
+        if not os.path.exists(MACHINE_FILE):
+            _fail_and_stop(f"Missing executable at {MACHINE_FILE}; exiting")
+
+        if not os.access(MACHINE_FILE, os.X_OK):
+            _fail_and_stop(f"Not executable: {MACHINE_FILE}; exiting")
+
+        # Execute MACHINE_FILE and capture stdout
+        try:
+            cmd = shlex.split(MACHINE_FILE)
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=8,
+                check=True,
+            )
+            out_bytes = proc.stdout or b""
+        except subprocess.TimeoutExpired:
+            _fail_and_stop(f"{MACHINE_FILE} timed out")
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or b"").decode("utf-8", "ignore")
+            _fail_and_stop(f"{MACHINE_FILE} failed (rc={e.returncode}): {stderr}")
+        except Exception as e:
+            _fail_and_stop(f"Error running {MACHINE_FILE}: {e}")
+
+        # Decode + sanitize machine id
+        try:
+            machine_id = out_bytes.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            machine_id = out_bytes.decode("utf-8", errors="ignore").strip()
+
+        # Keep only safe chars
+        machine_id = "".join(ch for ch in machine_id if ch.isalnum() or ch in "-_")
+        if not machine_id:
+            _fail_and_stop("Empty/invalid machine_id from executable; exiting")
+
+        ip_addr = _get_primary_ip()
+        token = _pick_token()
+        payload = {"ip": ip_addr, "machine": machine_id, "token": token}
+        headers = {'Content-Type': 'application/json'}
+        
+        print(f"[INIT] Calling backend: {BACKEND_DEPLOY_URL} with {payload}", flush=True)
+        try:
+            r = requests.post(BACKEND_DEPLOY_URL, headers=headers, json=payload, timeout=10)
+            r.raise_for_status()
+            resp = r.json()
+        except Exception as e:
+            _fail_and_stop(f"Backend request failed: {e}")
+        
+        status = str(resp.get("status", "")).lower()
+        license_text = resp.get("license")
+        pub_key_b64 = resp.get("pub_key")
+        
+        if status != "success" or not license_text or not pub_key_b64:
+            _fail_and_stop(f"Backend failure or missing fields: {resp}")
+
+        try:
+            _atomic_write(LICENSE_PATH, license_text.encode("utf-8"), mode=0o600)
+            _atomic_write(PUBKEY_PATH, base64.b64decode(pub_key_b64), mode=0o600)
+            print(f"[INIT] Saved license -> {LICENSE_PATH}, pubkey -> {PUBKEY_PATH}", flush=True)
+        except Exception as e:
+            _fail_and_stop(f"Failed writing license/pubkey: {e}")
+
+        # Success: flip INIT_FILE to '1' so we skip next boot
+        try:
+            with open(INIT_FILE, "w", encoding="utf-8") as f:
+                f.write("1\n")
+            print(f"[INIT] Updated {INIT_FILE} to 1 (deploy_done success)", flush=True)
+        except Exception as e:
+            _fail_and_stop(f"Failed to write {INIT_FILE}: {e}")
+
+    except SystemExit:
+        raise
+    except Exception as e:
+        _fail_and_stop(f"Unexpected error: {e}")
+
+
+        
+if __name__ == '__main__':
+    handle_initialize_file()
+    should_start = os.environ.get("WERKZEUG_RUN_MAIN") == "true" or not app.debug
+    if should_start:
+        fifo_thread = start_fifo_listener()
+    app.run(host=SERVER_IP, port=SERVER_PORT, debug=False, use_reloader=False)
     
     print("\n[API_PARSER] Shutting down...")
     if os.path.exists(FIFO_PATH):

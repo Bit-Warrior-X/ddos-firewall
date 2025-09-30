@@ -4,3 +4,5 @@ api_parser/firewall_control.db
 api_parser/__pycache__/
 setup/setup.sh
 setup/payload/l7/openresty.tar.gz
+setup/setup.sh
+setup/setup.sh
