@@ -103,7 +103,7 @@ do_run() {
 
 stop_disable_service() {
   local svc="$1"
-  if systemctl list-unit-files | grep -q "^${svc}"; then
+  #if systemctl list-unit-files | grep -q "^${svc}"; then
     info "Stopping ${svc} (if running)..."
     do_run "systemctl stop '${svc}' || true"
     info "Disabling ${svc}..."
@@ -112,8 +112,9 @@ stop_disable_service() {
     if [[ -f "/etc/systemd/system/${svc}" ]]; then
       do_run "rm -f '/etc/systemd/system/${svc}'"
     fi
-  else
-    warn "Service ${svc} not registered — skipping"
+    do_run "systemctl daemon-reload"
+  #else
+  #  warn "Service ${svc} not registered — skipping"
   fi
 }
 

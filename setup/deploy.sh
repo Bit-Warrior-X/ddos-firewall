@@ -113,11 +113,6 @@ sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER
 
 # --- Step 3: Start the api_parser service ---
 echo "Step 3: Starting api_parser service..."
-sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "
-  printf '%s\n' '$REMOTE_PASSWORD' | sudo -S systemctl start api_parser.service
-"
-
+sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "systemctl restart api_parser.service && systemctl status api_parser.service"
 echo "Deployment completed. Fetching service status..."
-sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no "$REMOTE_SERVER" "
-  printf '%s\n' '$REMOTE_PASSWORD' | sudo -S systemctl status api_parser.service --no-pager
-"
+
