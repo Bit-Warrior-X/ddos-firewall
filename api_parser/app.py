@@ -1,16 +1,11 @@
+import os
 import requests
-from flask import Flask, request, jsonify
-from functools import wraps
 import subprocess
 import sqlite3
-import os
 import threading
 import time
 import base64
 import shutil
-from collections import defaultdict
-from typing import Dict, Any, List, Optional
-from datetime import datetime
 import ipaddress
 import binascii
 import urllib.request
@@ -18,6 +13,14 @@ import urllib.error
 import sys
 import socket
 import tempfile
+import shlex
+import signal
+
+from flask import Flask, request, jsonify
+from functools import wraps
+from collections import defaultdict
+from typing import Dict, Any, List, Optional
+from datetime import datetime
 
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
@@ -372,6 +375,52 @@ def firewall_main():
         response['whitelist_count'] = whitecount
         
     return jsonify(response)
+
+# Firewall Main Control
+@app.route('/API/L7/firewall_main', methods=['POST'])
+@token_required
+def firewall_main_l7():
+    if not request.is_json:
+        return jsonify({"status": "error", "message": "Request must be application/json"}), 400
+    
+    data = request.json
+    status = data.get('status')
+    
+    if not status:
+        return jsonif({"status": "error", "message": "Missing 'status' parameters"}), 400
+    
+    action = str(status).strip().lower()
+    allowed_actions = {'start', 'stop', 'restart'}
+    
+    if action not in allowed_actions:
+        return jsonify({"status": "error", "message": "Invalid action. Valid actions: start, stop, restart"}), 400
+    
+    cmd = ['systemctl', action, 'l7_firewall']
+    
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False
+        )
+    except subprocess.TimeoutExpired:
+        return jsonify({'status': 'error', 'message': 'Command timed out'}), 504
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': f'Unexpected error: {str(e)}'}), 400
+    
+    print (cmd)
+    
+    print (result.returncode)
+    
+    #if result.returncode != 0:
+    #    return jsonify({"status": "error", "action": action, "message": "command failed"}), 500
+    
+    return jsonify({
+        "status": "success",
+        "action": action,
+        "message": "success",
+    }), 200
 
 # TCP SYN Protection
 @app.route('/API/L4/tcp_syn', methods=['POST'])
@@ -1955,14 +2004,6 @@ def _atomic_write(path: str, data: bytes, mode: int = 0o600):
         except Exception:
             pass
         
-import os
-import sys
-import shlex
-import base64
-import signal
-import subprocess
-import requests
-
 # ... your other imports and constants:
 # INIT_FILE, MACHINE_FILE, BACKEND_DEPLOY_URL, LICENSE_PATH, PUBKEY_PATH
 # _atomic_write, _get_primary_ip, _pick_token

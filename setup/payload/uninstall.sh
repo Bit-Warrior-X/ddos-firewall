@@ -10,6 +10,7 @@ LIB_DIR="/usr/local/lib"
 USR_LIB64="/usr/lib/x86_64-linux-gnu"
 
 L4_SERVICE_NAME="ebpf_firewall.service"
+L7_SERVICE_NAME="l7_firewall.service"
 L4_PROM_SERVICE_NAME="ebpf_firewall_prometheus.service"
 API_PARSER_SERVICE_NAME="api_parser.service"
 
@@ -142,6 +143,7 @@ fi
 stop_disable_service "${API_PARSER_SERVICE_NAME}"
 stop_disable_service "${L4_PROM_SERVICE_NAME}"
 stop_disable_service "${L4_SERVICE_NAME}"
+stop_disable_service "${L7_SERVICE_NAME}"
 
 info "Reloading systemd daemon..."
 do_run "systemctl daemon-reload || true"
@@ -238,7 +240,7 @@ if [[ $DRY_RUN -eq 1 ]]; then
 else
   info "If you see unit not found errors in journal, ignore them."
   info "To verify removal:"
-  echo "  systemctl status ${L4_SERVICE_NAME} ${L4_PROM_SERVICE_NAME} ${API_PARSER_SERVICE_NAME} || true"
+  echo "  systemctl status ${L4_SERVICE_NAME} ${L7_SERVICE_NAME} ${L4_PROM_SERVICE_NAME} ${API_PARSER_SERVICE_NAME} || true"
   echo "  ls -la ${INSTALL_L4_DIR} ${INSTALL_API_PARSER_DIR} || true"
 fi
 

@@ -17,8 +17,10 @@ INSTALL_L4_DIR="/usr/local/share/ebpf_firewall"
 INSTALL_API_PARSER_DIR="/usr/local/share/api_parser"
 
 L4_SERVICE_NAME="ebpf_firewall.service"
+L7_SERVICE_NAME="l7_firewall.service"
 L4_PROM_SERVICE_NAME="ebpf_firewall_prometheus.service"
 API_PARSER_SERVICE_NAME="api_parser.service"
+
 
 # Function to print colored output
 print_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -134,6 +136,7 @@ install_files() {
     else
         print_warning "ebpf_firewall_cli not found in ${INSTALL_L4_DIR}, skipping symlink"
     fi
+    
     # Install API parser: move extracted api_parser content into the install dir.
     if [[ -d "${EXTRACTED_DIR}/api_parser" ]]; then
         print_status "Installing API parser (copying files)..."
@@ -274,6 +277,13 @@ install_service() {
         print_warning "${L4_SERVICE_NAME} not found in payload (l4/service/)"
     fi
 
+    if [[ -f "${EXTRACTED_DIR}/l7/${L7_SERVICE_NAME}" ]]; then
+        cp -f "${EXTRACTED_DIR}/l7/${L7_SERVICE_NAME}" "/etc/systemd/system/${L7_SERVICE_NAME}"
+        chmod 644 "/etc/systemd/system/${L7_SERVICE_NAME}"
+    else
+        print_warning "${L7_SERVICE_NAME} not found in payload (l7/)"
+    fi
+
     if [[ -f "${EXTRACTED_DIR}/l4/service/${L4_PROM_SERVICE_NAME}" ]]; then
         cp -f "${EXTRACTED_DIR}/l4/service/${L4_PROM_SERVICE_NAME}" "/etc/systemd/system/${L4_PROM_SERVICE_NAME}"
         chmod 644 "/etc/systemd/system/${L4_PROM_SERVICE_NAME}"
@@ -298,6 +308,10 @@ install_service() {
 
     if [[ -f "/etc/systemd/system/${L4_SERVICE_NAME}" ]]; then
         systemctl enable --now "${L4_SERVICE_NAME}" || print_warning "Failed to enable/start ${L4_SERVICE_NAME}"
+    fi
+
+    if [[ -f "/etc/systemd/system/${L7_SERVICE_NAME}" ]]; then
+        systemctl enable --now "${L7_SERVICE_NAME}" || print_warning "Failed to enable/start ${L7_SERVICE_NAME}"
     fi
 
     if [[ -f "/etc/systemd/system/${L4_PROM_SERVICE_NAME}" ]]; then
@@ -344,10 +358,11 @@ main() {
     echo "  - L4 application installed to: $INSTALL_L4_DIR"
     echo "  - API parser installed to: $INSTALL_API_PARSER_DIR"
     echo "  - Libraries installed to: $LIB_DIR"
-    echo "  - Systemd services installed (if present): $L4_SERVICE_NAME, $L4_PROM_SERVICE_NAME, $API_PARSER_SERVICE_NAME"
+    echo "  - Systemd services installed (if present): $L4_SERVICE_NAME, $L7_SERVICE_NAME, $L4_PROM_SERVICE_NAME, $API_PARSER_SERVICE_NAME"
     echo ""
     print_status "To inspect api_parser logs: sudo journalctl -u ${API_PARSER_SERVICE_NAME} -f"
     print_status "To inspect L4 logs: sudo journalctl -u ${L4_SERVICE_NAME} -f"
+    print_status "To inspect L7 logs: sudo journalctl -u ${L7_SERVICE_NAME} -f"
 }
 
 # Run main function
