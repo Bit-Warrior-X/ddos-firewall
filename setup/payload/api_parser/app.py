@@ -57,7 +57,7 @@ LICENSE_PATH = "/usr/local/share/ebpf_firewall/license.lic"
 PUBKEY_PATH = "/usr/local/share/ebpf_firewall/server_public_key.pem"
 TOKEN_FILE = "/usr/local/share/ebpf_firewall/token"
 
-VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
+#VALID_TOKENS = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}  # Set your valid tokens here
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
 #BLOCKLIST_API_URL = "https://login.dnscrxyz.com/api/l4/get_blocklist_ips"
@@ -250,13 +250,25 @@ def fetch_and_store_whitelist(token):
     finally:
         if conn is not None:  # Only close if connection was established
             conn.close()
+
+def _pick_token() -> str:
+    """Read API token from TOKEN_FILE."""
+    try:
+        with open(TOKEN_FILE, "r") as f:
+            token = f.read().strip()
+            if token:
+                return token
+    except Exception as e:
+        print(f"[INIT] Failed to read token file {TOKEN_FILE}: {e}")
+    return ""
                 
 # Helper decorator for token authentication
 def token_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         token = request.json.get('token')
-        if token not in VALID_TOKENS:
+        #if token not in VALID_TOKENS:
+        if token != _pick_token():
             return jsonify({"status": "error", "message": "Invalid token"}), 403
         return f(*args, **kwargs)
     return decorated_function
@@ -816,8 +828,7 @@ def allow_request_method_get():
     try:
         status, methods = get_report_settings(CONFIG_HTTP_REPORT_IP_PATH)
         token = _extract_token(request)
-
-        if token not in VALID_TOKENS:
+        if token != _pick_token():
             return jsonify({"status": "error", "message": "Invalid token"}), 403
         
         # Format methods exactly like you asked: "GET, POST"
@@ -1974,17 +1985,6 @@ def _get_primary_ip() -> str:
     except Exception:
         # Fallback
         return socket.gethostbyname(socket.gethostname())
-    
-def _pick_token() -> str:
-    """Read API token from TOKEN_FILE."""
-    try:
-        with open(TOKEN_FILE, "r") as f:
-            token = f.read().strip()
-            if token:
-                return token
-    except Exception as e:
-        print(f"[INIT] Failed to read token file {TOKEN_FILE}: {e}")
-    return ""
 
 
 def _atomic_write(path: str, data: bytes, mode: int = 0o600):
