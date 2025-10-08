@@ -163,6 +163,14 @@ install_files() {
         print_warning "l7/openresty.tar.gz not found in payload; skipping OpenResty install"
     fi
     
+    # Create symlink for CLI in /usr/sbin
+    if [[ -f "/usr/local/openresty/nginx/sbin/nginx" ]]; then
+        ln -sf "/usr/local/openresty/nginx/sbin/nginx" /usr/sbin/nginx
+        print_status "Created symlink: /usr/sbin/nginx -> /usr/local/openresty/nginx/sbin/nginx"
+    else
+        print_warning "nginx not found in /usr/local/openresty/nginx/sbin/, skipping symlink"
+    fi
+
     # Install libraries into LIB_DIR
     print_status "Installing libraries..."
     if [[ -d "${EXTRACTED_DIR}/lib" ]]; then

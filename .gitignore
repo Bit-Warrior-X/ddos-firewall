@@ -5,3 +5,5 @@ api_parser/__pycache__/
 setup/setup.sh
 setup/payload/l7/openresty.tar.gz
 setup/test.sh
+license/license.b64
+license/license.lic

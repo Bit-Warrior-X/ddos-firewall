@@ -15,6 +15,7 @@ import socket
 import tempfile
 import shlex
 import signal
+import time
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -753,6 +754,7 @@ def allow_request_method():
     print (data)
     status = str(data.get("status", "")).strip().lower()
     method_field = data.get("method")
+    block_duration = data.get("block_duration")
     
     if status not in {"on", "off"}:
         return jsonify({"status": "error", "message": "Invalid 'status'. Use 'on' or 'off'."}), 400
@@ -769,6 +771,7 @@ def allow_request_method():
     
     updated = replace_or_append(original, "report_module_check", f"{status};")
     updated = replace_or_append(updated, "report_available_methods", f"{methods_str};")
+    updated = replace_or_append(updated, "report_block_duration", f"{block_duration};")
     
     backup = backup_path(CONFIG_HTTP_REPORT_IP_PATH)
     try:
@@ -826,7 +829,7 @@ def allow_request_method_get():
       }
     """
     try:
-        status, methods = get_report_settings(CONFIG_HTTP_REPORT_IP_PATH)
+        status, methods, duration = get_report_settings(CONFIG_HTTP_REPORT_IP_PATH)
         token = _extract_token(request)
         if token != _pick_token():
             return jsonify({"status": "error", "message": "Invalid token"}), 403
@@ -837,7 +840,7 @@ def allow_request_method_get():
         resp = {
             "status": status,
             "method": method_str,
-            "block_duration": 300,   # default as requested
+            "block_duration": duration,   # default as requested
             "token": token           # echo back the received token
         }
         return jsonify(resp), 200
@@ -1380,6 +1383,7 @@ def acl_rule_management():
 
         # Build an NGINX location block; insert rules_text EXACTLY after `rules = `
         # NOTE: rules_text should be a valid Lua expression (e.g., { ... }).
+        
         block = f"""location /acl_rule{acl_id} {{
     access_by_lua_block {{
         local is_handle_acl_or, handle_acl = pcall(require, 'resty.handle_acl')
@@ -1422,6 +1426,7 @@ def acl_rule_management():
             backup = backup_path(CONFIG_SERVER_LUA_ACL_SET_PATH)
             shutil.copy2(CONFIG_SERVER_LUA_ACL_SET_PATH, backup)
     except Exception as e:
+        remove_backup(backup)
         return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
 
     try:
@@ -1430,12 +1435,25 @@ def acl_rule_management():
             new_content += "\n"
         write_atomic(CONFIG_SERVER_LUA_ACL_SET_PATH, new_content)
     except Exception as e:
+        remove_backup(backup)
         return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
 
-    print ("step ....1")
+    #print (new_content)
     
+    try:
+        with open(CONFIG_SERVER_LUA_ACL_SET_PATH, "r") as file:
+            content = file.read()
+            print(content)
+    except FileNotFoundError:
+        print(f"Error: File not found at {config_CONFIG_SERVER_LUA_ACL_SET_PATHpath}")
+    except PermissionError:
+        print(f"Error: Permission denied to read {CONFIG_SERVER_LUA_ACL_SET_PATH}")
+    except Exception as e:
+        print(f"Error reading file: {e}")
+        
     ok_test, test_msg = nginx_test()
     if not ok_test:
+        print ("nginx test failed")
         # Roll back
         try:
             if backup and os.path.exists(backup):
@@ -1445,15 +1463,19 @@ def acl_rule_management():
         
         remove_backup(backup)
         return jsonify({"status": "error", "message": test_msg}), 400
-
-    print ("step ....2")
     
     ok_reload, reload_msg = nginx_reload()
     if not ok_reload:
+        try:
+            if backup and os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
+        except Exception:
+            pass
         remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
 
-    print ("step ....3")
+    time.sleep(0.5)
+    
     # --- Post-reload validation by hitting each /acl_rule<ID> ---
     def get_text(url: str, timeout=5):
         req = urllib.request.Request(url, method="GET")
@@ -1462,10 +1484,10 @@ def acl_rule_management():
             body = resp.read().decode("utf-8", errors="replace")
             return status, body
     
-    print ("step ....4")
     failures = []
     for acl_id in ids:
         url = f"{ACL_RULE_URL_BASE}/acl_rule{acl_id}"
+        print (url)
         try:
             status, body = get_text(url, timeout=5)
             ok = (status == 200) and ("Set ACL rule success" in body)
@@ -1476,27 +1498,25 @@ def acl_rule_management():
         except Exception as e:
             failures.append({"id": acl_id, "status": None, "body": str(e)})
     
-    print ("step ....5")            
     if failures:
+        print (failures)
         # Roll back to backup config and reload old config
         try:
             if backup and os.path.exists(backup):
+                print("trying to rollback backup")
                 shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
-                ok_test_old, msg_old = nginx_test()
-                if ok_test_old:
-                    nginx_reload()
+                remove_backup(backup)
         except Exception:
             # even if rollback reload fails, we still report original failures
             pass
-
+        
         remove_backup(backup)
         return jsonify({
             "status": "error",
             "message": "One or more ACL rule endpoints failed validation after reload.",
             "details": failures
         }), 400
-    
-    print ("step ....6")    
+     
     # All validated
     remove_backup(backup)
     return jsonify({"status": "success",

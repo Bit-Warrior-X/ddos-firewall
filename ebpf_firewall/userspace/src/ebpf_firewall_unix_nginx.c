@@ -49,9 +49,13 @@ static void * unix_socket_worker(void * arg)
             // Ping packet is received
         }
         if (num_bytes >= 4 && strncmp(buffer, "block:", 6) == 0) {
-            LOG_N("NGINX send %s is to add in block list\n", buffer + 6);
-            add_block_ip(buffer + 6, 0);
-            append_block_ip_to_sqlite(buffer + 6, "Attacking in unkown http request method");
+            char ip[64];
+            int block_duration = 0;
+            if (sscanf(buffer, "block:%63s %d", ip, &block_duration) == 2) {
+                LOG_N("NGINX send %s to add block list for %d seconds\n", ip, block_duration);
+                add_block_ip(buffer + 6, 0);
+                append_block_ip_to_sqlite(buffer + 6, "Attacking in unkown http request method");
+            }
         }
     }
 

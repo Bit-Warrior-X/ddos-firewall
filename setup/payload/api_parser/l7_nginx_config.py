@@ -129,6 +129,7 @@ def nginx_reload():
         stderr=subprocess.PIPE,
         text=True
     )
+    print ("NGINX is reloaded")
     if proc.returncode == 0:
         # Typically stderr has: 'nginx: signal process started'
         lines = [l.strip() for l in (proc.stderr or proc.stdout or "").splitlines() if l.strip()]
@@ -138,6 +139,7 @@ def nginx_reload():
             msg = _trim_nginx_line(msg)
         return True, msg
     # failure -> trim
+    
     return False, _trim_nginx_error(proc.stderr)
 
 def remove_backup(path: str) -> bool:
@@ -185,7 +187,8 @@ def get_report_settings(path: str = CONFIG_HTTP_REPORT_IP_PATH):
     status = kv.get("report_module_check", "off").lower()
     methods_raw = kv.get("report_available_methods", "")
     methods = [m for m in re.split(r'[,\s]+', methods_raw) if m]
-    return status, methods
+    block_duration = kv.get("report_block_duration", "300")
+    return status, methods, block_duration
 
 def _parse_address(addr: str):
     """
