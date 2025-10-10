@@ -40,13 +40,21 @@ static void * unix_socket_worker(void * arg)
             break;
         }
         buffer[num_bytes] = '\0';  // Null‐terminate
-        /*printf("Received %zd bytes from client [%s]: \"%s\"\n",
+        LOG_D("Received %zd bytes from client [%s]: \"%s\"\n",
                num_bytes,
                cli_addr.sun_path[0] ? cli_addr.sun_path : "(anonymous)",
-               buffer);*/
+               buffer);
 
         if (num_bytes >= 4 && strncmp(buffer, "ping", 4) == 0) {
             // Ping packet is received
+            ssize_t sent = sendto(sockfd, "pong", 4, 0, 
+                         (struct sockaddr *)&cli_addr, cli_addr_len);
+            if (sent < 0) {
+                LOG_E("Failed to send pong response: %s\n", strerror(errno));
+            } else {
+                LOG_D("Sent pong response to health check\n");
+            }
+            
         }
         if (num_bytes >= 4 && strncmp(buffer, "block:", 6) == 0) {
             char ip[64];
@@ -73,6 +81,11 @@ int init_unix_nginx_socket(void) {
 
     unlink(NGINX_UNIX_PATH);
 
+    int rcvbuf_size = 256 * 1024;  // 256KB
+    if (setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, &rcvbuf_size, sizeof(rcvbuf_size)) < 0) {
+        LOG_E("setsockopt SO_RCVBUF failed: %s\n", strerror(errno));
+    }
+
     memset(&srv_addr, 0, sizeof(struct sockaddr_un));
     srv_addr.sun_family = AF_UNIX;
     strncpy(srv_addr.sun_path, NGINX_UNIX_PATH, sizeof(srv_addr.sun_path) - 1);
@@ -92,7 +105,7 @@ int init_unix_nginx_socket(void) {
     }
 
     // Cleanup (unreachable here, but good practice)
-    
+    return 0;
 }
 
 void close_unix_nginx_socket(void) {

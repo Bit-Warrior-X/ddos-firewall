@@ -1,7 +1,7 @@
-systemctl stop ebpf-firewall
+systemctl stop ebpf_firewall
 make clean
 make test_mode
-#make install
+make install
 
 cp -f /home/ebpf-firewall/ddos-firewall/ebpf_firewall/build/ebpf_firewall_cli /home/ebpf-firewall/ddos-firewall/setup/payload/l4/bin/
 cp -f /home/ebpf-firewall/ddos-firewall/ebpf_firewall/build/ebpf_firewall_prom /home/ebpf-firewall/ddos-firewall/setup/payload/l4/bin/

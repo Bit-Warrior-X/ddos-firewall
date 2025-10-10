@@ -116,7 +116,7 @@ stop_disable_service() {
     do_run "systemctl daemon-reload"
   #else
   #  warn "Service ${svc} not registered — skipping"
-  fi
+  #fi
 }
 
 remove_path() {

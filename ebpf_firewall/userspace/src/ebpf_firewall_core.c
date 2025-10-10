@@ -433,13 +433,13 @@ static void *blocked_ips_duration_check_worker(void *arg) {
     struct bpf_object *obj = (struct bpf_object*)arg;
     if (!obj) goto cleanup;
 
-    while (1) {
-        int blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
-        if (blocked_ips_fd < 0) {
-            LOG_E( "Failed to find blocked_ips\n");
-            goto cleanup;
-        }
+    int blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
+    if (blocked_ips_fd < 0) {
+        LOG_E( "Failed to find blocked_ips\n");
+        goto cleanup;
+    }
 
+    while (1) {
         struct bpf_map_info info = {};
         __u32 len = sizeof(info);
         if (bpf_obj_get_info_by_fd(blocked_ips_fd, &info, &len)) {

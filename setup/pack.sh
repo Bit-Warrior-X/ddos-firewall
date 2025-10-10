@@ -1,6 +1,9 @@
 # Make sure installer_stub.sh is executable
 chmod +x installer_stub.sh
 
+rm -rf /usr/local/openresty/nginx/logs/*
+rm -rf payload/l7/openresty.tar.gz
+tar -zcf payload/l7/openresty.tar.gz -C /usr/local openresty
 # Create self-extracting setup.sh
 {
   cat installer_stub.sh
