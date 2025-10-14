@@ -871,7 +871,7 @@ static void * send_check_blocklist_worker(void * arg)
 
 int main(int argc, char **argv) {
     
-    int ifindex, err;
+    int ifindex, err = -1;
     struct bpf_program *prog_main, *prog_parse_syn, *prog_parse_ack, *prog_parse_rst, *prog_parse_icmp, *prog_parse_udp, *prog_parse_gre;
     int attach_id = -1, prog_main_fd, prog_parse_syn_fd, prog_parse_ack_fd, prog_parse_rst_fd, prog_parse_icmp_fd, prog_parse_udp_fd, prog_parse_gre_fd;
     int prog_array_map_fd;

@@ -254,6 +254,47 @@ static int load_block_white_list(struct bpf_object *obj) {
         return -1;
     }
     
+    /* Create tables if they don't exist */
+    const char *sql_create_blocked =
+        "CREATE TABLE IF NOT EXISTS blocked_ips ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "ip TEXT NOT NULL,"
+        "type TEXT NOT NULL,"
+        "duration INTEGER,"
+        "reason TEXT,"
+        "created DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ");";
+
+    rc = sqlite3_exec(db, sql_create_blocked, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_E("Failed to ensure blocked_ips table exists: %s\n",
+              err_msg ? err_msg : "(unknown)");
+        if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+        rc = -1;
+        goto cleanup;
+    }
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
+    const char *sql_create_white =
+        "CREATE TABLE IF NOT EXISTS white_ips ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "ip TEXT NOT NULL,"
+        "reason TEXT,"
+        "created DATETIME DEFAULT CURRENT_TIMESTAMP,"
+        "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
+        ");";
+
+    rc = sqlite3_exec(db, sql_create_white, NULL, NULL, &err_msg);
+    if (rc != SQLITE_OK) {
+        LOG_E("Failed to ensure white_ips table exists: %s\n",
+              err_msg ? err_msg : "(unknown)");
+        if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+        rc = -1;
+        goto cleanup;
+    }
+    if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    
     // Read from blocked_ips table
     char *sql_blocked = "SELECT * FROM blocked_ips;";
     
@@ -628,7 +669,7 @@ int load_config(struct bpf_object *obj) {
     }
 
     if (load_block_white_list(obj) < 0) {
-        LOG_E("Failed to load white/block list ips from sqlite db");
+        LOG_E("Failed to load white/block list ips from sqlite db\n");
         return -1;
     }
 

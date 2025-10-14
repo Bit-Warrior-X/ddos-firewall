@@ -315,19 +315,19 @@ install_service() {
     systemctl daemon-reload || true
 
     if [[ -f "/etc/systemd/system/${L4_SERVICE_NAME}" ]]; then
-        systemctl enable --now "${L4_SERVICE_NAME}" || print_warning "Failed to enable/start ${L4_SERVICE_NAME}"
+        systemctl enable "${L4_SERVICE_NAME}" || print_warning "Failed to enable/start ${L4_SERVICE_NAME}"
     fi
 
     if [[ -f "/etc/systemd/system/${L7_SERVICE_NAME}" ]]; then
-        systemctl enable --now "${L7_SERVICE_NAME}" || print_warning "Failed to enable/start ${L7_SERVICE_NAME}"
+        systemctl enable "${L7_SERVICE_NAME}" || print_warning "Failed to enable/start ${L7_SERVICE_NAME}"
     fi
 
     if [[ -f "/etc/systemd/system/${L4_PROM_SERVICE_NAME}" ]]; then
-        systemctl enable --now "${L4_PROM_SERVICE_NAME}" || print_warning "Failed to enable/start ${L4_PROM_SERVICE_NAME}"
+        systemctl enable "${L4_PROM_SERVICE_NAME}" || print_warning "Failed to enable/start ${L4_PROM_SERVICE_NAME}"
     fi
 
     if [[ -f "/etc/systemd/system/${API_PARSER_SERVICE_NAME}" ]]; then
-        systemctl enable --now "${API_PARSER_SERVICE_NAME}" || print_warning "Failed to enable/start ${API_PARSER_SERVICE_NAME}"
+        systemctl enable "${API_PARSER_SERVICE_NAME}" || print_warning "Failed to enable/start ${API_PARSER_SERVICE_NAME}"
     fi
 
     print_status "Service installation steps complete."
