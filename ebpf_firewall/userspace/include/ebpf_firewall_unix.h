@@ -4,7 +4,4 @@
 int init_unix_socket();
 void close_unix_socket();
 
-int init_unix_nginx_socket();
-void close_unix_nginx_socket();
-
 #endif

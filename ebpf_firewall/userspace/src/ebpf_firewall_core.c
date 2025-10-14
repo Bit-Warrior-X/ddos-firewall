@@ -1,6 +1,7 @@
 #include <ebpf_firewall_common.h>
 #include <ebpf_firewall_log.h>
 #include <ebpf_firewall_unix.h>
+#include <ebpf_firewall_nginx.h>
 #include <ebpf_firewall_config.h>
 #include <ebpf_firewall_conntrack.h>
 #include <ebpf_firewall_geo.h>
@@ -908,7 +909,7 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    if (init_unix_nginx_socket() < 0) {
+    if (init_nginx_socket() < 0) {
         LOG_E( "Failed to init unix nginx socket\n");
         goto cleanup;
     }
@@ -1137,7 +1138,7 @@ cleanup:
     if (attach_id >= 0) bpf_xdp_detach(ifindex, attach_mode, NULL);
     
     close_unix_socket();
-    close_unix_nginx_socket();
+    close_nginx_socket();
     close_conntrack();
 
     LOG_I("Program is ended\n");
@@ -2384,7 +2385,7 @@ int send_message_to_api_parser(const char *message) {
     return 0;
 }
 
-int append_block_ip_to_sqlite(const char *ip_str, const char *reason) {
+int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
 
@@ -2403,7 +2404,10 @@ int append_block_ip_to_sqlite(const char *ip_str, const char *reason) {
     strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
 
     char duration_str[1024];
-    snprintf(duration_str, 1024, "%lld", global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS);
+    if (block_duration == 0) //use default l4 config block duration variable.
+        snprintf(duration_str, 1024, "%lld", global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS);
+    else
+        snprintf(duration_str, 1024, "%d", block_duration);
 
     /* Prepare INSERT statement */
     const char *sql =

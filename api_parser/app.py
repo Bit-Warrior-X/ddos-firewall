@@ -2134,6 +2134,8 @@ def handle_initialize_file():
             _fail_and_stop(f"Backend failure or missing fields: {resp}")
 
         try:
+            print (license_text)
+            print (pub_key_b64)
             _atomic_write(LICENSE_PATH, license_text.encode("utf-8"), mode=0o600)
             _atomic_write(PUBKEY_PATH, base64.b64decode(pub_key_b64), mode=0o600)
             print(f"[INIT] Saved license -> {LICENSE_PATH}, pubkey -> {PUBKEY_PATH}", flush=True)

@@ -103,6 +103,33 @@ def _trim_nginx_error(stderr: str) -> str:
     lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
     return lines[-1] if lines else "Unknown nginx error"
 
+def _trim_nginx_line(line: str) -> str:
+    """
+    Clean a single nginx stderr line such as:
+      'nginx: [notice] signal process started'
+    or:
+      'nginx: [emerg] invalid directive "abc" in /etc/nginx/nginx.conf:23'
+
+    into something human-readable like:
+      'signal process started'
+    or:
+      'invalid directive "abc"'
+    """
+    if not line:
+        return "Unknown nginx message"
+
+    line = line.strip()
+    if not line:
+        return "Unknown nginx message"
+
+    # Remove leading 'nginx: [level]'
+    line = re.sub(r"^nginx:\s*\[[^\]]+\]\s*", "", line)
+    # Remove trailing file/line info
+    line = re.sub(r"\s+in\s+/.+?:\d+\s*$", "", line)
+    # Remove optional ' at ...' suffixes (e.g., ' at /usr/...:45')
+    line = re.sub(r"\s+at\s+.+$", "", line)
+
+    return line or "Unknown nginx message"
 
 def nginx_test():
     proc = subprocess.run(
