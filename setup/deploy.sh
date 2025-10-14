@@ -116,11 +116,11 @@ echo "Step 3: Starting api_parser service..."
 sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "systemctl restart api_parser.service && systemctl status api_parser.service"
 
 # --- Step 4: Start the l7 service ---
-echo "Step 4: Starting l7_firewall service..."
-sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "systemctl restart l7_firewall"
+#echo "Step 4: Starting l7_firewall service..."
+#sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "systemctl restart l7_firewall"
 
 # --- Step 5: Start the l4 service ---
-echo "Step 5: Starting ebpf_firewall service..."
-sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "systemctl restart ebpf_firewall.service && systemctl status ebpf_firewall.service"
+#echo "Step 5: Starting ebpf_firewall service..."
+#sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "systemctl restart ebpf_firewall.service && systemctl status ebpf_firewall.service"
 
 echo "Deployment completed."

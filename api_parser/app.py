@@ -72,6 +72,7 @@ CHECK_BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70o
 
 #BACKEND_DEPLOY_URL = "http://fw.dnscrxyz.com/api/deploy_done"
 BACKEND_DEPLOY_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_done"
+BACKEND_DEPLOY_COMPLETE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_complete"
 
 user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
@@ -2150,6 +2151,14 @@ def handle_initialize_file():
         except Exception as e:
             _fail_and_stop(f"Failed to write {INIT_FILE}: {e}")
 
+        print(f"[INIT] Calling backend: {BACKEND_DEPLOY_COMPLETE_URL} with {payload}", flush=True)
+        try:
+            r = requests.post(BACKEND_DEPLOY_COMPLETE_URL, headers=headers, json=payload, timeout=10)
+            r.raise_for_status()
+            resp = r.json()
+        except Exception as e:
+            _fail_and_stop(f"Backend request failed: {e}")
+            
     except SystemExit:
         raise
     except Exception as e:
