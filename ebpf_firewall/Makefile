@@ -10,7 +10,8 @@
 CLANG        ?= clang
 GCC          ?= gcc
 BPF_ARCH     ?= bpf            # clang -target bpf
-CLANG_FLAGS  := -O2 -g -target $(BPF_ARCH) -Wall -Wextra
+CLANG_FLAGS  := -O2 -g -target $(BPF_ARCH) -Wall -Wextra \
+						       -I$(HOME)/linux-headers-6.8/include
 
 # Build mode (default: production_mode)
 BUILD_MODE   ?= production_mode

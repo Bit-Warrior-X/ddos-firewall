@@ -16,6 +16,7 @@ import tempfile
 import shlex
 import signal
 import time
+import json
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -72,6 +73,7 @@ CHECK_BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70o
 
 #BACKEND_DEPLOY_URL = "http://fw.dnscrxyz.com/api/deploy_done"
 BACKEND_DEPLOY_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_done"
+BACKEND_DEPLOY_COMPLETE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_complete"
 
 user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
@@ -1474,50 +1476,6 @@ def acl_rule_management():
         remove_backup(backup)
         return jsonify({"status": "error", "message": reload_msg}), 400
 
-    time.sleep(0.5)
-    
-    # --- Post-reload validation by hitting each /acl_rule<ID> ---
-    def get_text(url: str, timeout=5):
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = resp.getcode()
-            body = resp.read().decode("utf-8", errors="replace")
-            return status, body
-    
-    failures = []
-    for acl_id in ids:
-        url = f"{ACL_RULE_URL_BASE}/acl_rule{acl_id}"
-        print (url)
-        try:
-            status, body = get_text(url, timeout=5)
-            ok = (status == 200) and ("Set ACL rule success" in body)
-            if not ok:
-                failures.append({"id": acl_id, "status": status, "body": body.strip()[:500]})
-        except urllib.error.HTTPError as e:
-            failures.append({"id": acl_id, "status": e.code, "body": (e.read().decode('utf-8', 'replace') if e.fp else str(e))[:500]})
-        except Exception as e:
-            failures.append({"id": acl_id, "status": None, "body": str(e)})
-    
-    if failures:
-        print (failures)
-        # Roll back to backup config and reload old config
-        try:
-            if backup and os.path.exists(backup):
-                print("trying to rollback backup")
-                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
-                remove_backup(backup)
-        except Exception:
-            # even if rollback reload fails, we still report original failures
-            pass
-        
-        remove_backup(backup)
-        return jsonify({
-            "status": "error",
-            "message": "One or more ACL rule endpoints failed validation after reload.",
-            "details": failures
-        }), 400
-     
-    # All validated
     remove_backup(backup)
     return jsonify({"status": "success",
                     "message": "ACL rule locations updated, nginx test passed, and reload signaled."}), 200    
@@ -1559,9 +1517,21 @@ def acl_rule_apply():
     containing an access_by_lua_block implementing first-match semantics.
     """
     payload = request.get_json(silent=True) or {}
-    items = payload.get("data")
+    print(payload)
+
+    data_str = payload.get("data")
+    if not data_str:
+        return jsonify({"status": "error", "message": "Missing 'data' field."}), 400
+
+    try:
+        items = json.loads(data_str)  # Parse the JSON string
+    except json.JSONDecodeError:
+        return jsonify({"status": "error", "message": "Invalid JSON in 'data' field."}), 400
+
     if not isinstance(items, list) or not items:
         return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
+
+    print(items)
     
     # Validators
     def valid_url(u: str) -> bool:
@@ -1581,23 +1551,24 @@ def acl_rule_apply():
             if acl_id <= 0:
                 raise ValueError()
         except Exception:
-            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'id' (must be positive integer)."}), 400
-        
+            #return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'id' (must be positive integer)."}), 400
+            continue
         # checking_cond
         cond = str(it.get("checking_cond", "")).strip().lower()
         if cond not in {"allow", "block"}:
-            return jsonify({"status": "error", "message": f"Entry #{idx}: 'checking_cond' must be 'allow' or 'block'."}), 400
-        
+            #return jsonify({"status": "error", "message": f"Entry #{idx}: 'checking_cond' must be 'allow' or 'block'."}), 400
+            continue
         # apply_code + apply_content
         code = str(it.get("apply_code", "")).strip().lower()
         if code not in {"allow", "block", "return_code", "redirect"}:
-            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'apply_code'."}), 400
-
+            #return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'apply_code'."}), 400
+            continue
         content = it.get("apply_content", None)
         if code in {"allow", "block"}:
             # should be empty / null; tolerate "" or None
             if content not in (None, "", []):
-                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be empty for '{code}'."}), 400
+                #return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be empty for '{code}'."}), 400
+                continue
             action = {"kind": code}
         elif code == "return_code":
             try:
@@ -1605,16 +1576,16 @@ def acl_rule_apply():
                 if not (100 <= rc <= 599):
                     raise ValueError()
             except Exception:
-                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid HTTP status code (100..599)."}), 400
+                #return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid HTTP status code (100..599)."}), 400
+                continue
             action = {"kind": "return_code", "code": rc}
         else:  # redirect
             url = str(content or "").strip()
             #if not valid_url(url):
             #    return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid http(s) URL for 'redirect'."}), 400
             action = {"kind": "redirect", "url": url}
-
         normalized.append({"id": acl_id, "cond": cond, "action": action})
-    
+
     # Render Lua with first-match semantics
     # BLOCK and INTERNAL_ERROR are treated as "block", others as "allow".
     def lua_quote_long(s: str) -> str:
@@ -1723,6 +1694,52 @@ def acl_rule_apply():
     if not ok_reload:
         return jsonify({"status": "error", "message": reload_msg}), 400
 
+    
+    time.sleep(0.5)
+    # --- Post-reload validation by hitting each /acl_rule<ID> ---
+    def get_text(url: str, timeout=5):
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+            return status, body
+    
+    failures = []
+    for r in normalized:
+        acl_id = r["id"]
+        url = f"{ACL_RULE_URL_BASE}/acl_rule{acl_id}"
+        print (url)
+        try:
+            status, body = get_text(url, timeout=5)
+            ok = (status == 200) and ("Set ACL rule success" in body)
+            if not ok:
+                failures.append({"id": acl_id, "status": status, "body": body.strip()[:500]})
+        except urllib.error.HTTPError as e:
+            failures.append({"id": acl_id, "status": e.code, "body": (e.read().decode('utf-8', 'replace') if e.fp else str(e))[:500]})
+        except Exception as e:
+            failures.append({"id": acl_id, "status": None, "body": str(e)})
+    
+    if failures:
+        print (failures)
+        # Roll back to backup config and reload old config
+        try:
+            if backup and os.path.exists(backup):
+                print("trying to rollback backup")
+                shutil.copy2(backup, CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
+                remove_backup(backup)
+        except Exception:
+            # even if rollback reload fails, we still report original failures
+            pass
+        
+        remove_backup(backup)
+        return jsonify({
+            "status": "error",
+            "message": "One or more ACL rule endpoints failed validation after reload.",
+            "details": failures
+        }), 400
+     
+    # All validated
+    
     # Success; optional cleanup of backup
     remove_backup(backup)
 
@@ -2150,6 +2167,14 @@ def handle_initialize_file():
         except Exception as e:
             _fail_and_stop(f"Failed to write {INIT_FILE}: {e}")
 
+        print(f"[INIT] Calling backend: {BACKEND_DEPLOY_COMPLETE_URL} with {payload}", flush=True)
+        try:
+            r = requests.post(BACKEND_DEPLOY_COMPLETE_URL, headers=headers, json=payload, timeout=10)
+            r.raise_for_status()
+            resp = r.json()
+        except Exception as e:
+            _fail_and_stop(f"Backend request failed: {e}")
+            
     except SystemExit:
         raise
     except Exception as e:
