@@ -16,6 +16,7 @@ CONFIG_LOCATION_PROXY_SETTING_CONF_PATH = "/usr/local/openresty/nginx/conf/locat
 CONFIG_SERVER_ACL_PATH = "/usr/local/openresty/nginx/conf/server_acl.conf"
 CONFIG_SERVER_LUA_ACL_SET_PATH = "/usr/local/openresty/nginx/conf/server_lua_acl_set.conf"
 CONFIG_LOCATION_LUA_ACL_CHECK_PATH = "/usr/local/openresty/nginx/conf/location_lua_acl_check.conf"
+CONFIG_SERVER_DEFAULT_PORTS_PATH = "/usr/local/openresty/nginx/conf/server_default_ports.conf"
 
 
 def normalize_methods(method_field):

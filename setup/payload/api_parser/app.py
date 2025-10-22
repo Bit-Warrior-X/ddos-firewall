@@ -34,6 +34,7 @@ from l7_nginx_config import (
     CONFIG_SERVER_ACL_PATH,
     CONFIG_SERVER_LUA_ACL_SET_PATH,
     CONFIG_LOCATION_LUA_ACL_CHECK_PATH,
+    CONFIG_SERVER_DEFAULT_PORTS_PATH,
     normalize_methods, replace_or_append, remove_backup,
     write_atomic, backup_path, 
     nginx_test, nginx_reload,
@@ -1496,7 +1497,73 @@ def acl_rule_management_get():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     
+@app.route('/API/L7/set_ports', methods=['POST'])
+@token_required
+def set_ports():
+    """
+    Body:
+    {
+        "set_ports" : 80,8080,1107
+    }
     
+    Writes /usr/local/openresty/nginx/conf/server_default_ports.conf
+    
+    """
+    payload = request.get_json(silent=True) or {}
+    print(payload)
+    
+    data_str = payload.get("set_ports")
+    if not data_str:
+        return jsonify({"status": "error", "message": f"data field is nothing"}), 403
+    
+    # split data_str to comma and store it to CONFIG_SERVER_DEFAULT_PORTS_PATH
+    try:
+        ports = [int(p.strip()) for p in data_str.split(',')]
+    except ValueError:
+        return jsonify({"status": "error", "message": "invalid port values"}), 403
+    
+    invalid_ports = [p for p in ports if p < 1 or p > 65535]
+    if invalid_ports:
+        return jsonify({"status": "error", "message": f"invalid ports: {invalid_ports}"}), 403
+    
+    
+    new_content = "".join(f"listen {p};\n" for p in ports)
+    
+    # Backup -> write -> test -> reload (with rollback on failure)
+    backup = None
+    try:
+        if os.path.exists(CONFIG_SERVER_DEFAULT_PORTS_PATH):
+            backup = backup_path(CONFIG_SERVER_DEFAULT_PORTS_PATH)
+            shutil.copy2(CONFIG_SERVER_DEFAULT_PORTS_PATH, backup)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
+
+    try:
+        write_atomic(CONFIG_SERVER_DEFAULT_PORTS_PATH, new_content)
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
+
+    ok_test, test_msg = nginx_test()
+    if not ok_test:
+        try:
+            if backup and os.path.exists(backup):
+                shutil.copy2(backup, CONFIG_SERVER_DEFAULT_PORTS_PATH)
+                remove_backup(backup)
+        except Exception:
+            pass
+        return jsonify({"status": "error", "message": test_msg}), 400
+
+    ok_reload, reload_msg = nginx_reload()
+    if not ok_reload:
+        return jsonify({"status": "error", "message": reload_msg}), 400
+    
+    remove_backup(backup)
+
+    return jsonify({
+        "status": "success",
+        "message": "Server ports are successfully updated."
+    }), 200
+        
 @app.route('/API/L7/acl_rule_apply', methods=['POST'])
 @token_required
 def acl_rule_apply():
