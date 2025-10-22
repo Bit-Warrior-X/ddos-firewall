@@ -17,6 +17,7 @@ import shlex
 import signal
 import time
 import json
+import redis
 
 from flask import Flask, request, jsonify
 from functools import wraps
@@ -1313,31 +1314,39 @@ def set_acl_get():
         return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-    
-    
+
+REDIS_SOCK = "/tmp/redis.sock"            # path to unix socket (no "unix:" prefix here)
+REDIS_DB = 0
+RULE_IDS_KEY = "acl_rule_ids"
+
+def get_redis_client():
+    # redis-py v3/v4 accepts unix_socket_path
+    return redis.Redis(unix_socket_path=REDIS_SOCK, db=REDIS_DB, decode_responses=True)
+
 ACL_RULE_URL_BASE = "http://127.0.0.1"  # or "http://localhost" if you prefer
 @app.route('/API/L7/acl_rule_management', methods=['POST'])
 @token_required
 def acl_rule_management():
     """
-    Body:
+    Accept JSON:
     {
       "data": [
-        {"id": 18, "rules": "<base64 lua table/list for the RHS of `rules = ...`>"},
-        {"id": 21, "rules": "<base64 ...>"}
+        {"id": 18, "rules": "<base64 text>"},
+        {"id": 21, "rules": "<base64 text>"}
       ],
       "token": "..."
     }
 
-    For each entry, we generate:
-      location /acl_rule<ID> {
-        access_by_lua_block {
-          ... local cfg = { id = <ID>, rules = <DECODED_RULES> }
-          handle_acl.set_acl_rule(cfg)
-          ...
-        }
-      }
+    For each entry we store a Redis key `acl_rule:<id>` with JSON like:
+    {
+      "id": 1,
+      "rules": [ { "action": 1, "priority": 12, "rule": "..." }, ... ]
+    }
+
+    We also SADD id to `acl_rule_ids` and PUBLISH "acl_rule:<id>" on channel `acl:updates`.
     """
+    
+    
     payload = request.get_json(silent=True) or {}
     items = payload.get("data")
     if not isinstance(items, list) or not items:
@@ -1358,15 +1367,16 @@ def acl_rule_management():
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         return text, None
 
-    # Validate and render per-id blocks
-    blocks = []
-    ids = []
+    # Validate each entry and prepare redis objects
     seen_ids = set()
+    prepared = []  # list of tuples (id, redis_value_dict)
+    
+    
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             return jsonify({"status": "error", "message": f"Entry #{idx} must be an object."}), 400
 
-        # id
+        # validate id
         try:
             acl_id = int(it.get("id", None))
             if acl_id <= 0:
@@ -1376,126 +1386,180 @@ def acl_rule_management():
         if acl_id in seen_ids:
             return jsonify({"status": "error", "message": f"Duplicate id '{acl_id}'."}), 400
         seen_ids.add(acl_id)
-        ids.append(acl_id)
-
-        # rules (base64 -> lua snippet for RHS of `rules =`)
+        
+        # decode base64 rules payload
         rules_b64 = it.get("rules", "")
         rules_text, err = decode_b64_text("rules", rules_b64)
         if err:
             return jsonify({"status": "error", "message": f"Entry #{idx}: {err}"}), 400
-
-        # Build an NGINX location block; insert rules_text EXACTLY after `rules = `
-        # NOTE: rules_text should be a valid Lua expression (e.g., { ... }).
         
-        block = f"""location /acl_rule{acl_id} {{
-    access_by_lua_block {{
-        local is_handle_acl_or, handle_acl = pcall(require, 'resty.handle_acl')
-        if not is_handle_acl_or then
-            ngx.log(ngx.ERR, 'need to build with nginx_http_acl module')
-            return ngx.exit(501)
-        end
-        local cfg = {{
-            id = {acl_id},
-            rules = {rules_text}
-        }}
 
-        local ok, err = handle_acl.set_acl_rule(cfg)
-        if not ok then
-            ngx.log(ngx.ERR, 'failed to set acl rule : ', err)
-            return ngx.exit(403)
-        end
-        ngx.log(ngx.INFO, 'set acl rule success')
-
-        ngx.status = 200
-        ngx.header['Content-Type'] = 'text/plain'
-        ngx.say('Set ACL rule success')
-        return ngx.exit(200)
-    }}
-}}
-"""
-        blocks.append(block)
-
-    # File content: header + all blocks
-    new_content = (
-        "# Managed by /API/L7/acl_rule_management — DO NOT EDIT MANUALLY\n"
-        "# Each location maps to /acl_rule<ID> and sets the ACL rules for that ID via Lua.\n\n"
-        + "\n".join(blocks)
-    )
-
-    # Backup -> write -> nginx -t (rollback on failure) -> reload
-    backup = None
-    try:
-        if os.path.exists(CONFIG_SERVER_LUA_ACL_SET_PATH):
-            backup = backup_path(CONFIG_SERVER_LUA_ACL_SET_PATH)
-            shutil.copy2(CONFIG_SERVER_LUA_ACL_SET_PATH, backup)
-    except Exception as e:
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
-
-    try:
-        # Ensure trailing newline
-        if not new_content.endswith("\n"):
-            new_content += "\n"
-        write_atomic(CONFIG_SERVER_LUA_ACL_SET_PATH, new_content)
-    except Exception as e:
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
-
-    #print (new_content)
-    
-    try:
-        with open(CONFIG_SERVER_LUA_ACL_SET_PATH, "r") as file:
-            content = file.read()
-            print(content)
-    except FileNotFoundError:
-        print(f"Error: File not found at {config_CONFIG_SERVER_LUA_ACL_SET_PATHpath}")
-    except PermissionError:
-        print(f"Error: Permission denied to read {CONFIG_SERVER_LUA_ACL_SET_PATH}")
-    except Exception as e:
-        print(f"Error reading file: {e}")
-        
-    ok_test, test_msg = nginx_test()
-    if not ok_test:
-        print ("nginx test failed")
-        # Roll back
+        # Attempt to parse decoded text as JSON array of rule objects (best-effort)
+        rules_obj = None
         try:
-            if backup and os.path.exists(backup):
-                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
+            parsed = json.loads(rules_text)
+            # Accept either a list of rule objects, or a single object (wrap into list)
+            if isinstance(parsed, list):
+                rules_obj = parsed
+            elif isinstance(parsed, dict):
+                rules_obj = [parsed]
+            else:
+                # not a dict/list -> fallback to treat decoded text as raw rule string
+                rules_obj = None
         except Exception:
-            pass
+            # not JSON -> fallback below
+            rules_obj = None
         
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": test_msg}), 400
+        if rules_obj is None:
+            # decoded text might be a Lua/other string representing the RHS; store it as the "rule" string
+            # Create a single-entry rule object. You can customize default action/priority if desired.
+            rules_obj = [
+                {
+                    "action": it.get("default_action", 1) or 1,
+                    "priority": it.get("default_priority", 100) or 100,
+                    "rule": rules_text
+                }
+            ]
+            
+        # Sanity: ensure every rule in rules_obj has 'rule' property as a string.
+        sanitized_rules = []
+        for r_i, r in enumerate(rules_obj, start=1):
+            if isinstance(r, dict):
+                rule_field = r.get("rule")
+                # If rule field is not a string but is a list/dict, convert it to compact JSON string
+                if rule_field is None:
+                    # If user didn't include a 'rule' subfield, maybe they provided a single expression object;
+                    # convert whole object to JSON string.
+                    rule_str = json.dumps(r, ensure_ascii=False)
+                    action_val = int(r.get("action", 1)) if r.get("action") is not None else 1
+                    priority_val = int(r.get("priority", 100)) if r.get("priority") is not None else 100
+                else:
+                    if isinstance(rule_field, (dict, list)):
+                        rule_str = json.dumps(rule_field, ensure_ascii=False)
+                    else:
+                        rule_str = str(rule_field)
+                    action_val = int(r.get("action", 1)) if r.get("action") is not None else 1
+                    priority_val = int(r.get("priority", 100)) if r.get("priority") is not None else 100
+                sanitized_rules.append({
+                    "action": action_val,
+                    "priority": priority_val,
+                    "rule": rule_str
+                })
+            else:
+                # unexpected non-dict element -> convert to string
+                sanitized_rules.append({
+                    "action": 1,
+                    "priority": 100,
+                    "rule": str(r)
+                })
+
+        # Build final redis object
+        redis_obj = {
+            "id": acl_id,
+            "rules": sanitized_rules
+        }
+
+        prepared.append((acl_id, redis_obj))
+        
+    # All entries validated & prepared. Now write to Redis in a pipeline.
+    try:
+        rcli = get_redis_client()
+        pipe = rcli.pipeline()
+        for acl_id, obj in prepared:
+            key = f"acl_rule:{acl_id}"
+            # store pretty-printed JSON for readability (you may use compact JSON by using separators)
+            value = json.dumps(obj, ensure_ascii=False, indent=2)
+            pipe.set(key, value)
+            # add id to acl_rule_ids set
+            pipe.sadd(RULE_IDS_KEY, acl_id)
+            # publish notification so subscriber updates mlcache and applies rule
+            pipe.publish("acl:updates", f"acl_rule:{acl_id}")
+        # execute all pipeline commands atomically as a batch (not a single Redis transaction)
+        pipe.execute()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write to Redis: {e}"}), 500
+
+    return jsonify({
+        "status": "success",
+        "message": f"Wrote {len(prepared)} acl_rule(s) to Redis and published updates.",
+        "ids": [acl_id for (acl_id, _obj) in prepared]
+    }), 200
     
-    ok_reload, reload_msg = nginx_reload()
-    if not ok_reload:
-        try:
-            if backup and os.path.exists(backup):
-                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
-        except Exception:
-            pass
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": reload_msg}), 400
-
-    remove_backup(backup)
-    return jsonify({"status": "success",
-                    "message": "ACL rule locations updated, nginx test passed, and reload signaled."}), 200    
-
-
 @app.route("/API/L7/acl_rule_management", methods=["GET"])
 def acl_rule_management_get():
+    """
+    Return JSON:
+    {
+      "data": [
+        { "id": 1, "rules": "<base64 of rules array JSON>" },
+        ...
+      ],
+      "token": "<token>"
+    }
+    """
+    rcli = get_redis_client()
+
     try:
-        data = parse_acl_rule_management(CONFIG_SERVER_LUA_ACL_SET_PATH)
-        return jsonify({
-            "data": data,
-            "token": _extract_token(request)
-        }), 200
-    except FileNotFoundError as e:
-        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
-    except PermissionError as e:
-        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+        # Get the set of IDs (as strings)
+        ids = rcli.smembers("acl_rule_ids") or set()
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # Redis access error
+        return jsonify({"status": "error", "message": f"Failed to read acl_rule_ids from Redis: {e}"}), 500
+    
+    results = []
+    # iterate sorted ids for stable output (optional)
+    try:
+        for sid in sorted(ids, key=lambda x: int(x) if str(x).isdigit() else x):
+            key = f"acl_rule:{sid}"
+            try:
+                val = rcli.get(key)
+            except Exception as e:
+                # skip this id but log
+                print("Failed to GET %s: %s", key, e)
+                continue
+
+            if not val:
+                # key missing or empty — skip
+                print("%s missing or empty", key)
+                continue
+
+            # val is expected to be a JSON string like {"id":1,"rules":[...]}
+            try:
+                obj = json.loads(val)
+            except Exception as e:
+                # stored value isn't JSON — attempt best-effort handling:
+                print("Invalid JSON in %s: %s", key, e)
+                # Fallback: treat entire stored value as a single rule string.
+                rules_array = [{"action": 1, "priority": 100, "rule": val}]
+            else:
+                # Prefer obj["rules"] if present and is a list
+                rules_array = obj.get("rules")
+                if not isinstance(rules_array, list):
+                    # If it's missing or not a list, convert to a single-entry list
+                    rules_array = [{"action": obj.get("action", 1),
+                                    "priority": obj.get("priority", 100),
+                                    "rule": obj.get("rule", "")}] if isinstance(obj, dict) else [{"action":1,"priority":100,"rule":str(obj)}]
+
+            # Serialize the rules array to JSON (compact) then base64-encode
+            try:
+                rules_json = json.dumps(rules_array, ensure_ascii=False)
+                rules_b64 = base64.b64encode(rules_json.encode("utf-8")).decode("ascii")
+            except Exception as e:
+                print("Failed to encode rules for %s: %s", key, e)
+                continue
+
+            results.append({
+                "id": int(sid) if str(sid).isdigit() else sid,
+                "rules": rules_b64
+            })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Unexpected error: {e}"}), 500
+
+    return jsonify({
+        "data": results,
+        "token": _extract_token(request)
+    }), 200
     
 @app.route('/API/L7/set_ports', methods=['POST'])
 @token_required
