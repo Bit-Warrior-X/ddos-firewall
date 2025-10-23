@@ -17,12 +17,14 @@ import shlex
 import signal
 import time
 import json
+import redis
 
 from flask import Flask, request, jsonify
 from functools import wraps
 from collections import defaultdict
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+from urllib.parse import urlparse
 
 from l7_nginx_config import (
     CONFIG_HTTP_REPORT_IP_PATH,
@@ -75,6 +77,14 @@ CHECK_BLOCKLIST_API_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70o
 #BACKEND_DEPLOY_URL = "http://fw.dnscrxyz.com/api/deploy_done"
 BACKEND_DEPLOY_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_done"
 BACKEND_DEPLOY_COMPLETE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt/deploy_complete"
+
+REDIS_SOCK = "/tmp/redis.sock"            # path to unix socket (no "unix:" prefix here)
+REDIS_DB = 0
+RULE_IDS_KEY = "acl_rule_ids"
+
+def get_redis_client():
+    # redis-py v3/v4 accepts unix_socket_path
+    return redis.Redis(unix_socket_path=REDIS_SOCK, db=REDIS_DB, decode_responses=True)
 
 user_token = {"l13dbUeIow4YgWNRrA2v1aOuujIbDA2p"}
 
@@ -1313,31 +1323,31 @@ def set_acl_get():
         return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-    
-    
+
 ACL_RULE_URL_BASE = "http://127.0.0.1"  # or "http://localhost" if you prefer
 @app.route('/API/L7/acl_rule_management', methods=['POST'])
 @token_required
 def acl_rule_management():
     """
-    Body:
+    Accept JSON:
     {
       "data": [
-        {"id": 18, "rules": "<base64 lua table/list for the RHS of `rules = ...`>"},
-        {"id": 21, "rules": "<base64 ...>"}
+        {"id": 18, "rules": "<base64 text>"},
+        {"id": 21, "rules": "<base64 text>"}
       ],
       "token": "..."
     }
 
-    For each entry, we generate:
-      location /acl_rule<ID> {
-        access_by_lua_block {
-          ... local cfg = { id = <ID>, rules = <DECODED_RULES> }
-          handle_acl.set_acl_rule(cfg)
-          ...
-        }
-      }
+    For each entry we store a Redis key `acl_rule:<id>` with JSON like:
+    {
+      "id": 1,
+      "rules": [ { "action": 1, "priority": 12, "rule": "..." }, ... ]
+    }
+
+    We also SADD id to `acl_rule_ids` and PUBLISH "acl_rule:<id>" on channel `acl:updates`.
     """
+    
+    
     payload = request.get_json(silent=True) or {}
     items = payload.get("data")
     if not isinstance(items, list) or not items:
@@ -1358,15 +1368,16 @@ def acl_rule_management():
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         return text, None
 
-    # Validate and render per-id blocks
-    blocks = []
-    ids = []
+    # Validate each entry and prepare redis objects
     seen_ids = set()
+    prepared = []  # list of tuples (id, redis_value_dict)
+    
+    
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             return jsonify({"status": "error", "message": f"Entry #{idx} must be an object."}), 400
 
-        # id
+        # validate id
         try:
             acl_id = int(it.get("id", None))
             if acl_id <= 0:
@@ -1376,126 +1387,180 @@ def acl_rule_management():
         if acl_id in seen_ids:
             return jsonify({"status": "error", "message": f"Duplicate id '{acl_id}'."}), 400
         seen_ids.add(acl_id)
-        ids.append(acl_id)
-
-        # rules (base64 -> lua snippet for RHS of `rules =`)
+        
+        # decode base64 rules payload
         rules_b64 = it.get("rules", "")
         rules_text, err = decode_b64_text("rules", rules_b64)
         if err:
             return jsonify({"status": "error", "message": f"Entry #{idx}: {err}"}), 400
-
-        # Build an NGINX location block; insert rules_text EXACTLY after `rules = `
-        # NOTE: rules_text should be a valid Lua expression (e.g., { ... }).
         
-        block = f"""location /acl_rule{acl_id} {{
-    access_by_lua_block {{
-        local is_handle_acl_or, handle_acl = pcall(require, 'resty.handle_acl')
-        if not is_handle_acl_or then
-            ngx.log(ngx.ERR, 'need to build with nginx_http_acl module')
-            return ngx.exit(501)
-        end
-        local cfg = {{
-            id = {acl_id},
-            rules = {rules_text}
-        }}
 
-        local ok, err = handle_acl.set_acl_rule(cfg)
-        if not ok then
-            ngx.log(ngx.ERR, 'failed to set acl rule : ', err)
-            return ngx.exit(403)
-        end
-        ngx.log(ngx.INFO, 'set acl rule success')
-
-        ngx.status = 200
-        ngx.header['Content-Type'] = 'text/plain'
-        ngx.say('Set ACL rule success')
-        return ngx.exit(200)
-    }}
-}}
-"""
-        blocks.append(block)
-
-    # File content: header + all blocks
-    new_content = (
-        "# Managed by /API/L7/acl_rule_management — DO NOT EDIT MANUALLY\n"
-        "# Each location maps to /acl_rule<ID> and sets the ACL rules for that ID via Lua.\n\n"
-        + "\n".join(blocks)
-    )
-
-    # Backup -> write -> nginx -t (rollback on failure) -> reload
-    backup = None
-    try:
-        if os.path.exists(CONFIG_SERVER_LUA_ACL_SET_PATH):
-            backup = backup_path(CONFIG_SERVER_LUA_ACL_SET_PATH)
-            shutil.copy2(CONFIG_SERVER_LUA_ACL_SET_PATH, backup)
-    except Exception as e:
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
-
-    try:
-        # Ensure trailing newline
-        if not new_content.endswith("\n"):
-            new_content += "\n"
-        write_atomic(CONFIG_SERVER_LUA_ACL_SET_PATH, new_content)
-    except Exception as e:
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
-
-    #print (new_content)
-    
-    try:
-        with open(CONFIG_SERVER_LUA_ACL_SET_PATH, "r") as file:
-            content = file.read()
-            print(content)
-    except FileNotFoundError:
-        print(f"Error: File not found at {config_CONFIG_SERVER_LUA_ACL_SET_PATHpath}")
-    except PermissionError:
-        print(f"Error: Permission denied to read {CONFIG_SERVER_LUA_ACL_SET_PATH}")
-    except Exception as e:
-        print(f"Error reading file: {e}")
-        
-    ok_test, test_msg = nginx_test()
-    if not ok_test:
-        print ("nginx test failed")
-        # Roll back
+        # Attempt to parse decoded text as JSON array of rule objects (best-effort)
+        rules_obj = None
         try:
-            if backup and os.path.exists(backup):
-                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
+            parsed = json.loads(rules_text)
+            # Accept either a list of rule objects, or a single object (wrap into list)
+            if isinstance(parsed, list):
+                rules_obj = parsed
+            elif isinstance(parsed, dict):
+                rules_obj = [parsed]
+            else:
+                # not a dict/list -> fallback to treat decoded text as raw rule string
+                rules_obj = None
         except Exception:
-            pass
+            # not JSON -> fallback below
+            rules_obj = None
         
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": test_msg}), 400
+        if rules_obj is None:
+            # decoded text might be a Lua/other string representing the RHS; store it as the "rule" string
+            # Create a single-entry rule object. You can customize default action/priority if desired.
+            rules_obj = [
+                {
+                    "action": it.get("default_action", 1) or 1,
+                    "priority": it.get("default_priority", 100) or 100,
+                    "rule": rules_text
+                }
+            ]
+            
+        # Sanity: ensure every rule in rules_obj has 'rule' property as a string.
+        sanitized_rules = []
+        for r_i, r in enumerate(rules_obj, start=1):
+            if isinstance(r, dict):
+                rule_field = r.get("rule")
+                # If rule field is not a string but is a list/dict, convert it to compact JSON string
+                if rule_field is None:
+                    # If user didn't include a 'rule' subfield, maybe they provided a single expression object;
+                    # convert whole object to JSON string.
+                    rule_str = json.dumps(r, ensure_ascii=False)
+                    action_val = int(r.get("action", 1)) if r.get("action") is not None else 1
+                    priority_val = int(r.get("priority", 100)) if r.get("priority") is not None else 100
+                else:
+                    if isinstance(rule_field, (dict, list)):
+                        rule_str = json.dumps(rule_field, ensure_ascii=False)
+                    else:
+                        rule_str = str(rule_field)
+                    action_val = int(r.get("action", 1)) if r.get("action") is not None else 1
+                    priority_val = int(r.get("priority", 100)) if r.get("priority") is not None else 100
+                sanitized_rules.append({
+                    "action": action_val,
+                    "priority": priority_val,
+                    "rule": rule_str
+                })
+            else:
+                # unexpected non-dict element -> convert to string
+                sanitized_rules.append({
+                    "action": 1,
+                    "priority": 100,
+                    "rule": str(r)
+                })
+
+        # Build final redis object
+        redis_obj = {
+            "id": acl_id,
+            "rules": sanitized_rules
+        }
+
+        prepared.append((acl_id, redis_obj))
+        
+    # All entries validated & prepared. Now write to Redis in a pipeline.
+    try:
+        rcli = get_redis_client()
+        pipe = rcli.pipeline()
+        for acl_id, obj in prepared:
+            key = f"acl_rule:{acl_id}"
+            # store pretty-printed JSON for readability (you may use compact JSON by using separators)
+            value = json.dumps(obj, ensure_ascii=False, indent=2)
+            pipe.set(key, value)
+            # add id to acl_rule_ids set
+            pipe.sadd(RULE_IDS_KEY, acl_id)
+            # publish notification so subscriber updates mlcache and applies rule
+            pipe.publish("acl:updates", f"acl_rule:{acl_id}")
+        # execute all pipeline commands atomically as a batch (not a single Redis transaction)
+        pipe.execute()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to write to Redis: {e}"}), 500
+
+    return jsonify({
+        "status": "success",
+        "message": f"Wrote {len(prepared)} acl_rule(s) to Redis and published updates.",
+        "ids": [acl_id for (acl_id, _obj) in prepared]
+    }), 200
     
-    ok_reload, reload_msg = nginx_reload()
-    if not ok_reload:
-        try:
-            if backup and os.path.exists(backup):
-                shutil.copy2(backup, CONFIG_SERVER_LUA_ACL_SET_PATH)
-        except Exception:
-            pass
-        remove_backup(backup)
-        return jsonify({"status": "error", "message": reload_msg}), 400
-
-    remove_backup(backup)
-    return jsonify({"status": "success",
-                    "message": "ACL rule locations updated, nginx test passed, and reload signaled."}), 200    
-
-
 @app.route("/API/L7/acl_rule_management", methods=["GET"])
 def acl_rule_management_get():
+    """
+    Return JSON:
+    {
+      "data": [
+        { "id": 1, "rules": "<base64 of rules array JSON>" },
+        ...
+      ],
+      "token": "<token>"
+    }
+    """
+    rcli = get_redis_client()
+
     try:
-        data = parse_acl_rule_management(CONFIG_SERVER_LUA_ACL_SET_PATH)
-        return jsonify({
-            "data": data,
-            "token": _extract_token(request)
-        }), 200
-    except FileNotFoundError as e:
-        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
-    except PermissionError as e:
-        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+        # Get the set of IDs (as strings)
+        ids = rcli.smembers("acl_rule_ids") or set()
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # Redis access error
+        return jsonify({"status": "error", "message": f"Failed to read acl_rule_ids from Redis: {e}"}), 500
+    
+    results = []
+    # iterate sorted ids for stable output (optional)
+    try:
+        for sid in sorted(ids, key=lambda x: int(x) if str(x).isdigit() else x):
+            key = f"acl_rule:{sid}"
+            try:
+                val = rcli.get(key)
+            except Exception as e:
+                # skip this id but log
+                print("Failed to GET %s: %s", key, e)
+                continue
+
+            if not val:
+                # key missing or empty — skip
+                print("%s missing or empty", key)
+                continue
+
+            # val is expected to be a JSON string like {"id":1,"rules":[...]}
+            try:
+                obj = json.loads(val)
+            except Exception as e:
+                # stored value isn't JSON — attempt best-effort handling:
+                print("Invalid JSON in %s: %s", key, e)
+                # Fallback: treat entire stored value as a single rule string.
+                rules_array = [{"action": 1, "priority": 100, "rule": val}]
+            else:
+                # Prefer obj["rules"] if present and is a list
+                rules_array = obj.get("rules")
+                if not isinstance(rules_array, list):
+                    # If it's missing or not a list, convert to a single-entry list
+                    rules_array = [{"action": obj.get("action", 1),
+                                    "priority": obj.get("priority", 100),
+                                    "rule": obj.get("rule", "")}] if isinstance(obj, dict) else [{"action":1,"priority":100,"rule":str(obj)}]
+
+            # Serialize the rules array to JSON (compact) then base64-encode
+            try:
+                rules_json = json.dumps(rules_array, ensure_ascii=False)
+                rules_b64 = base64.b64encode(rules_json.encode("utf-8")).decode("ascii")
+            except Exception as e:
+                print("Failed to encode rules for %s: %s", key, e)
+                continue
+
+            results.append({
+                "id": int(sid) if str(sid).isdigit() else sid,
+                "rules": rules_b64
+            })
+
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Unexpected error: {e}"}), 500
+
+    return jsonify({
+        "data": results,
+        "token": _extract_token(request)
+    }), 200
     
 @app.route('/API/L7/set_ports', methods=['POST'])
 @token_required
@@ -1568,24 +1633,19 @@ def set_ports():
 @token_required
 def acl_rule_apply():
     """
-    Body:
+    POST body:
     {
       "data": [
-        {"id": 12, "checking_cond": "allow", "apply_code": "allow", "apply_content": null},
-        {"id": 24, "checking_cond": "block", "apply_code": "block", "apply_content": null},
-        {"id": 12, "checking_cond": "block", "apply_code": "return_code", "apply_content": 403},
-        {"id": 47, "checking_cond": "block", "apply_code": "redirect", "apply_content": "https://www.xxx.com/redirect"},
-        {"id": 25, "checking_cond": "allow", "apply_code": "redirect", "apply_content": "https://www.xxx.com/redirect"}
+        {"id":12,"checking_cond":"allow","apply_code":"allow","apply_content":null},
+        ...
       ],
       "token": "..."
     }
 
-    Writes /usr/local/openresty/nginx/conf/location_lua_acl_check.conf
-    containing an access_by_lua_block implementing first-match semantics.
+    Stores canonical apply rules in Redis under `acl_apply_rules` and publishes an update.
     """
     payload = request.get_json(silent=True) or {}
     print(payload)
-
     data_str = payload.get("data")
     if not data_str:
         return jsonify({"status": "error", "message": "Missing 'data' field."}), 400
@@ -1594,13 +1654,10 @@ def acl_rule_apply():
         items = json.loads(data_str)  # Parse the JSON string
     except json.JSONDecodeError:
         return jsonify({"status": "error", "message": "Invalid JSON in 'data' field."}), 400
-
     if not isinstance(items, list) or not items:
         return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
-
-    print(items)
     
-    # Validators
+    # helper validators
     def valid_url(u: str) -> bool:
         try:
             p = urlparse(u)
@@ -1608,228 +1665,134 @@ def acl_rule_apply():
         except Exception:
             return False
 
-    normalized = []  # list of dicts: {id, cond, action}
+    normalized = []
+    seen_ids = set()
+
     for idx, it in enumerate(items, start=1):
         if not isinstance(it, dict):
             return jsonify({"status": "error", "message": f"Entry #{idx} must be an object."}), 400
+
         # id
         try:
             acl_id = int(it.get("id", None))
             if acl_id <= 0:
                 raise ValueError()
         except Exception:
-            #return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'id' (must be positive integer)."}), 400
-            continue
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'id' (must be positive integer)."}), 400
+        if acl_id in seen_ids:
+            return jsonify({"status": "error", "message": f"Duplicate id in payload: {acl_id}"}), 400
+        seen_ids.add(acl_id)
+
         # checking_cond
         cond = str(it.get("checking_cond", "")).strip().lower()
         if cond not in {"allow", "block"}:
-            #return jsonify({"status": "error", "message": f"Entry #{idx}: 'checking_cond' must be 'allow' or 'block'."}), 400
-            continue
+            return jsonify({"status": "error", "message": f"Entry #{idx}: 'checking_cond' must be 'allow' or 'block'."}), 400
+
         # apply_code + apply_content
         code = str(it.get("apply_code", "")).strip().lower()
         if code not in {"allow", "block", "return_code", "redirect"}:
-            #return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'apply_code'."}), 400
-            continue
+            return jsonify({"status": "error", "message": f"Entry #{idx}: invalid 'apply_code'."}), 400
+
         content = it.get("apply_content", None)
+
         if code in {"allow", "block"}:
-            # should be empty / null; tolerate "" or None
-            if content not in (None, "", []):
-                #return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be empty for '{code}'."}), 400
-                continue
+            # allow/block should have empty content (tolerate None or "")
+            if content not in (None, "", [], {}):
+                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be empty for '{code}'."}), 400
             action = {"kind": code}
+
         elif code == "return_code":
             try:
                 rc = int(content)
                 if not (100 <= rc <= 599):
                     raise ValueError()
             except Exception:
-                #return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid HTTP status code (100..599)."}), 400
-                continue
+                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid HTTP status code (100..599)."}), 400
             action = {"kind": "return_code", "code": rc}
+
         else:  # redirect
             url = str(content or "").strip()
-            #if not valid_url(url):
-            #    return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid http(s) URL for 'redirect'."}), 400
+            if url and not valid_url(url):
+                return jsonify({"status": "error", "message": f"Entry #{idx}: 'apply_content' must be a valid http(s) URL for 'redirect'."}), 400
             action = {"kind": "redirect", "url": url}
-        normalized.append({"id": acl_id, "cond": cond, "action": action})
 
-    # Render Lua with first-match semantics
-    # BLOCK and INTERNAL_ERROR are treated as "block", others as "allow".
-    def lua_quote_long(s: str) -> str:
-        # Put string inside Lua long brackets [[...]] safely
-        return f"[[{s}]]"
-    
-    lua_rules_lines = []
-    for r in normalized:
-        act = r["action"]
-        if act["kind"] == "allow":
-            action_lua = '{ kind = "allow" }'
-        elif act["kind"] == "block":
-            action_lua = '{ kind = "block" }'
-        elif act["kind"] == "return_code":
-            action_lua = f'{{ kind = "return_code", code = {act["code"]} }}'
-        else:
-            action_lua = f'{{ kind = "redirect", url = {lua_quote_long(act["url"]) } }}'
-        lua_rules_lines.append(f'    {{ id = {r["id"]}, cond = "{r["cond"]}", action = {action_lua} }},')
+        normalized.append({
+            "id": acl_id,
+            "cond": cond,
+            "action": action
+        })
 
-    lua_block = f"""access_by_lua_block {{
-    local is_ok, handle_acl = pcall(require, 'resty.handle_acl')
-    if not is_ok then
-        ngx.log(ngx.ERR, 'need to build with nginx_http_acl module')
-        return ngx.exit(501)
-    end
-
-    -- Map engine return to allow/block:
-    -- 1 = ACL_RETURN_BLOCK, 5 = ACL_RETURN_INTERNAL_ERROR -> block
-    -- others -> allow
-    local function is_allow_ret(ret)
-        return not (ret == 1 or ret == 5)
-    end
-
-    -- First-match rules configured by API
-    local rules = {{
-{os.linesep.join(lua_rules_lines)}
-    }}
-
-    for _, r in ipairs(rules) do
-        local ret = handle_acl.process_acl_id(r.id)
-        ngx.log(ngx.INFO, "process_acl_id(", r.id, ") returns ", tonumber(ret))
-        local allow_eval = is_allow_ret(ret)
-        local cond_ok = (r.cond == "allow" and allow_eval) or (r.cond == "block" and not allow_eval)
-        if cond_ok then
-            local k = r.action.kind
-            if k == "allow" then
-                -- allow request: stop evaluating; continue normal nginx flow
-                return
-            elseif k == "block" then
-                return ngx.exit(451)
-            elseif k == "return_code" then
-                local code = tonumber(r.action.code) or 451
-                return ngx.exit(code)
-            elseif k == "redirect" then
-                local url = r.action.url
-                if url and #url > 0 then
-                    return ngx.redirect(url)
-                else
-                    return ngx.exit(451)
-                end
-            else
-                -- unknown action -> safest: block
-                return ngx.exit(451)
-            end
-        end
-    end
-
-    -- No rule matched -> allow
-    return
-}}
-"""
-    new_content = (
-        "# Managed by /API/L7/acl_rule_apply — DO NOT EDIT MANUALLY\n"
-        "# First-match semantics across configured (id, checking_cond -> action).\n\n"
-        + lua_block
-    )
-    
-    if not new_content.endswith("\n"):
-        new_content += "\n"
-
-    # Backup -> write -> test -> reload (with rollback on failure)
-    backup = None
+    # write to redis: compact JSON (no pretty indent)
     try:
-        if os.path.exists(CONFIG_LOCATION_LUA_ACL_CHECK_PATH):
-            backup = backup_path(CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
-            shutil.copy2(CONFIG_LOCATION_LUA_ACL_CHECK_PATH, backup)
+        rcli = get_redis_client()
+        json_val = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
+        # set key and publish a notification so workers can update mlcache
+        pipe = rcli.pipeline()
+        pipe.set("acl_apply_rules", json_val)
+        pipe.publish("acl:updates", "acl_apply_rules")
+        pipe.execute()
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to create backup: {e}"}), 400
-
-    try:
-        write_atomic(CONFIG_LOCATION_LUA_ACL_CHECK_PATH, new_content)
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to write config: {e}"}), 400
-
-    ok_test, test_msg = nginx_test()
-    if not ok_test:
-        try:
-            if backup and os.path.exists(backup):
-                shutil.copy2(backup, CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
-                remove_backup(backup)
-        except Exception:
-            pass
-        return jsonify({"status": "error", "message": test_msg}), 400
-
-    ok_reload, reload_msg = nginx_reload()
-    if not ok_reload:
-        return jsonify({"status": "error", "message": reload_msg}), 400
-
-    
-    time.sleep(0.5)
-    # --- Post-reload validation by hitting each /acl_rule<ID> ---
-    def get_text(url: str, timeout=5):
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = resp.getcode()
-            body = resp.read().decode("utf-8", errors="replace")
-            return status, body
-    
-    failures = []
-    for r in normalized:
-        acl_id = r["id"]
-        url = f"{ACL_RULE_URL_BASE}/acl_rule{acl_id}"
-        print (url)
-        try:
-            status, body = get_text(url, timeout=5)
-            ok = (status == 200) and ("Set ACL rule success" in body)
-            if not ok:
-                failures.append({"id": acl_id, "status": status, "body": body.strip()[:500]})
-        except urllib.error.HTTPError as e:
-            failures.append({"id": acl_id, "status": e.code, "body": (e.read().decode('utf-8', 'replace') if e.fp else str(e))[:500]})
-        except Exception as e:
-            failures.append({"id": acl_id, "status": None, "body": str(e)})
-    
-    if failures:
-        print (failures)
-        # Roll back to backup config and reload old config
-        try:
-            if backup and os.path.exists(backup):
-                print("trying to rollback backup")
-                shutil.copy2(backup, CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
-                remove_backup(backup)
-        except Exception:
-            # even if rollback reload fails, we still report original failures
-            pass
-        
-        remove_backup(backup)
-        return jsonify({
-            "status": "error",
-            "message": "One or more ACL rule endpoints failed validation after reload.",
-            "details": failures
-        }), 400
-     
-    # All validated
-    
-    # Success; optional cleanup of backup
-    remove_backup(backup)
+        print("Failed to write acl_apply_rules to Redis")
+        return jsonify({"status": "error", "message": f"Failed to write to Redis: {e}"}), 500
 
     return jsonify({
         "status": "success",
-        "message": "ACL rule apply config updated, nginx test passed, and reload signaled."
+        "message": "acl_apply_rules stored in Redis and update published.",
+        "count": len(normalized)
     }), 200
   
   
 @app.route("/API/L7/acl_rule_apply", methods=["GET"])
 def acl_rule_apply_get():
+    """
+    Returns the current ACL apply rules stored in Redis, converted to the API format.
+    Response format:
+    {
+        "data": [...],
+        "token": "..."
+    }
+    """
     try:
-        data = parse_acl_rule_apply(CONFIG_LOCATION_LUA_ACL_CHECK_PATH)
-        return jsonify({
-            "data": data,
-            "token": _extract_token(request)
-        }), 200
-    except FileNotFoundError as e:
-        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
-    except PermissionError as e:
-        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+        rcli = get_redis_client()
+        val = rcli.get("acl_apply_rules")
+        if not val:
+            rules = []
+        else:
+            stored = json.loads(val)
+            rules = []
+            for r in stored:
+                act = r.get("action", {})
+                kind = act.get("kind")
+                if kind == "allow":
+                    apply_code = "allow"
+                    apply_content = ""
+                elif kind == "block":
+                    apply_code = "block"
+                    apply_content = ""
+                elif kind == "return_code":
+                    apply_code = "return_code"
+                    apply_content = act.get("code", 451)
+                elif kind == "redirect":
+                    apply_code = "redirect"
+                    apply_content = act.get("url", "")
+                else:
+                    # unknown action → treat as block
+                    apply_code = "block"
+                    apply_content = ""
+                rules.append({
+                    "id": r.get("id"),
+                    "checking_cond": r.get("cond", ""),
+                    "apply_code": apply_code,
+                    "apply_content": apply_content
+                })
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500 
+        print("Failed to read acl_apply_rules from Redis")
+        return jsonify({"status": "error", "message": f"Failed to read from Redis: {e}"}), 500
+
+    return jsonify({
+        "data": rules,
+        "token": _extract_token(request)
+    }), 200
     
 def encode_base64(data):
     """
@@ -1895,10 +1858,87 @@ def health_check():
     command_args = ['l4_firewall_cli', 'HEALTH_CHECK']
     print(command_args)
     parsed = execute_cli_command(command_args)
-    if parsed['status'] == 'error':
-        return jsonify({"status": "error", "message": parsed['message']})
     
-    return jsonify({"status": "success", "message": parsed['message']})
+    l4_status = "failure"
+    l4_reason = "unknown error"
+    if isinstance(parsed, dict) and parsed.get('status') == 'error':
+        l4_status = "failure"
+        # try to extract error message
+        if isinstance(parsed, dict):
+            l4_reason = parsed.get('message', 'l4 check failed')
+        else:
+            l4_reason = str(parsed)
+    else:
+        l4_status = "success"
+        # prefer a human message if provided
+        l4_reason = parsed.get('message', 'l4 healthy')
+    
+    l7_status = "failure"
+    l7_reason = ""
+    
+    systemctl_path = shutil.which("systemctl")
+    if not systemctl_path:
+        l7_status = "failure"
+        l7_reason = "systemctl not found on this host"
+    else:
+        try:
+            # Use `systemctl status` for diagnostics but keep this call short.
+            # `--no-pager` avoids blocking on a pager.
+            proc = subprocess.run(
+                [systemctl_path, "status", "l7_firewall", "--no-pager"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True
+            )
+
+            # systemctl status returns 0 for active (running); non-zero otherwise.
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+
+            if proc.returncode == 0:
+                l7_status = "success"
+                # Prefer short human message
+                # Try to extract the "Active: ..." line for clarity
+                active_line = None
+                for line in stdout.splitlines():
+                    if "Active:" in line:
+                        active_line = line.strip()
+                        break
+                l7_reason = active_line or "l7_firewall is active (systemctl returned OK)"
+            else:
+                l7_status = "failure"
+                # Try to extract reason from stdout/stderr
+                active_line = None
+                for line in stdout.splitlines():
+                    if "Active:" in line:
+                        active_line = line.strip()
+                        break
+
+                if active_line:
+                    l7_reason = active_line
+                elif stderr:
+                    l7_reason = stderr
+                elif stdout:
+                    l7_reason = stdout.splitlines()[0][:200]  # shorten
+                else:
+                    l7_reason = f"systemctl exit code {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            l7_status = "failure"
+            l7_reason = "systemctl status timed out"
+        except Exception as e:
+            l7_status = "failure"
+            l7_reason = f"error executing systemctl: {e}"
+
+    # Build response
+    resp = {
+        "l4": l4_status,
+        "l4_reason": l4_reason,
+        "l7": l7_status,
+        "l7_reason": l7_reason
+    }
+
+    return jsonify(resp), 200
 
 
 def _is_x(val) -> bool:

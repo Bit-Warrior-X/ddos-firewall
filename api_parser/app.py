@@ -1858,10 +1858,87 @@ def health_check():
     command_args = ['l4_firewall_cli', 'HEALTH_CHECK']
     print(command_args)
     parsed = execute_cli_command(command_args)
-    if parsed['status'] == 'error':
-        return jsonify({"status": "error", "message": parsed['message']})
     
-    return jsonify({"status": "success", "message": parsed['message']})
+    l4_status = "failure"
+    l4_reason = "unknown error"
+    if isinstance(parsed, dict) and parsed.get('status') == 'error':
+        l4_status = "failure"
+        # try to extract error message
+        if isinstance(parsed, dict):
+            l4_reason = parsed.get('message', 'l4 check failed')
+        else:
+            l4_reason = str(parsed)
+    else:
+        l4_status = "success"
+        # prefer a human message if provided
+        l4_reason = parsed.get('message', 'l4 healthy')
+    
+    l7_status = "failure"
+    l7_reason = ""
+    
+    systemctl_path = shutil.which("systemctl")
+    if not systemctl_path:
+        l7_status = "failure"
+        l7_reason = "systemctl not found on this host"
+    else:
+        try:
+            # Use `systemctl status` for diagnostics but keep this call short.
+            # `--no-pager` avoids blocking on a pager.
+            proc = subprocess.run(
+                [systemctl_path, "status", "l7_firewall", "--no-pager"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=5,
+                text=True
+            )
+
+            # systemctl status returns 0 for active (running); non-zero otherwise.
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+
+            if proc.returncode == 0:
+                l7_status = "success"
+                # Prefer short human message
+                # Try to extract the "Active: ..." line for clarity
+                active_line = None
+                for line in stdout.splitlines():
+                    if "Active:" in line:
+                        active_line = line.strip()
+                        break
+                l7_reason = active_line or "l7_firewall is active (systemctl returned OK)"
+            else:
+                l7_status = "failure"
+                # Try to extract reason from stdout/stderr
+                active_line = None
+                for line in stdout.splitlines():
+                    if "Active:" in line:
+                        active_line = line.strip()
+                        break
+
+                if active_line:
+                    l7_reason = active_line
+                elif stderr:
+                    l7_reason = stderr
+                elif stdout:
+                    l7_reason = stdout.splitlines()[0][:200]  # shorten
+                else:
+                    l7_reason = f"systemctl exit code {proc.returncode}"
+        except subprocess.TimeoutExpired:
+            l7_status = "failure"
+            l7_reason = "systemctl status timed out"
+        except Exception as e:
+            l7_status = "failure"
+            l7_reason = f"error executing systemctl: {e}"
+
+    # Build response
+    resp = {
+        "l4": l4_status,
+        "l4_reason": l4_reason,
+        "l7": l7_status,
+        "l7_reason": l7_reason
+    }
+
+    return jsonify(resp), 200
 
 
 def _is_x(val) -> bool:

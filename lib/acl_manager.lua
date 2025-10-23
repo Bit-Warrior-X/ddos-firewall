@@ -272,10 +272,8 @@ function _M.start_redis_subscriber(premature)
                     _M.load_all_rules()
                 end
             end
-
             ::inner_continue::
         end
-
         ::continue::
     end
 end
