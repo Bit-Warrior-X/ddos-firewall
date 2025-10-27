@@ -1352,7 +1352,7 @@ def acl_rule_management():
     items = payload.get("data")
     if not isinstance(items, list) or not items:
         return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
-
+    
     def decode_b64_text(field_name: str, s: str):
         if not isinstance(s, str):
             return None, f"'{field_name}' must be a base64-encoded string."
@@ -1431,12 +1431,12 @@ def acl_rule_management():
                 if rule_field is None:
                     # If user didn't include a 'rule' subfield, maybe they provided a single expression object;
                     # convert whole object to JSON string.
-                    rule_str = json.dumps(r, ensure_ascii=False)
+                    rule_str = json.dumps(r, ensure_ascii=False, indent=2).replace('\\/', '/')
                     action_val = int(r.get("action", 1)) if r.get("action") is not None else 1
                     priority_val = int(r.get("priority", 100)) if r.get("priority") is not None else 100
                 else:
                     if isinstance(rule_field, (dict, list)):
-                        rule_str = json.dumps(rule_field, ensure_ascii=False)
+                        rule_str = json.dumps(rule_field, ensure_ascii=False, indent=2).replace('\\/', '/')
                     else:
                         rule_str = str(rule_field)
                     action_val = int(r.get("action", 1)) if r.get("action") is not None else 1
@@ -1465,11 +1465,34 @@ def acl_rule_management():
     # All entries validated & prepared. Now write to Redis in a pipeline.
     try:
         rcli = get_redis_client()
-        pipe = rcli.pipeline()
+        
+        try:
+            orig_members = rcli.smembers(RULE_IDS_KEY)
+            orig_ids = set()
+            for m in orig_members:
+                if isinstance (m, bytes):
+                    try:
+                        orig_ids.add(int(m.decode()))
+                    except Exception:
+                        try:
+                            orig_ids.add(int(m.decode('utf-8')))
+                        except Exception:
+                            pass
+                else:
+                    try:
+                        orig_ids.add(int(m))
+                    except Exception:
+                        pass
+        except Exception:
+            return jsonify({"status": "error", "message": f"Failed to read existing acl_rule_ids from Redis: {e}"}), 500
+        
+        prepared_ids = {acl_id for (acl_id, _obj) in prepared}
+    
+        pipe = rcli.pipeline()    
         for acl_id, obj in prepared:
             key = f"acl_rule:{acl_id}"
             # store pretty-printed JSON for readability (you may use compact JSON by using separators)
-            value = json.dumps(obj, ensure_ascii=False, indent=2)
+            value = json.dumps(obj, ensure_ascii=False, indent=2).replace('\\/', '/')
             pipe.set(key, value)
             # add id to acl_rule_ids set
             pipe.sadd(RULE_IDS_KEY, acl_id)
@@ -1477,6 +1500,23 @@ def acl_rule_management():
             pipe.publish("acl:updates", f"acl_rule:{acl_id}")
         # execute all pipeline commands atomically as a batch (not a single Redis transaction)
         pipe.execute()
+        
+        to_remove = sorted(list(orig_ids - prepared_ids))
+        #removed_ids = []
+        
+        if to_remove:
+            del_pipe = rcli.pipeline()
+            for rid in to_remove:
+                del_key = f"acl_rule:{rid}"
+                del_pipe.delete(del_key)
+                del_pipe.srem(RULE_IDS_KEY, rid)
+                # Optional: notify subscribers about deletion. Adjust payload if needed.
+                del_pipe.publish("acl:updates", f"acl_rule_deleted:{rid}")
+            res = del_pipe.execute()
+            # res contains results for delete, srem, publish for each id; we only want the ids we attempted
+            # Build removed_ids from the to_remove list. Optionally validate res to check success.
+            # removed_ids = to_remove
+            
     except Exception as e:
         return jsonify({"status": "error", "message": f"Failed to write to Redis: {e}"}), 500
 
@@ -1543,7 +1583,7 @@ def acl_rule_management_get():
 
             # Serialize the rules array to JSON (compact) then base64-encode
             try:
-                rules_json = json.dumps(rules_array, ensure_ascii=False)
+                rules_json = json.dumps(rules_array, ensure_ascii=False, indent=2).replace('\\/', '/')
                 rules_b64 = base64.b64encode(rules_json.encode("utf-8")).decode("ascii")
             except Exception as e:
                 print("Failed to encode rules for %s: %s", key, e)
@@ -1725,7 +1765,7 @@ def acl_rule_apply():
     # write to redis: compact JSON (no pretty indent)
     try:
         rcli = get_redis_client()
-        json_val = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
+        json_val = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False, indent=2).replace('\\/', '/')
         # set key and publish a notification so workers can update mlcache
         pipe = rcli.pipeline()
         pipe.set("acl_apply_rules", json_val)
