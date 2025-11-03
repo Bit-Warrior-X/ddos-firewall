@@ -1676,7 +1676,7 @@ def acl_rule_apply():
     POST body:
     {
       "data": [
-        {"id":12,"checking_cond":"allow","apply_code":"allow","apply_content":null},
+        {"id":12,"checking_cond":"allow","apply_code":"allow","apply_content":null, "status":"enabled"},
         ...
       ],
       "token": "..."
@@ -1686,16 +1686,48 @@ def acl_rule_apply():
     """
     payload = request.get_json(silent=True) or {}
     print(payload)
+        
     data_str = payload.get("data")
     if not data_str:
         return jsonify({"status": "error", "message": "Missing 'data' field."}), 400
 
-    try:
-        items = json.loads(data_str)  # Parse the JSON string
-    except json.JSONDecodeError:
-        return jsonify({"status": "error", "message": "Invalid JSON in 'data' field."}), 400
-    if not isinstance(items, list) or not items:
+    items = None
+
+    # Case 1: already parsed list/tuple
+    if isinstance(data_str, (list, tuple)):
+        items = list(data_str)
+
+    # Case 2: a JSON string
+    elif isinstance(data_str, str):
+        try:
+            parsed = json.loads(data_str)
+        except json.JSONDecodeError:
+            return jsonify({"status": "error", "message": "Invalid JSON string in 'data' field."}), 400
+        if isinstance(parsed, (list, tuple)):
+            items = list(parsed)
+        else:
+            return jsonify({"status": "error", "message": "'data' JSON must be an array."}), 400
+
+    # Case 3: raw bytes/bytearray (e.g., some clients)
+    elif isinstance(data_str, (bytes, bytearray)):
+        try:
+            parsed = json.loads(data_str.decode("utf-8"))
+        except Exception:
+            return jsonify({"status": "error", "message": "Invalid JSON bytes in 'data' field."}), 400
+        if isinstance(parsed, (list, tuple)):
+            items = list(parsed)
+        else:
+            return jsonify({"status": "error", "message": "'data' JSON must be an array."}), 400
+
+    else:
+        return jsonify({"status": "error", "message": "Unsupported 'data' field type."}), 400
+
+    # final validation
+    if not items:
         return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
+
+    # items is now a list you can safely use
+    print(items)
     
     # helper validators
     def valid_url(u: str) -> bool:
@@ -1723,6 +1755,11 @@ def acl_rule_apply():
             return jsonify({"status": "error", "message": f"Duplicate id in payload: {acl_id}"}), 400
         seen_ids.add(acl_id)
 
+        # status
+        status = str(it.get("status", "")).strip().lower()
+        if status not in {"enabled", "disabled"}:
+            return jsonify({"status": "error", "message": f"Entry #{idx}: 'status' must be 'enabled' or 'disabled'."}), 400
+        
         # checking_cond
         cond = str(it.get("checking_cond", "")).strip().lower()
         if cond not in {"allow", "block"}:
@@ -1758,6 +1795,7 @@ def acl_rule_apply():
 
         normalized.append({
             "id": acl_id,
+            "status": status,
             "cond": cond,
             "action": action
         })
@@ -1821,6 +1859,7 @@ def acl_rule_apply_get():
                     apply_content = ""
                 rules.append({
                     "id": r.get("id"),
+                    "status": r.get("status"),
                     "checking_cond": r.get("cond", ""),
                     "apply_code": apply_code,
                     "apply_content": apply_content
