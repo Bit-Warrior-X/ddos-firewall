@@ -46,6 +46,7 @@ from l7_nginx_config import (
     file_to_base64,
     parse_acl_system_config,
     parse_acl_switch,
+    parse_set_ports,
     parse_acl_rule_management,
     parse_acl_rule_apply
 )
@@ -1668,7 +1669,23 @@ def set_ports():
         "status": "success",
         "message": "Server ports are successfully updated."
     }), 200
-        
+
+
+@app.route("/API/L7/set_ports", methods=["GET"])
+def set_ports_get():
+    try:
+        ports = parse_set_ports(CONFIG_SERVER_DEFAULT_PORTS_PATH)
+        return jsonify({
+            "set_ports": ports,          # "on" or "off"
+            "token": _extract_token(request)
+        }), 200
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 @app.route('/API/L7/acl_rule_apply', methods=['POST'])
 @token_required
 def acl_rule_apply():
