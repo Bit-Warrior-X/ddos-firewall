@@ -13,6 +13,7 @@ L4_SERVICE_NAME="ebpf_firewall.service"
 L7_SERVICE_NAME="l7_firewall.service"
 L4_PROM_SERVICE_NAME="ebpf_firewall_prometheus.service"
 API_PARSER_SERVICE_NAME="api_parser.service"
+REDIS_SERVER_SERVICE_NAME="redis-server.service"
 
 CLI_SYMLINK="/usr/sbin/l4_firewall_cli"
 LD_CONF_FILE="/etc/ld.so.conf.d/firewall_lib.conf"
@@ -144,6 +145,7 @@ stop_disable_service "${API_PARSER_SERVICE_NAME}"
 stop_disable_service "${L4_PROM_SERVICE_NAME}"
 stop_disable_service "${L4_SERVICE_NAME}"
 stop_disable_service "${L7_SERVICE_NAME}"
+stop_disable_service "${REDIS_SERVER_SERVICE_NAME}"
 
 info "Reloading systemd daemon..."
 do_run "systemctl daemon-reload || true"
@@ -230,6 +232,13 @@ if [[ $PURGE_OPENRESTY -eq 1 ]]; then
 else
   warn "Keeping OpenResty (use --purge-openresty to remove)"
 fi
+
+#6) Purge redis-server
+do_run "rm -rf /etc/redis"
+do_run "rm -rf /var/lib/redis"
+do_run "rm -rf /var/log/redis*"
+do_run "apt remove --purge redis-server redis-tools -y"
+do_run "apt autoremove -y"
 
 do_run "rm -rf /tmp/uninstall.sh"
 

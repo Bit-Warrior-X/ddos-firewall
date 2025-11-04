@@ -424,6 +424,33 @@ def parse_acl_switch(path: str = CONFIG_SERVER_ACL_PATH) -> str:
     # If directive not found, treat as error (or default to 'off' if you prefer)
     raise ValueError("Missing 'acl on|off;' directive in server_acl.conf")
 
+def parse_set_ports(path: str = CONFIG_SERVER_DEFAULT_PORTS_PATH) -> str:
+    """
+    Reads `server_default_ports.conf` and returns '80,8080' from a line like:
+        listen 80;
+        listen 8080;
+    Ignores comments and blank lines.
+    """
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
+    patt = re.compile(r"^\s*listen\s+(\d+)\s*;\s*$", re.IGNORECASE)
+    ports = []
+
+    with open(path, "r") as f:
+        for raw in f:
+            line = raw.split("#", 1)[0].strip()  # remove comments
+            if not line:
+                continue
+            m = patt.match(line)
+            if m:
+                ports.append(m.group(1))
+
+    if not ports:
+        raise ValueError("No 'listen' directives found in server_default_ports.conf")
+
+    return ",".join(ports)
+
 
 _loc_re = re.compile(r'^\s*location\s+/\s*acl_rule(\d+)\s*\{')
 

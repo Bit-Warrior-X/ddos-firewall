@@ -46,6 +46,7 @@ from l7_nginx_config import (
     file_to_base64,
     parse_acl_system_config,
     parse_acl_switch,
+    parse_set_ports,
     parse_acl_rule_management,
     parse_acl_rule_apply
 )
@@ -1668,7 +1669,23 @@ def set_ports():
         "status": "success",
         "message": "Server ports are successfully updated."
     }), 200
-        
+
+
+@app.route("/API/L7/set_ports", methods=["GET"])
+def set_ports_get():
+    try:
+        ports = parse_set_ports(CONFIG_SERVER_DEFAULT_PORTS_PATH)
+        return jsonify({
+            "set_ports": ports,          # "on" or "off"
+            "token": _extract_token(request)
+        }), 200
+    except FileNotFoundError as e:
+        return jsonify({"status": "error", "message": f"Config not found: {e}"}), 500
+    except PermissionError as e:
+        return jsonify({"status": "error", "message": f"Permission denied: {e}"}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    
 @app.route('/API/L7/acl_rule_apply', methods=['POST'])
 @token_required
 def acl_rule_apply():
@@ -1686,16 +1703,48 @@ def acl_rule_apply():
     """
     payload = request.get_json(silent=True) or {}
     print(payload)
+        
     data_str = payload.get("data")
     if not data_str:
         return jsonify({"status": "error", "message": "Missing 'data' field."}), 400
 
-    try:
-        items = json.loads(data_str)  # Parse the JSON string
-    except json.JSONDecodeError:
-        return jsonify({"status": "error", "message": "Invalid JSON in 'data' field."}), 400
-    if not isinstance(items, list) or not items:
+    items = None
+
+    # Case 1: already parsed list/tuple
+    if isinstance(data_str, (list, tuple)):
+        items = list(data_str)
+
+    # Case 2: a JSON string
+    elif isinstance(data_str, str):
+        try:
+            parsed = json.loads(data_str)
+        except json.JSONDecodeError:
+            return jsonify({"status": "error", "message": "Invalid JSON string in 'data' field."}), 400
+        if isinstance(parsed, (list, tuple)):
+            items = list(parsed)
+        else:
+            return jsonify({"status": "error", "message": "'data' JSON must be an array."}), 400
+
+    # Case 3: raw bytes/bytearray (e.g., some clients)
+    elif isinstance(data_str, (bytes, bytearray)):
+        try:
+            parsed = json.loads(data_str.decode("utf-8"))
+        except Exception:
+            return jsonify({"status": "error", "message": "Invalid JSON bytes in 'data' field."}), 400
+        if isinstance(parsed, (list, tuple)):
+            items = list(parsed)
+        else:
+            return jsonify({"status": "error", "message": "'data' JSON must be an array."}), 400
+
+    else:
+        return jsonify({"status": "error", "message": "Unsupported 'data' field type."}), 400
+
+    # final validation
+    if not items:
         return jsonify({"status": "error", "message": "Body must contain non-empty 'data' array."}), 400
+
+    # items is now a list you can safely use
+    print(items)
     
     # helper validators
     def valid_url(u: str) -> bool:
@@ -1725,7 +1774,7 @@ def acl_rule_apply():
 
         # status
         status = str(it.get("status", "")).strip().lower()
-        if cond not in {"enabled", "disabled"}:
+        if status not in {"enabled", "disabled"}:
             return jsonify({"status": "error", "message": f"Entry #{idx}: 'status' must be 'enabled' or 'disabled'."}), 400
         
         # checking_cond

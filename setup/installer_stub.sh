@@ -20,6 +20,7 @@ L4_SERVICE_NAME="ebpf_firewall.service"
 L7_SERVICE_NAME="l7_firewall.service"
 L4_PROM_SERVICE_NAME="ebpf_firewall_prometheus.service"
 API_PARSER_SERVICE_NAME="api_parser.service"
+REDIS_SERVER_SERVICE_NAME="redis-server.service"
 
 
 # Function to print colored output
@@ -107,6 +108,9 @@ create_directories() {
 # Install files
 install_files() {
     print_status "Installing application files..."
+
+    echo "Installing Redis server..."
+    apt install redis-server -y
 
     # Install L4 user binaries and data
     if [[ -d "${EXTRACTED_DIR}/l4" ]]; then
@@ -199,6 +203,12 @@ install_files() {
     if [[ -f "${EXTRACTED_DIR}/lib/firewall_lib.conf" ]]; then
         cp -f "${EXTRACTED_DIR}/lib/firewall_lib.conf" "/etc/ld.so.conf.d/"
         chmod 644 "/etc/ld.so.conf.d/firewall_lib.conf"
+    fi
+
+    # Install redis-server config
+    if [[ -f "${EXTRACTED_DIR}/lib/redis-socket.conf" ]]; then
+        cp -f "${EXTRACTED_DIR}/lib/redis-socket.conf" "/etc/redis/"
+        chmod 644 "/etc/redis/redis-socket.conf"
     fi
 
     # Update library cache
@@ -310,6 +320,18 @@ install_service() {
         print_warning "${API_PARSER_SERVICE_NAME} not found in payload"
     fi
 
+    # redis-server service (may be at EXTRACTED_DIR/lib/${REDIS_SERVER_SERVICE_NAME})
+    if [[ -f "${EXTRACTED_DIR}/lib/${REDIS_SERVER_SERVICE_NAME}" ]]; then
+        cp -f "${EXTRACTED_DIR}/lib/${REDIS_SERVER_SERVICE_NAME}" "/etc/systemd/system/${REDIS_SERVER_SERVICE_NAME}"
+        chmod 644 "/etc/systemd/system/${REDIS_SERVER_SERVICE_NAME}"
+    elif [[ -f "${EXTRACTED_DIR}/${REDIS_SERVER_SERVICE_NAME}" ]]; then
+        cp -f "${EXTRACTED_DIR}/${REDIS_SERVER_SERVICE_NAME}" "/etc/systemd/system/${REDIS_SERVER_SERVICE_NAME}"
+        chmod 644 "/etc/systemd/system/${REDIS_SERVER_SERVICE_NAME}"
+    else
+        print_warning "${REDIS_SERVER_SERVICE_NAME} not found in payload"
+    fi
+
+
     # Reload systemd and enable/start services (only those we copied)
     print_status "Reloading systemd daemon..."
     systemctl daemon-reload || true
@@ -326,10 +348,12 @@ install_service() {
         systemctl enable "${L4_PROM_SERVICE_NAME}" || print_warning "Failed to enable/start ${L4_PROM_SERVICE_NAME}"
     fi
 
-    if [[ -f "/etc/systemd/system/${API_PARSER_SERVICE_NAME}" ]]; then
-        systemctl enable "${API_PARSER_SERVICE_NAME}" || print_warning "Failed to enable/start ${API_PARSER_SERVICE_NAME}"
+    if [[ -f "/etc/systemd/system/${REDIS_SERVER_SERVICE_NAME}" ]]; then
+        systemctl enable "${REDIS_SERVER_SERVICE_NAME}" || print_warning "Failed to enable/start ${REDIS_SERVER_SERVICE_NAME}"
+        systemctl restart "${REDIS_SERVER_SERVICE_NAME}"
     fi
 
+    
     print_status "Service installation steps complete."
 }
 
