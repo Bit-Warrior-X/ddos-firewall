@@ -1,0 +1,353 @@
+ngx_addon_name=ngx_http_acl_module
+
+deps="$ngx_addon_dir/inc/ngx_http_acl_module_core.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_config.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_type.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_util.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_lru_cache.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_mem_pool.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_lexer.h \
+    $ngx_addon_dir/inc/ngx_http_acl_module_parser.tab.h \
+    $ngx_addon_dir/inc/cjson/cJSON.h"
+
+srcs="$ngx_addon_dir/src/ngx_http_acl_module_core.c \
+    $ngx_addon_dir/src/ngx_http_acl_module_config.c \
+    $ngx_addon_dir/src/ngx_http_acl_module_util.c \
+    $ngx_addon_dir/src/ngx_http_acl_module_lru_cache.c \
+    $ngx_addon_dir/src/ngx_http_acl_module_mem_pool.c \
+    $ngx_addon_dir/src/ngx_http_acl_module_lexer.c \
+    $ngx_addon_dir/src/ngx_http_acl_module_parser.tab.c \
+    $ngx_addon_dir/inc/cjson/cJSON.c"
+
+ngx_http_acl_module_libs=""
+ngx_http_acl_module_inc_path="$ngx_addon_dir/inc "
+
+if [ -n "$LIB_UTHASH" ] ;  then
+    ngx_http_acl_module_inc_path="${ngx_http_acl_module_inc_path} ${LIB_UTHASH}/include"
+fi
+
+which flex
+if [ $? -ne 0 ] ; then
+    cat << END
+
+$0: error: the $ngx_addon_name module requires the flex.
+
+
+which flex
+if [ $? -ne 0 ] ; then
+    cat << END
+
+$0: error: the $ngx_addon_name module requires the flex.
+
+Please run:
+    On Ubuntu or Debian: 
+        apt-get update && apt-get install --yes flex
+    On CentOS 7:
+        yum -y install flex
+    On Centos 8 or Fedora 33 or Fedora 34:
+        dnf install flex
+    On Alpine:
+        apk update && apk add --upgrade flex
+    On Arch:
+        1. Enable the core repository on /etc/pacman.conf:
+            [core]
+            Include = /etc/pacman.d/mirrorlist
+        2. Install flex xz package:
+            pacman -Syu flex
+    On FreeBSD 12 or FreeBSD 13:
+        pkg install flex
+END
+    exit 1
+
+fi
+
+which bison
+if [ $? -ne 0 ] ; then
+    cat << END
+
+$0: error: the $ngx_addon_name module requires the bison.
+
+Please run:
+    On Ubuntu or Debian: 
+        apt-get update && apt-get install --yes bison
+    On CentOS 7:
+        yum -y install bison
+    On Centos 8 or Fedora 33 or Fedora 34:
+        dnf install bison
+    On Alpine:
+        apk update && apk add --upgrade bison
+    On Arch:
+        1. Enable the core repository on /etc/pacman.conf:
+            [core]
+            Include = /etc/pacman.d/mirrorlist
+        2. Install flex xz package:
+            pacman -Syu bison
+    On FreeBSD 12 or FreeBSD 13:
+        pkg install bison
+
+END
+    exit 1
+
+fi
+
+is_gen='true'
+
+if [ ! -e  "${ngx_addon_dir}/inc/ngx_http_acl_module_lexer.h" ] ; then
+    is_gen='false'
+elif [ ! -e "${ngx_addon_dir}/src/ngx_http_acl_module_lexer.c" ] ; then
+    is_gen='false'
+elif [ ! -e "${ngx_addon_dir}/inc/ngx_http_acl_module_parser.tab.h" ] ; then
+    is_gen='false'
+elif [ ! -e "${ngx_addon_dir}/src/ngx_http_acl_module_parser.tab.c" ] ; then
+    is_gen='false'
+fi
+
+if [ $is_gen != 'true' ] ; then
+    cat << END
+
+$0: error: the $ngx_addon_name module requires the following command to be run to generate the necessary files.
+
+    cd $ngx_addon_dir && make && cd $(pwd)
+
+END
+    exit 1
+fi
+
+
+# Check if the uthash library is installed.
+ngx_feature="uthash library"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_path=$ngx_http_acl_module_inc_path
+ngx_feature_incs="#include <utstack.h>"
+ngx_feature_libs=$ngx_http_acl_module_libs
+ngx_feature_test=
+. auto/feature
+if [ $ngx_found = no  ] ; then 
+    PWD=$(pwd)
+    cat << END
+$0: error: the $ngx_addon_name module requires the $ngx_feature.
+
+Please run:
+            cd /usr/local/src \\
+        &&  git clone https://github.com/troydhanson/uthash.git \\
+        &&  export LIB_UTHASH=/usr/local/src/uthash \\
+        &&  cd $PWD
+
+END
+    PWD=''
+    exit 1
+fi
+
+# Check if the libmaxminddb library is installed.
+if [ -n "$LIB_MAXMINDDB" ] ;  then
+    ngx_http_acl_module_inc_path="${ngx_http_acl_module_inc_path} ${LIB_MAXMINDDB}/include"
+    ngx_http_acl_module_libs=" ${ngx_http_acl_module_libs} -L ${LIB_MAXMINDDB}/lib -Wl,-Bstatic -l maxminddb -Wl,-Bdynamic "
+else
+    ngx_http_acl_module_libs=" ${ngx_http_acl_module_libs}  -l maxminddb "
+fi
+
+ngx_feature="libmaxminddb library"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_path=$ngx_http_acl_module_inc_path
+ngx_feature_incs="#include <maxminddb.h>"
+ngx_feature_libs=$ngx_http_acl_module_libs
+ngx_feature_test=
+. auto/feature
+if [ $ngx_found = no  ] ; then 
+    PWD=$(pwd)
+    cat << END
+$0: error: the $ngx_addon_name module requires the $ngx_feature.
+
+Please run:
+            cd /usr/local/src \\
+            git clone http://admin.skycloud.tw/skycloud-rd/libmaxminddb.git -b nginx_acl_use\\
+        &&  cd libmaxminddb \\
+        &&  ./configure --prefix=/usr/local/src/libmaxminddb --with-pic \\
+        &&  make -j\$(nproc) && make check -j \$(nproc) && make install \\
+        &&  sudo ldconfig \\
+        &&  export LIB_MAXMINDDB=/usr/local/src/libmaxminddb \\
+        &&  cd $PWD
+
+END
+    PWD=''
+    exit 1
+fi
+
+if [ -n "$LIB_CURL" ] ; then
+    ngx_http_acl_module_libs=" ${ngx_http_acl_module_libs} -L ${LIB_CURL}/lib  -Wl,-rpath,${LIB_CURL}/lib -l curl "
+    ngx_http_acl_module_inc_path=" ${ngx_http_acl_module_inc_path} ${LIB_CURL}/include"
+else
+    ngx_http_acl_module_libs=" ${ngx_http_acl_module_libs} -l curl "
+fi
+
+# Check if the curl library is installed.
+ngx_feature="curl library"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_path=$ngx_http_acl_module_inc_path
+ngx_feature_incs="#include <curl/curl.h>"
+ngx_feature_libs=$ngx_http_acl_module_libs
+ngx_feature_test=
+. auto/feature
+if [ $ngx_found = no  ] ; then 
+    PWD=$(pwd)
+    cat << END
+$0: error: the $ngx_addon_name module requires the $ngx_feature.
+Please run:
+    On Ubuntu or Debian: 
+            apt-get update && apt-get install --yes libcurl4-openssl-dev
+    On Centos8:
+            dnf install libcurl && dnf install libcurl-devel
+    On Centos7:
+            yum update && yum install -y libcurl libcurl-devel
+    On other OS:
+            cd /usr/local/src \\
+        &&  wget https://curl.se/download/curl-7.78.0.tar.gz \\
+        &&  mkdir curl \\
+        &&  tar -zxf curl-7.78.0.tar.gz -C curl --strip-components=1 \\
+        &&  cd curl \\
+        &&  ./configure --prefix=/usr/local/libcurl \\
+        &&  make -j \$(nproc) \\
+        &&  make install \\
+        &&  export LIB_CURL=/usr/local/libcurl \\
+        &&  cd $PWD
+END
+    PWD=''
+    exit 1
+fi
+
+
+# Check if the cJSON library is installed.
+ngx_feature="cJSON library"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_path=$ngx_http_acl_module_inc_path
+ngx_feature_incs="#include <cjson/cJSON.h>"
+ngx_feature_libs=$ngx_http_acl_module_libs
+ngx_feature_test=
+. auto/feature
+if [ $ngx_found = no  ] ; then 
+    PWD=$(pwd)
+    cat << END
+$0: error: the $ngx_addon_name module requires the $ngx_feature.
+Please run:
+        cd $ngx_addon_dir \\
+    &&  git clone -b v1.7.15 https://github.com/DaveGamble/cJSON.git inc/cjson \\
+    &&  cd $PWD
+END
+    PWD=''
+    exit 1
+fi
+
+# Check if the C compiler supports the C99 standard.
+ngx_feature="C99 features"
+ngx_feature_name=
+ngx_feature_run=yes
+ngx_feature_path=$ngx_http_acl_module_inc_path
+ngx_feature_incs=
+ngx_feature_libs=$ngx_http_acl_module_libs
+ngx_feature_test=$(cat << END
+
+/* Declare variables in loops. */
+for(int i = 0; i < 10; i++) {}
+
+int i = 0, j = 0;
+
+/* Short-circuit operation for logical expressions. */
+if (i == 0 || !(j = 1)) {}
+
+if (j == 1) { return 1; }
+
+j = 0;
+
+if (i != 0 && !(j = 1)) {}
+
+if (j == 1) { return 1; }
+
+END
+)
+. auto/feature
+if [ $ngx_found = no  ] ; then 
+    cat << END
+$0: error: the $ngx_addon_name module requires the $ngx_feature, make sure your C compiler supports and enables the C99 standard.
+
+For gcc, you can enable the C99 standard by appending the parameter --with-cc-opt='-std=gnu99'.
+
+END
+    exit 1
+fi
+
+if [ -n "$LIB_SODIUM" ] ;  then
+    ngx_http_acl_module_inc_path="${ngx_http_acl_module_inc_path} ${LIB_SODIUM}/include"
+    ngx_http_acl_module_libs=" ${ngx_http_acl_module_libs} -L ${LIB_SODIUM}/lib -Wl,-Bstatic -l sodium -Wl,-Bdynamic "
+else
+    ngx_http_acl_module_libs=" ${ngx_http_acl_module_libs}  -l sodium "
+fi
+
+
+# Check if libsodium exists.
+ngx_feature="sodium library"
+ngx_feature_name=
+ngx_feature_run=no
+ngx_feature_path=$ngx_http_acl_module_inc_path
+ngx_feature_incs='#include <sodium.h>'
+ngx_feature_libs=$ngx_http_acl_module_libs
+ngx_feature_test=
+. auto/feature
+if [ $ngx_found = no  ] ; then 
+    PWD=$(pwd)
+    cat << END
+$0: error: the $ngx_addon_name module requires the $ngx_feature.
+
+Please run:
+    On Ubuntu or Debian: 
+            apt-get update && apt-get install --yes libsodium23 libsodium-dev
+    On Alpine: 
+            apk update && apk add libsodium libsodium-dev
+    On other OS:
+            # You can remove directories libsodium-src and libsodium after installing the ngx_http_acl_module.
+            git clone https://github.com/jedisct1/libsodium.git --branch stable libsodium-src \\
+        &&  cd libsodium-src \\
+        &&  ./configure --prefix=$PWD/libsodium --with-pic \\
+        &&  make -j\$(nproc) && make check -j \$(nproc) && make install \\
+        &&  export LIB_SODIUM=$PWD/libsodium \\
+        &&  cd $PWD
+
+END
+    PWD=''
+    exit 1
+fi
+
+
+# Clear these variables to avoid affecting the installation of other modules.
+ngx_feature=
+ngx_feature_name=
+ngx_feature_run=
+ngx_feature_path=
+ngx_feature_incs=
+ngx_feature_libs=
+ngx_feature_test=
+
+
+if test -n "$ngx_module_link"; then
+    ngx_module_type=HTTP
+    ngx_module_name=$ngx_addon_name
+    ngx_module_deps=$deps
+    ngx_module_incs=$ngx_http_acl_module_inc_path
+    ngx_module_srcs=$srcs
+    ngx_module_libs=$ngx_http_acl_module_libs
+    
+    # Let ngx_http_access_module initialize before this module,
+    # so that this module can take effect after ngx_http_access_module,
+    # because the initialization order and the effective order are reversed.
+    ngx_module_order="${ngx_addon_name} ngx_http_access_module"
+
+    . auto/module
+else
+    HTTP_MODULES="$HTTP_MODULES ${ngx_addon_name}"
+    HTTP_DEPS-"$HTTP_DEPS $deps"
+    HTTP_INCS="$HTTP_INCS -I $ngx_addon_dir/inc"
+    NGX_ADDON_SRCS="$NGX_ADDON_SRCS $srcs"
+fi

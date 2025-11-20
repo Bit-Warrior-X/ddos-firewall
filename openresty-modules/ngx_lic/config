@@ -1,0 +1,3 @@
+ngx_addon_name=ngx_lic_module
+HTTP_MODULES="$HTTP_MODULES ngx_lic_module"
+NGX_ADDON_SRCS="$NGX_ADDON_SRCS $ngx_addon_dir/ngx_lic.c"
