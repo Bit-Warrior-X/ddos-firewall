@@ -47,11 +47,24 @@ class DatabaseManager:
             conn = sqlite3.connect(config.FIREWALL_DB_NAME)
             cursor = conn.cursor()
             
-            cursor.execute("DELETE FROM blocked_ips")
-            cursor.execute("DELETE FROM white_ips")
-            cursor.execute(
-                "DELETE FROM sqlite_sequence WHERE name IN ('blocked_ips', 'white_ips')"
-            )
+            # Check if tables exist before trying to delete from them
+            cursor.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name IN ('blocked_ips', 'white_ips')
+            """)
+            existing_tables = [row[0] for row in cursor.fetchall()]
+            
+            if 'blocked_ips' in existing_tables:
+                cursor.execute("DELETE FROM blocked_ips")
+            if 'white_ips' in existing_tables:
+                cursor.execute("DELETE FROM white_ips")
+            
+            # Clear sequence if tables exist
+            if existing_tables:
+                cursor.execute(
+                    "DELETE FROM sqlite_sequence WHERE name IN ('blocked_ips', 'white_ips')"
+                )
+            
             conn.commit()
         except sqlite3.Error:
             if conn:

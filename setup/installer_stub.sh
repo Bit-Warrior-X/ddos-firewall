@@ -269,13 +269,27 @@ prepare_api_parser_venv() {
         print_status "Upgrading pip/setuptools/wheel in venv"
         "${PIP_BIN}" install --upgrade pip setuptools wheel || print_warning "pip upgrade failed"
 
-        # If there is a requirements.txt in the api_parser, prefer that; otherwise install minimal deps
+        # Install runtime dependencies (Cython not needed since .so files are pre-built)
+        # Filter out Cython from requirements if present
         if [[ -f "${INSTALL_API_PARSER_DIR}/requirements.txt" ]]; then
             print_status "Installing packages from requirements.txt"
-            "${PIP_BIN}" install -r "${INSTALL_API_PARSER_DIR}/requirements.txt" || print_warning "pip install -r requirements.txt failed"
+            # Create a temporary requirements file without Cython (not needed at runtime)
+            TEMP_REQ=$(mktemp)
+            grep -v "^Cython" "${INSTALL_API_PARSER_DIR}/requirements.txt" > "${TEMP_REQ}" || true
+            "${PIP_BIN}" install -r "${TEMP_REQ}" || print_warning "pip install -r requirements.txt failed"
+            rm -f "${TEMP_REQ}"
         else
-            print_status "Installing minimal packages: requests flask gunicorn"
-            "${PIP_BIN}" install requests flask gunicorn || print_warning "pip install minimal packages failed"
+            print_status "Installing minimal packages: requests flask gunicorn redis"
+            "${PIP_BIN}" install requests flask gunicorn redis || print_warning "pip install minimal packages failed"
+        fi
+
+        # Verify .so files are present (they should be pre-built in payload)
+        SO_COUNT=$(find "${INSTALL_API_PARSER_DIR}" -name "*.so" -type f 2>/dev/null | wc -l)
+        if [[ $SO_COUNT -gt 0 ]]; then
+            print_status "Found $SO_COUNT pre-built .so files (no compilation needed)"
+        else
+            print_warning "No .so files found! The application may not work correctly."
+            print_warning "Expected pre-built .so files in payload."
         fi
     else
         print_warning "No pip available in venv; skipping Python package installation"

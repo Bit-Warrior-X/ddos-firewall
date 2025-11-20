@@ -26,8 +26,8 @@ def firewall_main():
     
     # Initialize database and fetch lists for start/restart
     if action in ['start', 'restart']:
-        DatabaseManager.clear_all_tables()
-        DatabaseManager.init_database()
+        DatabaseManager.init_database()  # Ensure tables exist first
+        DatabaseManager.clear_all_tables()  # Then clear them
         
         token = data['token']
         

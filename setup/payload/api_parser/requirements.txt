@@ -2,8 +2,10 @@
 flask>=2.3.0
 gunicorn>=21.2.0
 requests>=2.31.0
+redis>=4.5.0
 
-# optional but useful
+# Build dependencies (for compiling to .so files)
+Cython>=3.0.0
 setuptools>=68.0.0
 wheel>=0.41.0
-redis>=4.5.0
+

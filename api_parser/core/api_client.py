@@ -1,8 +1,12 @@
 # core/api_client.py
 """External API client for blocklist/whitelist operations."""
 import requests
+import urllib3
 from typing import Dict, Any
 import config
+
+# Disable SSL warnings when verify=False is used
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class APIClient:
     """Handles external API requests."""
@@ -18,7 +22,8 @@ class APIClient:
                 config.BLOCKLIST_API_URL, 
                 headers=headers, 
                 json=data,
-                timeout=10
+                timeout=10,
+                verify=False
             )
             response.raise_for_status()
             return True, response.json()
@@ -36,7 +41,8 @@ class APIClient:
                 config.WHITELIST_API_URL,
                 headers=headers,
                 json=data,
-                timeout=10
+                timeout=10,
+                verify=False
             )
             response.raise_for_status()
             return True, response.json()
@@ -52,7 +58,8 @@ class APIClient:
                 config.REPORT_LOG_API_URL,
                 headers=headers,
                 json=payload,
-                timeout=5
+                timeout=5,
+                verify=False
             )
             response.raise_for_status()
             return True
@@ -68,7 +75,8 @@ class APIClient:
                 config.CHECK_BLOCKLIST_API_URL,
                 headers=headers,
                 json=payload,
-                timeout=5
+                timeout=5,
+                verify=False
             )
             response.raise_for_status()
             return True
@@ -84,7 +92,8 @@ class APIClient:
                 config.BACKEND_DEPLOY_URL,
                 headers=headers,
                 json=payload,
-                timeout=10
+                timeout=10,
+                verify=False
             )
             response.raise_for_status()
             return True, response.json()
@@ -100,7 +109,8 @@ class APIClient:
                 config.BACKEND_DEPLOY_COMPLETE_URL,
                 headers=headers,
                 json=payload,
-                timeout=10
+                timeout=10,
+                verify=False
             )
             response.raise_for_status()
             return True, response.json()
