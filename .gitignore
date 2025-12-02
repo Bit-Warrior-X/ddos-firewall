@@ -8,3 +8,7 @@ setup/test.sh
 license/license.b64
 license/license.lic
 license/license.b64
+api_parser/build/*
+api_parser/utils/*.so
+api_parser/core/*.so
+api_parser/routes/*.so
