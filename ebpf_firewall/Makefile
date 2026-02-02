@@ -9,9 +9,26 @@
 
 CLANG        ?= clang
 GCC          ?= gcc
-BPF_ARCH     ?= bpf            # clang -target bpf
+BPF_ARCH     ?= bpf            # clang -target bpf
+ARCH         ?= x86
+KERNEL_RELEASE ?= $(shell uname -r)
+KERNEL_HEADERS ?= /lib/modules/$(KERNEL_RELEASE)/build
+VMLINUX      ?= $(KERNEL_HEADERS)
+VMLINUX_SRC  ?= /usr/src/linux-headers-$(KERNEL_RELEASE)
+MULTIARCH    ?= $(shell $(GCC) -print-multiarch 2>/dev/null)
+
+ifeq ("$(wildcard $(VMLINUX)/include)","")
+VMLINUX := /usr/src/linux-headers-$(shell echo $(KERNEL_RELEASE) | sed 's/-.*//')
+endif
 CLANG_FLAGS  := -O2 -g -target $(BPF_ARCH) -Wall -Wextra \
-						       -I$(HOME)/linux-headers-6.8/include
+							   -I/usr/include \
+							   $(if $(MULTIARCH),-I/usr/include/$(MULTIARCH),) \
+							   -D__TARGET_ARCH_$(ARCH)
+
+LIBBPF_INCLUDE ?= $(VMLINUX_SRC)/tools/bpf/resolve_btfids/libbpf/include
+ifneq ("$(wildcard $(LIBBPF_INCLUDE)/bpf/bpf_helpers.h)","")
+CLANG_FLAGS += -I$(LIBBPF_INCLUDE)
+endif
 
 # Build mode (default: production_mode)
 BUILD_MODE   ?= production_mode
@@ -46,17 +63,29 @@ USR_BIN      := $(BUILD_DIR)/ebpf_firewall_userspace
 USR_CLIBIN   := $(BUILD_DIR)/ebpf_firewall_cli
 USR_INC_DIR  := userspace/include
 
+USR_INCLUDES = -I$(USR_INC_DIR) -I. $(MODE_FLAGS)
+ifneq ("$(wildcard $(LIBBPF_INCLUDE)/bpf/libbpf.h)","")
+USR_INCLUDES += -I$(LIBBPF_INCLUDE)
+endif
+
 INSTALL_DIR := /usr/local/share/ebpf_firewall
 
 # Libraries
 USR_LIBS     := -lbpf -lxdp -lnetfilter_conntrack -lpthread -lcrypto -lsqlite3
 USR_PROMLIBS := -lprom -lpromhttp -lmicrohttpd -pthread
 
+PROM_ENABLED := $(if $(wildcard /usr/include/prom.h),$(if $(wildcard /usr/include/promhttp.h),1,0),0)
+ifeq ($(PROM_ENABLED),1)
+PROM_TARGET := $(USR_PROMBIN)
+else
+PROM_TARGET :=
+endif
+
 
 # ──────────────── Targets ────────────────
 .PHONY: all unload run clean install test_mode production_mode
 
-all: $(BUILD_DIR) unload $(KERNEL_OBJ) $(USR_BIN) $(USR_CLIBIN) $(USR_PROMBIN)
+all: $(BUILD_DIR) unload $(KERNEL_OBJ) $(USR_BIN) $(USR_CLIBIN) $(PROM_TARGET)
 
 production_mode:
 	$(MAKE) BUILD_MODE=production_mode all
@@ -78,7 +107,7 @@ $(KERNEL_OBJ): $(KERNEL_SRC) | $(BUILD_DIR)
 # 3. Compile userspace binary
 $(USR_BIN): $(USR_SRCS) | $(BUILD_DIR)
 	@echo ">> Linking userspace firewall"
-	$(GCC) -o $@ $^ -I$(USR_INC_DIR) $(USR_LIBS) -I. $(MODE_FLAGS)
+	$(GCC) -o $@ $^ $(USR_INCLUDES) $(USR_LIBS)
 
 $(USR_CLIBIN): $(USR_CLI) | $(BUILD_DIR)
 	@echo ">> Linking userspace cli firewall"

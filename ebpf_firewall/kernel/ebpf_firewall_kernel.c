@@ -252,19 +252,25 @@ int xdp_main(struct xdp_md *ctx) {
         if ((void*)(tcph + 1) > data_end)
             return XDP_PASS;
 
+        // Snapshot TCP flags before any tail calls.
+        __u8 tcp_syn = tcph->syn;
+        __u8 tcp_ack = tcph->ack;
+        __u8 tcp_fin = tcph->fin;
+        __u8 tcp_rst = tcph->rst;
+
         // Check TCP flags:
         // If SYN flag is set and ACK flag is not set, then it's a SYN packet.
-        if (tcph->syn && !tcph->ack) {
+        if (tcp_syn && !tcp_ack) {
             // Tail call to xdp_parse_syn (map key 0).
             bpf_tail_call(ctx, &prog_array, 0);
         }
         // If ACK is set, excluding SYN, FIN, RST.
-        if (tcph->ack && !tcph->syn && !tcph->fin && !tcph->rst) {
+        if (tcp_ack && !tcp_syn && !tcp_fin && !tcp_rst) {
             // Tail call to xdp_parse_ack (map key 1).
             bpf_tail_call(ctx, &prog_array, 1);
         }
         // If RST is set.
-        if (tcph->rst && !tcph->ack) {
+        if (tcp_rst && !tcp_ack) {
             // Tail call to xdp_parse_ack (map key 2).
             bpf_tail_call(ctx, &prog_array, 2);
         }
