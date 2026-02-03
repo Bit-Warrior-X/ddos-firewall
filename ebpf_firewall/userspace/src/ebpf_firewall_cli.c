@@ -9,9 +9,9 @@
 #include <stdbool.h>
 
 
-#define FIREWALL_START "systemctl start ebpf_firewall"
-#define FIREWALL_STOP  "systemctl stop ebpf_firewall"
-#define FIREWALL_RESTART  "systemctl restart ebpf_firewall"
+#define FIREWALL_START "systemctl start ebpf-firewall"
+#define FIREWALL_STOP  "systemctl stop ebpf-firewall"
+#define FIREWALL_RESTART  "systemctl restart ebpf-firewall"
 
 #define MAX_LINE_LENGTH 256
 #define MAX_COMMENT_LENGTH 256

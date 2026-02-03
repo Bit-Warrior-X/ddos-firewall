@@ -31,6 +31,11 @@ def execute_cli_command(command_args: list) -> Dict[str, str]:
             timeout=30
         )
         output = result.stdout.strip()
+        if not output:
+            if result.returncode == 0:
+                return {'status': 'success', 'message': ''}
+            error_msg = result.stderr.strip() or 'Command failed with no output'
+            return {'status': 'error', 'message': error_msg}
         return parse_cli_output(output)
     except subprocess.TimeoutExpired:
         return {'status': 'error', 'message': 'Command timed out'}
