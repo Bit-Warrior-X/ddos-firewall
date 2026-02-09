@@ -81,7 +81,7 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_IP_BLOCK_END\n"
+                                "attack_type:EVENT_IP_BLOCK_END\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
 
@@ -97,14 +97,14 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_SYN_ATTACK_BURST_BLOCK\n"
+                                "attack_type:EVENT_TCP_SYN_ATTACK_BURST_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_TCP_SYN_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_SYN_ATTACK_FIXED_BLOCK\n"
+                                "attack_type:EVENT_TCP_SYN_ATTACK_FIXED_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
 
@@ -123,14 +123,14 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_ACK_ATTACK_BURST_BLOCK\n"
+                                "attack_type:EVENT_TCP_ACK_ATTACK_BURST_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_TCP_ACK_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_ACK_ATTACK_FIXED_BLOCK\n"
+                                "attack_type:EVENT_TCP_ACK_ATTACK_FIXED_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     
@@ -148,14 +148,14 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_RST_ATTACK_BURST_BLOCK\n"
+                                "attack_type:EVENT_TCP_RST_ATTACK_BURST_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_TCP_RST_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_RST_ATTACK_FIXED_BLOCK\n"
+                                "attack_type:EVENT_TCP_RST_ATTACK_FIXED_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
 
@@ -173,14 +173,14 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_ICMP_ATTACK_BURST_BLOCK\n"
+                                "attack_type:EVENT_ICMP_ATTACK_BURST_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_ICMP_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_ICMP_ATTACK_FIXED_BLOCK\n"
+                                "attack_type:EVENT_ICMP_ATTACK_FIXED_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }   
 
@@ -197,14 +197,14 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_UDP_ATTACK_BURST_BLOCK\n"
+                                "attack_type:EVENT_UDP_ATTACK_BURST_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_UDP_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_UDP_ATTACK_FIXED_BLOCK\n"
+                                "attack_type:EVENT_UDP_ATTACK_FIXED_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
 
@@ -221,14 +221,14 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_GRE_ATTACK_BURST_BLOCK\n"
+                                "attack_type:EVENT_GRE_ATTACK_BURST_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_GRE_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_GRE_ATTACK_FIXED_BLOCK\n"
+                                "attack_type:EVENT_GRE_ATTACK_FIXED_BLOCK\n",
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     
@@ -236,7 +236,7 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_IP_FRAG_MIDDLE_BLOCK\n"
+                                "attack_type:EVENT_IP_FRAG_MIDDLE_BLOCK\n", 
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
 

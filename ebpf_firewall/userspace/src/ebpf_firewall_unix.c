@@ -220,17 +220,17 @@ static void handle_clear_allow_ip(int cfd, char **argv, int argc) {
     if (argc != 2) { reply(cfd, "ERR usage: CLEAR_ALLOW_IP <ip>\n"); return; }
     int ret = clear_allow_ip(argv[1]);
     if (ret == 0)
-        reply(cfd, "OK %s removed from whitelist\n", argv[1]);
+        reply(cfd, "ok\n%s removed from whitelist\n", argv[1]);
     else if (ret == -ENOENT)
-        reply(cfd, "OK! But ip %s was not in whitelist\n", argv[1]);
+        reply(cfd, "ok\nBut ip %s was not in whitelist\n", argv[1]);
     else
-        reply(cfd, "Failed! Clear ALLOW_IP %s failed\n", argv[1]);
+        reply(cfd, "failed\nError occured while removing %s from whitelist\n", argv[1]);
 }
 
 static void handle_clear_allow_ip_all(int cfd, char **argv, int argc) {
     int ret = clear_allow_ip_all();
-    if (ret == 0) reply(cfd, "OK! Cleared whitelist\n");
-    else reply(cfd, "Failed! Clear whitelist failed\n");
+    if (ret == 0) reply(cfd, "ok\nsuccess\n");
+    else reply(cfd, "failed\nError occured while clearing whitelist\n");
 }
 
 static void handle_add_allow_ip(int cfd, char **argv, int argc) {

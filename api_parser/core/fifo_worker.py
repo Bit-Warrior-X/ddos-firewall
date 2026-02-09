@@ -6,6 +6,7 @@ import time
 from typing import Dict, List
 from core.api_client import APIClient
 import config
+from utils.auth import get_token
 
 def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     """Parses raw FIFO data into command dictionaries."""
@@ -34,9 +35,12 @@ def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     
     return commands
 
-@token_required
 def process_command(cmd: Dict[str, str]) -> None:
     """Processes a single command dictionary."""
+    token = get_token()
+    if not token:
+        print(f"[API_PARSER] No API token configured; skipping command: {cmd}")
+        return
     try:
         if cmd['command'] == 'report_license':
             payload = {
