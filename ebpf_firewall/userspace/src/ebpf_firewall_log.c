@@ -4,6 +4,8 @@
 
 extern FILE* log_file;
 
+extern struct global_firewall_config global_fw_config;
+
 void func_print(int id, const char* fmt, ...)
 {
     va_list args;
@@ -69,142 +71,264 @@ void func_print(int id, const char* fmt, ...)
     va_end(args_copy); // Clean up the copy
 }
 
-//Use this function carefully!!!!
 
-void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
-
+void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_t build_message_size) {
     char src[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &srcip, src, sizeof(src));
     char temp[1024];
 
     if (reason == EVENT_IP_BLOCK_END) {
-        LOG_C("EVENT_IP_BLOCK_END %s\n", src);
-        snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is expired in blocklist\n", src);
-        send_message_to_api_parser(temp);
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_IP_BLOCK_END\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+
+    else if (reason == EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START\n"); 
+    }
+    else if (reason == EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END\n"); 
+    }
+    else if (reason == EVENT_TCP_SYN_ATTACK_BURST_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_SYN_ATTACK_BURST_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    else if (reason == EVENT_TCP_SYN_ATTACK_FIXED_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_SYN_ATTACK_FIXED_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+
+
+
+
+    else if (reason == EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START\n"); 
+    }
+    else if (reason == EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END\n"); 
+    }
+    else if (reason == EVENT_TCP_ACK_ATTACK_BURST_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_ACK_ATTACK_BURST_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    else if (reason == EVENT_TCP_ACK_ATTACK_FIXED_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_ACK_ATTACK_FIXED_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    
+
+
+    else if (reason == EVENT_TCP_RST_ATTACK_PROTECION_MODE_START) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_TCP_RST_ATTACK_PROTECION_MODE_START\n"); 
+    }
+    else if (reason == EVENT_TCP_RST_ATTACK_PROTECION_MODE_END) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_TCP_RST_ATTACK_PROTECION_MODE_END\n"); 
+    }
+    else if (reason == EVENT_TCP_RST_ATTACK_BURST_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_RST_ATTACK_BURST_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    else if (reason == EVENT_TCP_RST_ATTACK_FIXED_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_RST_ATTACK_FIXED_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+
+
+
+    else if (reason == EVENT_ICMP_ATTACK_PROTECION_MODE_START) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_ICMP_ATTACK_PROTECION_MODE_START\n"); 
+    }
+    else if (reason == EVENT_ICMP_ATTACK_PROTECION_MODE_END) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_ICMP_ATTACK_PROTECION_MODE_END\n"); 
+    }
+    else if (reason == EVENT_ICMP_ATTACK_BURST_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_ICMP_ATTACK_BURST_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    else if (reason == EVENT_ICMP_ATTACK_FIXED_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_ICMP_ATTACK_FIXED_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }   
+
+
+    else if (reason == EVENT_UDP_ATTACK_PROTECION_MODE_START) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_UDP_ATTACK_PROTECION_MODE_START\n"); 
+    }
+    else if (reason == EVENT_UDP_ATTACK_PROTECION_MODE_END) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_UDP_ATTACK_PROTECION_MODE_END\n"); 
+    }
+    else if (reason == EVENT_UDP_ATTACK_BURST_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_UDP_ATTACK_BURST_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    else if (reason == EVENT_UDP_ATTACK_FIXED_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_UDP_ATTACK_FIXED_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+
+
+    else if (reason == EVENT_GRE_ATTACK_PROTECION_MODE_START) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_GRE_ATTACK_PROTECION_MODE_START\n"); 
+    }
+    else if (reason == EVENT_GRE_ATTACK_PROTECION_MODE_END) {
+        snprintf(temp, 1024,    "command:report_protection\n"
+                                "data:EVENT_GRE_ATTACK_PROTECION_MODE_END\n"); 
+    }
+    else if (reason == EVENT_GRE_ATTACK_BURST_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_GRE_ATTACK_BURST_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    else if (reason == EVENT_GRE_ATTACK_FIXED_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_GRE_ATTACK_FIXED_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+    
+    else if (reason == EVENT_IP_FRAG_MIDDLE_BLOCK) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_IP_FRAG_MIDDLE_BLOCK\n"
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+    }
+
+    strncpy(build_message, temp, build_message_size - 1);
+    build_message[build_message_size - 1] = '\0';
+    return;
+}
+//Use this function carefully!!!!
+
+void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
+    char src[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &srcip, src, sizeof(src));
+
+    char build_message[1024];
+    build_block_ip_message(reason, srcip, build_message, sizeof(build_message));
+    send_message_to_api_parser(build_message);
+
+    if (reason == EVENT_IP_BLOCK_END) {
+        LOG_I("EVENT_IP_BLOCK_END %s\n", src);
     } else if (reason == EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START) {
         LOG_C("EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START\n");
-        const char * message = "command:report_log\ntype:critical\ndata:TCP syn flooding attack is detected and proxy is in syn protection mode\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END) {
-        LOG_C("EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END\n");
-        const char * message = "command:report_log\ntype:info\ndata:TCP syn flooding protection mode is finished!\n";
-        send_message_to_api_parser(message);
+        LOG_I("EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END\n");
     } else if (reason == EVENT_TCP_SYN_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_TCP_SYN_ATTACK_BURST_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in syn busrst method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp syn attack burst mode");
     } else if (reason == EVENT_TCP_SYN_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_SYN_ATTACK_FIXED_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in syn fixed threshold method\n", src);
-        //send_message_to_api_parser(temp);
-        append_block_ip_to_sqlite(src, 0, "Attacking in tcp syn attack fixed threshold mode");
+        append_block_ip_to_sqlite(src, 0, "Attacking in tcp syn attack burst mode");
     }
-    
     else if (reason == EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START) {
         LOG_C("EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START\n");
-        const char * message = "command:report_log\ntype:critical\ndata:TCP ack flooding attack is detected and proxy is in ack protection mode\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END) {
         LOG_C("EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END\n");
-        const char * message = "command:report_log\ntype:info\ndata:TCP ack flooding protection mode is finished!\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_ACK_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_TCP_ACK_ATTACK_BURST_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in ack busrst method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp ack attack burst mode");
     } else if (reason == EVENT_TCP_ACK_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_ACK_ATTACK_FIXED_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in ack fixed threshold method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp ack attack fixed threshold mode");
     }
 
     else if (reason == EVENT_TCP_RST_ATTACK_PROTECION_MODE_START) {
         LOG_C("EVENT_TCP_RST_ATTACK_PROTECION_MODE_START\n");
-        const char * message = "command:report_log\ntype:critical\ndata:TCP rst flooding attack is detected and proxy is in rst protection mode\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_RST_ATTACK_PROTECION_MODE_END) {
         LOG_C("EVENT_TCP_RST_ATTACK_PROTECION_MODE_END\n");
-        const char * message = "command:report_log\ntype:info\ndata:TCP rst flooding protection mode is finished!\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_TCP_RST_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_TCP_RST_ATTACK_BURST_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in rst busrst method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp rst attack burst mode");
     } else if (reason == EVENT_TCP_RST_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_RST_ATTACK_FIXED_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in rst fixed threshold method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp rst attack fixed threshold mode");
     }
 
     else if (reason == EVENT_ICMP_ATTACK_PROTECION_MODE_START) {
         LOG_C("EVENT_ICMP_ATTACK_PROTECION_MODE_START\n");
-        const char * message = "command:report_log\ntype:critical\ndata:ICMP flooding attack is detected and proxy is in icmp protection mode\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_ICMP_ATTACK_PROTECION_MODE_END) {
         LOG_C("EVENT_ICMP_ATTACK_PROTECION_MODE_END\n");
-        const char * message = "command:report_log\ntype:info\ndata:ICMP flooding protection mode is finished!\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_ICMP_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_ICMP_ATTACK_BURST_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in icmp busrst method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in icmp attack burst mode");
     } else if (reason == EVENT_ICMP_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_ICMP_ATTACK_FIXED_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in icmp fixed threshold method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in icmp attack fixed threshold mode");
     }
 
     else if (reason == EVENT_UDP_ATTACK_PROTECION_MODE_START) {
         LOG_C("EVENT_UDP_ATTACK_PROTECION_MODE_START\n");
-        const char * message = "command:report_log\ntype:critical\ndata:UDP flooding attack is detected and proxy is in udp protection mode\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_UDP_ATTACK_PROTECION_MODE_END) {
         LOG_C("EVENT_UDP_ATTACK_PROTECION_MODE_END\n");
-        const char * message = "command:report_log\ntype:info\ndata:UDP flooding protection mode is finished!\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_UDP_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_UDP_ATTACK_BURST_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in udp busrst method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in udp attack burst mode");
     } else if (reason == EVENT_UDP_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_UDP_ATTACK_FIXED_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in udp fixed threshold method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in udp attack fixed threshold mode");
     }
 
     else if (reason == EVENT_GRE_ATTACK_PROTECION_MODE_START) {
         LOG_C("EVENT_GRE_ATTACK_PROTECION_MODE_START\n");
-        const char * message = "command:report_log\ntype:critical\ndata:GRE flooding attack is detected and proxy is in gre protection mode\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_GRE_ATTACK_PROTECION_MODE_END) {
         LOG_C("EVENT_GRE_ATTACK_PROTECION_MODE_END\n");
-        const char * message = "command:report_log\ntype:info\ndata:GRE flooding protection mode is finished!\n";
-        send_message_to_api_parser(message);
     } else if (reason == EVENT_GRE_ATTACK_BURST_BLOCK) {
         LOG_C("EVENT_GRE_ATTACK_BURST_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in gre busrst method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in gre attack burst mode");
     } else if (reason == EVENT_GRE_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_GRE_ATTACK_FIXED_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:info\ndata:%s is attacking in gre fixed threshold method\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in gre attack fixed threshold mode");
     }
     
     else if (reason == EVENT_IP_FRAG_MIDDLE_BLOCK) {
         LOG_C("EVENT_IP_FRAG_MIDDLE_BLOCK %s\n", src);
-        //snprintf(temp, 1024, "command:report_log\ntype:critical\ndata:TCP segmentation attack is detected for %s\n", src);
-        //send_message_to_api_parser(temp);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp segmentation");
     }
 }

@@ -12,3 +12,4 @@ api_parser/build/*
 api_parser/utils/*.so
 api_parser/core/*.so
 api_parser/routes/*.so
+api_parser/core/__pycache__/

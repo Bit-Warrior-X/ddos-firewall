@@ -21,10 +21,11 @@ SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
 
 # API URLs
-API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
+#API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
+API_BASE_URL = "https://192.168.147.3:8080/api/"
+REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
 BLOCKLIST_API_URL = f"{API_BASE_URL}/blacklist"
 WHITELIST_API_URL = f"{API_BASE_URL}/whitelist"
-REPORT_LOG_API_URL = f"{API_BASE_URL}/report"
 CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
 BACKEND_DEPLOY_URL = f"{API_BASE_URL}/deploy_done"
 BACKEND_DEPLOY_COMPLETE_URL = f"{API_BASE_URL}/deploy_complete"

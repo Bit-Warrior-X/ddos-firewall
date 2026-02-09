@@ -50,12 +50,13 @@ class APIClient:
             return False, str(e)
     
     @staticmethod
-    def send_report_log(payload: Dict[str, Any]) -> bool:
+    def send_report_xdp(payload: Dict[str, Any]) -> bool:
         """Send report log to API."""
         headers = {'Content-Type': 'application/json'}
+        
         try:
             response = requests.post(
-                config.REPORT_LOG_API_URL,
+                config.REPORT_XDP_API_URL,
                 headers=headers,
                 json=payload,
                 timeout=5,
@@ -65,24 +66,7 @@ class APIClient:
             return True
         except requests.exceptions.RequestException:
             return False
-    
-    @staticmethod
-    def check_blocklist(payload: Dict[str, Any]) -> bool:
-        """Check blocklist status."""
-        headers = {'Content-Type': 'application/json'}
-        try:
-            response = requests.post(
-                config.CHECK_BLOCKLIST_API_URL,
-                headers=headers,
-                json=payload,
-                timeout=5,
-                verify=False
-            )
-            response.raise_for_status()
-            return True
-        except requests.exceptions.RequestException:
-            return False
-    
+        
     @staticmethod
     def deploy_done(payload: Dict[str, Any]) -> tuple:
         """Call deploy_done endpoint."""

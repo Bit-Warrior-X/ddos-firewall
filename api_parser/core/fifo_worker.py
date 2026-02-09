@@ -34,20 +34,40 @@ def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     
     return commands
 
+@token_required
 def process_command(cmd: Dict[str, str]) -> None:
     """Processes a single command dictionary."""
     try:
-        if cmd['command'] == 'report_log':
+        if cmd['command'] == 'report_license':
             payload = {
-                'type': str(cmd.get('type', 'unknown')),
-                'data': str(cmd.get('data', ''))
+                'command': 'report_license',
+                'data': str(cmd.get('data', 'unknown')),
+                'token': token
             }
-            APIClient.send_report_log(payload)
-        elif cmd['command'] == 'check_blocklist':
+            APIClient.send_report_xdp(payload)
+        elif cmd['command'] == 'report_protection':
             payload = {
-                'status': str(cmd.get('status', 'unknown'))
+                'command': 'report_protection',
+                'data': str(cmd.get('data', 'unknown')),
+                'token': token
             }
-            APIClient.check_blocklist(payload)
+            APIClient.send_report_xdp(payload)
+        elif cmd['command'] == 'report_attack':
+            payload = {
+                'command': 'report_attack',
+                'data': str(cmd.get('data', 'unknown')),
+                'token': token
+            }
+            APIClient.send_report_xdp(payload)
+        elif cmd['command'] == 'report_block_ip':
+            payload = {
+                'command': 'report_block_ip',
+                'ip': str(cmd.get('ip', 'unknown')),
+                'ttl': str(cmd.get('ttl', 'unknown')),
+                'attack_type': str(cmd.get('attack_type', 'unknown')),
+                'token': token
+            }
+            APIClient.send_report_xdp(payload)
         else:
             print(f"[API_PARSER] Unknown command: {cmd['command']}")
     except Exception as e:

@@ -803,10 +803,10 @@ static void * license_check_worker(void * arg)
         int ret = get_license_status();
         if (ret < 0) {
             if (ret == -2) {
-                const char * message = "command:report_log\ntype:critical\ndata:License is expired!\n";
+                const char * message = "command:report_license\ndata:expired\n";
                 send_message_to_api_parser(message);
             } else {
-                const char * message = "command:report_log\ntype:critical\ndata:Invalid license, user manipulate the license\n";
+                const char * message = "command:report_license\ndata:manipulated\n";
                 send_message_to_api_parser(message);
             }
             
@@ -835,7 +835,8 @@ static void * send_check_blocklist_worker(void * arg)
             g_attack_stats->icmp_attack ||
             g_attack_stats->udp_attack ||
             g_attack_stats->gre_attack) && signal_sent == 0) {
-                const char * message = "command:check_blocklist\nstatus:start\n";
+                //const char * message = "command:check_blocklist\nstatus:start\n";
+                const char * message = "command:report_attack\ndata:attack_start\n";
                 send_message_to_api_parser(message);
                 signal_sent = 1;
                 LOG_D("Send backend to start checking blocklist %d %d %d %d %d %d\n", g_attack_stats->syn_attack, 
@@ -852,7 +853,8 @@ static void * send_check_blocklist_worker(void * arg)
             g_attack_stats->icmp_attack == 0  &&
             g_attack_stats->udp_attack == 0 &&
             g_attack_stats->gre_attack == 0) && signal_sent == 1) {
-                const char * message = "command:check_blocklist\nstatus:stop\n";
+                //const char * message = "command:check_blocklist\nstatus:stop\n";
+                const char * message = "command:report_attack\ndata:attack_stop\n";
                 send_message_to_api_parser(message);
                 signal_sent = 0;
                 LOG_D("Send backend to stop checking blocklist %d %d %d %d %d %d\n", g_attack_stats->syn_attack, 
