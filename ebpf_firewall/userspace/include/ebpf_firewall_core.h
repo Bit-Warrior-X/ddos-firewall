@@ -75,5 +75,7 @@ int tcp_conn_limit_set(int valid,
             int count);            
 
 int send_message_to_api_parser(const char *message);
-int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason); 
+int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason);
+int append_allow_ip_to_sqlite(const char *ip_str, const char *reason);
+
 #endif

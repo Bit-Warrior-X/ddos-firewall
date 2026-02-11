@@ -197,10 +197,12 @@ static void handle_add_block_ip(int cfd, char **argv, int argc) {
     int ret = -1;
     ret = add_block_ip(argv[1], secs);
 
-    if (ret == 0 || ret == 1)
+    if (ret == 0 || ret == 1) {
+        append_block_ip_to_sqlite(ip, secs, "Manual blacklist");
         reply(cfd, "ok\nsuccess\n");
-    else
+    } else {
         reply(cfd, "failed\nError occured while adding %s to blacklist\n", ip);
+    }
 }
 
 
@@ -236,11 +238,13 @@ static void handle_clear_allow_ip_all(int cfd, char **argv, int argc) {
 static void handle_add_allow_ip(int cfd, char **argv, int argc) {
     if (argc != 2) { reply(cfd, "ERR usage: ADD_ALLOW_IP <ip>\n"); return; }
     int ret = add_allow_ip(argv[1]);
-    
-    if (ret == 0)
+
+    if (ret == 0) {
+        append_allow_ip_to_sqlite(argv[1], "Manual whitelist");
         reply(cfd, "ok\n%s is added in allow list\n", argv[1]);
-    else
+    } else {
         reply(cfd, "failed\nError occured while adding %s to allow list\n", argv[1]);
+    }
 }
 
 

@@ -12,6 +12,6 @@ app.logger.setLevel(logging.INFO)
         
 if __name__ == '__main__':
     initialize_app()
-    app.run(host=config.SERVER_IP, port=config.SERVER_PORT, debug=False, use_reloader=False)
+    app.run(host=config.SERVER_IP, port=config.SERVER_PORT, debug=True, use_reloader=True)
     print("\n[API_PARSER] Shutting down...")
     cleanup_on_exit()

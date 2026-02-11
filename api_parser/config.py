@@ -20,13 +20,20 @@ TOKEN_FILE = str(BASE_DIR / "token")
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
 
-# API URLs
+# API URLs (base with no trailing slash to avoid double slashes)
 #API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
-API_BASE_URL = "https://192.168.147.3:8080/api/"
+API_BASE_URL = "http://192.168.147.3:8080/api".rstrip("/")
+
+# L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
-BLOCKLIST_API_URL = f"{API_BASE_URL}/blacklist"
-WHITELIST_API_URL = f"{API_BASE_URL}/whitelist"
+
+# Block/white list sync APIs used by both startup and firewall_main route.
+# Backend endpoints: /api/get_blocklist_ips and /api/get_whitelist_ips
+BLOCKLIST_API_URL = f"{API_BASE_URL}/get_blocklist_ips"
+WHITELIST_API_URL = f"{API_BASE_URL}/get_whitelist_ips"
 CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
+
+# Deployment / licensing APIs
 BACKEND_DEPLOY_URL = f"{API_BASE_URL}/deploy_done"
 BACKEND_DEPLOY_COMPLETE_URL = f"{API_BASE_URL}/deploy_complete"
 

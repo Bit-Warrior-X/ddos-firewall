@@ -6,7 +6,7 @@ from routes.l4_routes import l4_bp
 from routes.l7_routes import l7_bp
 from routes.common_routes import common_bp
 from core.fifo_worker import start_fifo_listener
-from core.initializer import handle_initialize_file
+from core.initializer import handle_initialize_file, sync_l4_lists_and_start_firewall
 import config
 
 def create_app() -> Flask:
@@ -23,9 +23,11 @@ def create_app() -> Flask:
 def initialize_app():
     """Initialize the application (handle init file, start FIFO listener)."""
     handle_initialize_file()
-    should_start = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
-    if should_start:
-        start_fifo_listener()
+    #should_start = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+    #if should_start:
+    start_fifo_listener()
+        # On real worker start, sync L4 lists from backend and start firewall
+    sync_l4_lists_and_start_firewall()
 
 def cleanup_on_exit():
     """Cleanup resources on application exit."""

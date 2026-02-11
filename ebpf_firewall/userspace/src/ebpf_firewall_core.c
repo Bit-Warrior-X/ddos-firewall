@@ -37,6 +37,9 @@ int exiting = 0;
 char **process_argv = NULL;
 struct bpf_object *obj;
 
+/* Forward declaration for startup IP sync helper */
+static void load_initial_ip_lists_from_sqlite(void);
+
 static void sig_handler(int signo)
 {
     exiting = 1;
@@ -1086,6 +1089,12 @@ int main(int argc, char **argv) {
         LOG_E( "Failed to init conntrack\n");
         goto cleanup;
     }
+
+    /* At startup, preload blacklist/whitelist entries from SQLite DB so that
+     * the eBPF maps reflect the latest block/allow lists before we begin
+     * processing traffic.
+     */
+    load_initial_ip_lists_from_sqlite();
 
     pthread_t global_attack_ch_thr, blocked_ips_duration_thr;
     if (pthread_create(&global_attack_ch_thr, NULL, global_attack_check_worker, obj) != 0) {
@@ -2387,6 +2396,88 @@ int send_message_to_api_parser(const char *message) {
     return 0;
 }
 
+/* Load initial blacklist/whitelist entries from SQLite into eBPF maps.
+ *
+ * This is intended to be called once during startup, after:
+ *   - the BPF object has been loaded, and
+ *   - the global configuration has been loaded into global_fw_config.
+ *
+ * It reads from:
+ *   - blocked_ips(ip, ...)  -> adds each IP as a permanent block
+ *   - white_ips(ip, ...)    -> adds each IP to the allowed list
+ */
+static void load_initial_ip_lists_from_sqlite(void)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
+        LOG_E("Failed to open SQLite database '%s': %s\n",
+              SQLITE_DB_NAME, sqlite3_errmsg(db));
+        if (db) {
+            sqlite3_close(db);
+        }
+        return;
+    }
+
+    /* Load blacklist (blocked_ips) -------------------------------------- */
+    const char *block_sql = "SELECT ip FROM blocked_ips";
+    int rc = sqlite3_prepare_v2(db, block_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        LOG_E("Failed to prepare blocked_ips query: %s\n", sqlite3_errmsg(db));
+    } else {
+        int count = 0;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const unsigned char *ip_txt = sqlite3_column_text(stmt, 0);
+            if (!ip_txt || !*ip_txt) {
+                continue;
+            }
+
+            /* Apply as permanent block (-1 duration) */
+            if (add_block_ip((char *)ip_txt, -1) >= 0) {
+                count++;
+            }
+        }
+        if (rc != SQLITE_DONE) {
+            LOG_E("Error iterating blocked_ips rows: %s\n", sqlite3_errmsg(db));
+        }
+        LOG_I("Loaded %d blacklist IPs from SQLite\n", count);
+    }
+    if (stmt) {
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+    }
+
+    /* Load whitelist (white_ips) ---------------------------------------- */
+    const char *white_sql = "SELECT ip FROM white_ips";
+    rc = sqlite3_prepare_v2(db, white_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        LOG_E("Failed to prepare white_ips query: %s\n", sqlite3_errmsg(db));
+    } else {
+        int count = 0;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const unsigned char *ip_txt = sqlite3_column_text(stmt, 0);
+            if (!ip_txt || !*ip_txt) {
+                continue;
+            }
+
+            if (add_allow_ip((char *)ip_txt) >= 0) {
+                count++;
+            }
+        }
+        if (rc != SQLITE_DONE) {
+            LOG_E("Error iterating white_ips rows: %s\n", sqlite3_errmsg(db));
+        }
+        LOG_I("Loaded %d whitelist IPs from SQLite\n", count);
+    }
+    if (stmt) {
+        sqlite3_finalize(stmt);
+        stmt = NULL;
+    }
+
+    sqlite3_close(db);
+}
+
 int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
@@ -2431,6 +2522,48 @@ int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char
     /* Execute */
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         LOG_E("Failed to insert data: %s\n", sqlite3_errmsg(db));
+        sqlite3_finalize(stmt);
+        sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return 0;
+}
+
+int append_allow_ip_to_sqlite(const char *ip_str, const char *reason) {
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+
+    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
+        LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
+        if (db) sqlite3_close(db);
+        return -1;
+    }
+
+    char created[32];
+    time_t now = time(NULL);
+    struct tm gmt;
+    gmtime_r(&now, &gmt);
+    strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
+
+    const char *sql =
+        "INSERT INTO white_ips (ip, reason, created) "
+        "VALUES (?, ?, ?);";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        LOG_E("Failed to prepare whitelist insert: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return -1;
+    }
+
+    sqlite3_bind_text(stmt, 1, ip_str, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, reason ? reason : "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, created, -1, SQLITE_STATIC);
+
+    if (sqlite3_step(stmt) != SQLITE_DONE) {
+        LOG_E("Failed to insert whitelist data: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
         sqlite3_close(db);
         return -1;

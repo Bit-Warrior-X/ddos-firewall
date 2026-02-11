@@ -76,7 +76,13 @@ class DatabaseManager:
     
     @staticmethod
     def store_blocklist(blocklist_data: List[Dict]) -> tuple:
-        """Store blocklist entries in database."""
+        """
+        Store blocklist entries in database.
+
+        Supports both legacy and new payload formats, e.g.:
+          - {"IP": "...", "TYPE": "...", "Duration": 300, "Reason": "...", "Created": "..."}
+          - {"ip": "...", "reason": "...", "created_at": "..."}
+        """
         conn = None
         try:
             conn = sqlite3.connect(config.FIREWALL_DB_NAME)
@@ -85,15 +91,39 @@ class DatabaseManager:
             cursor.execute('DELETE FROM blocked_ips')
             
             for entry in blocklist_data:
+                # Support multiple key styles from backend
+                ip = entry.get('IP') or entry.get('ip')
+                type_ = (
+                    entry.get('TYPE')
+                    or entry.get('type')
+                    or 'L4'
+                )
+                duration = (
+                    entry.get('Duration')
+                    or entry.get('duration')
+                    or -1
+                )
+                reason = entry.get('Reason') or entry.get('reason') or ''
+                created = (
+                    entry.get('Created')
+                    or entry.get('created')
+                    or entry.get('created_at')
+                    or ''
+                )
+
+                if not ip:
+                    # Skip invalid entries without IP
+                    continue
+
                 cursor.execute('''
                 INSERT OR IGNORE INTO blocked_ips (ip, type, duration, reason, created)
                 VALUES (?, ?, ?, ?, ?)
                 ''', (
-                    entry.get('IP'),
-                    entry.get('TYPE'),
-                    entry.get('Duration', -1),
-                    entry.get('Reason', ''),
-                    entry.get('Created', '')
+                    ip,
+                    type_,
+                    duration,
+                    reason,
+                    created
                 ))
             
             conn.commit()
@@ -106,7 +136,13 @@ class DatabaseManager:
     
     @staticmethod
     def store_whitelist(whitelist_data: List[Dict]) -> tuple:
-        """Store whitelist entries in database."""
+        """
+        Store whitelist entries in database.
+
+        Supports both legacy and new payload formats, e.g.:
+          - {"IP": "...", "Reason": "...", "Created": "..."}
+          - {"ip": "...", "reason": "...", "created_at": "..."}
+        """
         conn = None
         try:
             conn = sqlite3.connect(config.FIREWALL_DB_NAME)
@@ -115,13 +151,26 @@ class DatabaseManager:
             cursor.execute('DELETE FROM white_ips')
             
             for entry in whitelist_data:
+                ip = entry.get('IP') or entry.get('ip')
+                reason = entry.get('Reason') or entry.get('reason') or ''
+                created = (
+                    entry.get('Created')
+                    or entry.get('created')
+                    or entry.get('created_at')
+                    or ''
+                )
+
+                if not ip:
+                    # Skip invalid entries without IP
+                    continue
+
                 cursor.execute('''
                 INSERT INTO white_ips (ip, reason, created)
                 VALUES (?, ?, ?)
                 ''', (
-                    entry.get('IP', ''),
-                    entry.get('Reason', ''),
-                    entry.get('Created', '')
+                    ip,
+                    reason,
+                    created
                 ))
             
             conn.commit()
