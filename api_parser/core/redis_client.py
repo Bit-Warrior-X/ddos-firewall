@@ -209,3 +209,37 @@ class RedisClient:
         except Exception:
             return {}
 
+    ANTIHEADER_KEY = "antiheader"
+
+    @staticmethod
+    def store_antiheader(anti_payload: Dict) -> tuple:
+        """Store L7 anti-header rules in Redis under key 'antiheader'.
+
+        anti_payload must have: id (int), rules (list of {action, priority, rule}).
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                anti_payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(RedisClient.ANTIHEADER_KEY, value)
+            rcli.publish("acl:updates", RedisClient.ANTIHEADER_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_antiheader() -> Dict:
+        """Retrieve L7 anti-header rules from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.ANTIHEADER_KEY)
+            if not val:
+                return {}
+            return json.loads(val)
+        except Exception:
+            return {}
+

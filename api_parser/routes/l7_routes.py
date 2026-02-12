@@ -435,6 +435,29 @@ def _build_geo_rule_string(url: str, country: str) -> str:
     return " \nAND \n".join(parts) if parts else ""
 
 
+def _block_mode_to_header_op(block_mode: str) -> str:
+    """Map block_mode to header comparison operator for ACL."""
+    bm = (block_mode or "").strip().lower()
+    if bm == "if not match":
+        return "is not in"
+    # default and 'If match'
+    return "is in"
+
+
+def _build_antiheader_rule_string(url: str, header: str, value: str, block_mode: str) -> str:
+    """Build ACL rule string for anti-header rules (URI path + header value)."""
+    url = (url or "").strip()
+    header = (header or "").strip()
+    value = (value or "").strip()
+    op = _block_mode_to_header_op(block_mode)
+    parts = []
+    if url:
+        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+    if header and value:
+        parts.append(f'["Header","{header}","{op}","{value}"]')
+    return " \nAND \n".join(parts) if parts else ""
+
+
 @l7_bp.route('/l7_update_whitelist', methods=['POST'])
 def l7_update_whitelist():
     """Receive whitelist from backend and store in Redis under key 'whitelist'.
@@ -643,6 +666,97 @@ def l7_update_geo():
     return jsonify({
         "status": "success",
         "message": "Geo rules updated in Redis.",
+        "serverId": server_id,
+        "rulesCount": len(redis_rules)
+    }), 200
+
+
+@l7_bp.route('/l7_update_antiheader', methods=['POST'])
+def l7_update_antiheader():
+    """Receive anti-header rules from backend and store in Redis under key 'antiheader'.
+
+    Expected JSON:
+      {
+        "serverId": 123,
+        "serverIp": "x.x.x.x",
+        "rules": [
+          {
+            "id": 1,
+            "serverId": 123,
+            "url": "/path",
+            "header": "X-XX-Protection",
+            "value": "curl",
+            "blockMode": "If match",
+            "behavior": "Deny",
+            "status": "ENABLE"
+          },
+          ...
+        ]
+      }
+
+    We ignore 'status'. block_mode is mapped:
+      "If match"     -> "is in"
+      "If not match" -> "is not in"
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    rules_in = data.get("rules")
+    if not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+
+    redis_rules = []
+    for idx, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            continue
+
+        rule_id = r.get("id")
+        if rule_id is None:
+            rule_id = idx + 1
+        try:
+            rule_id = int(rule_id)
+        except (TypeError, ValueError):
+            rule_id = idx + 1
+
+        url = r.get("url", "") or ""
+        header = r.get("header", "") or ""
+        value = r.get("value", "") or ""
+        block_mode = r.get("blockMode", "") or ""
+        behavior = r.get("behavior", "") or ""
+
+        action = _behavior_to_action(behavior)
+        rule_str = _build_antiheader_rule_string(url, header, value, block_mode)
+
+        redis_rules.append({
+            "action": action,
+            "priority": rule_id,
+            "rule": rule_str
+        })
+
+    anti_payload = {
+        "id": server_id,
+        "rules": redis_rules
+    }
+    ok, err = RedisClient.store_antiheader(anti_payload)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write antiheader rules to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Antiheader rules updated in Redis.",
         "serverId": server_id,
         "rulesCount": len(redis_rules)
     }), 200
