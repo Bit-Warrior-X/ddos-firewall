@@ -242,9 +242,17 @@ ngx_int_t parse_rule_action(char * str, acl_rule_t * acl_rule, ngx_log_t * log)
             ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : ACTION_ALLOW\n");
             acl_rule->action = ACTION_ALLOW;
             break;
-        case ACTION_BLOCK:
-            ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : ACTION_BLOCK\n");
-            acl_rule->action = ACTION_BLOCK;
+        case ACTION_DROP:
+            ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : ACTION_DROP\n");
+            acl_rule->action = ACTION_DROP;
+            break;
+        case ACTION_DROP_BLOCK:
+            ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : ACTION_DROP_BLOCK\n");
+            acl_rule->action = ACTION_DROP_BLOCK;
+            break;
+        case ACTION_DENY:
+            ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : ACTION_DENY\n");
+            acl_rule->action = ACTION_DENY;
             break;
         case ACTION_HCAPTCHA:
             ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : ACTION_HCAPTCHA\n");

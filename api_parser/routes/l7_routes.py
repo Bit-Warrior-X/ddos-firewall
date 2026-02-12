@@ -388,6 +388,174 @@ def set_acl_get():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
+def _build_whitelist_rule_string(ips: str, url: str, method: str) -> str:
+    """Build ACL rule string from backend rule fields (IP CIDR, URI path, RequestMethod)."""
+    ips = (ips or "").strip()
+    url = (url or "").strip()
+    method = (method or "").strip()
+    parts = []
+    if ips:
+        parts.append(f'["IP CIDR","-","is in","{ips}"]')
+    if url:
+        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+    if method:
+        parts.append(f'["RequestMethod","-","is in","{method}"]')
+    return " \nAND \n".join(parts) if parts else ""
+
+
+def _behavior_to_action(behavior: str) -> int:
+    """Map behavior string to action code.
+
+    Mapping:
+      Allow       -> 1
+      Drop        -> 2
+      Deny        -> 3
+      Drop+Block  -> 4
+    """
+    b = (behavior or "").strip().lower()
+    mapping = {
+        "allow": 1,
+        "drop": 2,
+        "deny": 3,
+        "drop+block": 4,
+    }
+    return mapping.get(b, 3)
+
+
+@l7_bp.route('/l7_update_whitelist', methods=['POST'])
+def l7_update_whitelist():
+    """Receive whitelist from backend and store in Redis under key 'whitelist'.
+
+    Expected JSON: { serverId, serverIp, rules: [ { id, serverId, ips, url, method, description }, ... ] }
+    Transforms into Redis value: { id, rules: [ { action: 1, priority, rule: "..." }, ... ] }
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    rules_in = data.get("rules")
+    if not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+
+    redis_rules = []
+    for idx, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            continue
+        rule_id = r.get("id")
+        if rule_id is None:
+            rule_id = idx + 1
+        try:
+            rule_id = int(rule_id)
+        except (TypeError, ValueError):
+            rule_id = idx + 1
+        ips = r.get("ips", "") or ""
+        url = r.get("url", "") or ""
+        method = r.get("method", "") or ""
+        rule_str = _build_whitelist_rule_string(ips, url, method)
+        redis_rules.append({
+            "action": 1,
+            "priority": rule_id,
+            "rule": rule_str
+        })
+
+    whitelist_payload = {
+        "id": server_id,
+        "rules": redis_rules
+    }
+    ok, err = RedisClient.store_whitelist(whitelist_payload)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write whitelist to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Whitelist updated in Redis.",
+        "serverId": server_id,
+        "rulesCount": len(redis_rules)
+    }), 200
+
+
+@l7_bp.route('/l7_update_blacklist', methods=['POST'])
+def l7_update_blacklist():
+    """Receive blacklist from backend and store in Redis under key 'blacklist'.
+
+    Expected JSON: { serverId, serverIp, rules: [ { id, serverId, ips, url, method, behavior, description }, ... ] }
+    Transforms into Redis value: { id, rules: [ { action, priority, rule: "..." }, ... ] }
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    rules_in = data.get("rules")
+    if not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+
+    redis_rules = []
+    for idx, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            continue
+        rule_id = r.get("id")
+        if rule_id is None:
+            rule_id = idx + 1
+        try:
+            rule_id = int(rule_id)
+        except (TypeError, ValueError):
+            rule_id = idx + 1
+
+        ips = r.get("ips", "") or ""
+        url = r.get("url", "") or ""
+        method = r.get("method", "") or ""
+        behavior = r.get("behavior", "") or ""
+
+        action = _behavior_to_action(behavior)
+        rule_str = _build_whitelist_rule_string(ips, url, method)
+
+        redis_rules.append({
+            "action": action,
+            "priority": rule_id,
+            "rule": rule_str
+        })
+
+    blacklist_payload = {
+        "id": server_id,
+        "rules": redis_rules
+    }
+    ok, err = RedisClient.store_blacklist(blacklist_payload)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write blacklist to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Blacklist updated in Redis.",
+        "serverId": server_id,
+        "rulesCount": len(redis_rules)
+    }), 200
+
+
 @l7_bp.route('/acl_rule_management', methods=['POST'])
 @token_required
 def acl_rule_management():

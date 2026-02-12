@@ -107,3 +107,71 @@ class RedisClient:
         except Exception:
             return []
 
+    WHITELIST_KEY = "whitelist"
+
+    @staticmethod
+    def store_whitelist(whitelist_payload: Dict) -> tuple:
+        """Store L7 whitelist rules in Redis under key 'whitelist'.
+
+        whitelist_payload must have: id (int), rules (list of {action, priority, rule}).
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                whitelist_payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(RedisClient.WHITELIST_KEY, value)
+            rcli.publish("acl:updates", RedisClient.WHITELIST_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_whitelist() -> Dict:
+        """Retrieve L7 whitelist from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.WHITELIST_KEY)
+            if not val:
+                return {}
+            return json.loads(val)
+        except Exception:
+            return {}
+
+    BLACKLIST_KEY = "blacklist"
+
+    @staticmethod
+    def store_blacklist(blacklist_payload: Dict) -> tuple:
+        """Store L7 blacklist rules in Redis under key 'blacklist'.
+
+        blacklist_payload must have: id (int), rules (list of {action, priority, rule}).
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                blacklist_payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(RedisClient.BLACKLIST_KEY, value)
+            rcli.publish("acl:updates", RedisClient.BLACKLIST_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_blacklist() -> Dict:
+        """Retrieve L7 blacklist from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.BLACKLIST_KEY)
+            if not val:
+                return {}
+            return json.loads(val)
+        except Exception:
+            return {}
+

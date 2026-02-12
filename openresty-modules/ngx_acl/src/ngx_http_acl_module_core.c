@@ -309,7 +309,7 @@ ngx_int_t ngx_http_acl_handle_acl_rule(ngx_http_request_t *r, int acl_rule_id, i
         return NGX_HTTP_ACL_FAIL;
     }
     
-    if (!(action == ACTION_ALLOW || action == ACTION_BLOCK || action == ACTION_HCAPTCHA)) {
+    if (!(action == ACTION_ALLOW || action == ACTION_DROP || action == ACTION_DROP_BLOCK || action == ACTION_HCAPTCHA || action == ACTION_DENY)) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Received Action is Unkown\n");
         return NGX_HTTP_ACL_FAIL;
     }
@@ -1878,12 +1878,16 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
                     ngx_http_acl_dp(r, "ngx_acl : Current request is matched with rule.");
                     dump_acl_rule(acl_rule_p, r->connection->log);
 
-                    if (acl_rule_p->action == ACTION_BLOCK) {
-                        ret = ACL_RETURN_BLOCK;
+                    if (acl_rule_p->action == ACTION_DROP) {
+                        ret = ACL_RETURN_DROP;
                     } else if (acl_rule_p->action == ACTION_HCAPTCHA) {
                         ret = ACL_RETURN_CAPTCHA_START;
                     } else if (acl_rule_p->action == ACTION_ALLOW) {
                         ret = ACL_RETURN_ALLOW_RULE;
+                    } else if (acl_rule_p->action == ACTION_DROP_BLOCK) {
+                        ret = ACL_RETURN_DROP_BLOCK;
+                    } else if (acl_rule_p->action == ACTION_DENY) {
+                        ret = ACL_RETURN_DENY;
                     } else {
                         ret = ACL_RETURN_INTERNAL_ERROR;
                     }

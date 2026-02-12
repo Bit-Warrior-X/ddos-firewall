@@ -226,20 +226,24 @@ typedef enum operator_s {
 } operator_e;
 
 typedef enum acl_rule_aciton_s {
-    ACTION_BLOCK = 1,
+    ACTION_UNKNOWN = 0,
     ACTION_ALLOW,
-    ACTION_HCAPTCHA,
-    ACTION_UNKNOWN
+    ACTION_DROP,
+    ACTION_DENY,
+    ACTION_DROP_BLOCK,
+    ACTION_HCAPTCHA
 } acl_rule_aciton_e;
 
 
 typedef enum acl_rule_return_s {
-    ACL_RETURN_BLOCK = 1,
+    ACL_RETURN_INTERNAL_ERROR = 0,
     ACL_RETURN_ALLOW_RULE,
+    ACL_RETURN_DROP,
+    ACL_RETURN_DENY,
+    ACL_RETURN_DROP_BLOCK,
     ACL_RETURN_CAPTCHA_START,
     ACL_RETURN_ALLOW_NO_RULE,
-    ACL_RETURN_INTERNAL_ERROR,
-    ACL_RETURN_NO_LICENSE,
+    ACL_RETURN_NO_LICENSE
 } acl_rule_return_e;
 
 typedef struct comparative_expression_s
