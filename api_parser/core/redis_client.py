@@ -311,3 +311,37 @@ class RedisClient:
         except Exception:
             return {}
 
+    RESPONSEFREQ_KEY = "responsefreq"
+
+    @staticmethod
+    def store_responsefreq(payload: Dict) -> tuple:
+        """Store L7 response frequency rules in Redis under key 'responsefreq'.
+
+        payload must have: id (int), rules (list of {action, priority, rule}).
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(RedisClient.RESPONSEFREQ_KEY, value)
+            rcli.publish("acl:updates", RedisClient.RESPONSEFREQ_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_responsefreq() -> Dict:
+        """Retrieve L7 response frequency rules from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.RESPONSEFREQ_KEY)
+            if not val:
+                return {}
+            return json.loads(val)
+        except Exception:
+            return {}
+
