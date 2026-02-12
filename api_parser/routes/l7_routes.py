@@ -520,6 +520,32 @@ def _build_responsefreq_rule_string(url: str, response_code: str, response_count
     return " \nAND \n".join(parts) if parts else ""
 
 
+def _match_to_useragent_op(match: str) -> str:
+    """Map match type to UserAgent operator."""
+    m = str(match or "").strip().lower()
+    if m == "regex":
+        return "regex"
+    if m == "equals":
+        return "equals"
+    if m == "contains":
+        return "contains"
+    # default
+    return "equals"
+
+
+def _build_useragent_rule_string(url: str, user_agent: str, match: str) -> str:
+    """Build ACL rule string for user-agent rules."""
+    url = (url or "").strip()
+    ua = (user_agent or "").strip()
+    op = _match_to_useragent_op(match)
+    parts = []
+    if url:
+        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+    if ua:
+        parts.append(f'["UserAgent","-","{op}","{ua}"]')
+    return " \nAND \n".join(parts) if parts else ""
+
+
 @l7_bp.route('/l7_update_whitelist', methods=['POST'])
 def l7_update_whitelist():
     """Receive whitelist from backend and store in Redis under key 'whitelist'.
@@ -819,6 +845,96 @@ def l7_update_antiheader():
     return jsonify({
         "status": "success",
         "message": "Antiheader rules updated in Redis.",
+        "serverId": server_id,
+        "rulesCount": len(redis_rules)
+    }), 200
+
+
+@l7_bp.route('/l7_update_useragent', methods=['POST'])
+def l7_update_useragent():
+    """Receive user-agent rules from backend and store in Redis under key 'useragent'.
+
+    Expected JSON:
+      {
+        "serverId": 123,
+        "serverIp": "x.x.x.x",
+        "rules": [
+          {
+            "id": 1,
+            "serverId": 123,
+            "url": "/path",
+            "user_agent": "curl/7.0",
+            "match": "Regex" | "Equals" | "Contains",
+            "behavior": "Deny",
+            "status": "ENABLE"
+          },
+          ...
+        ]
+      }
+
+    We ignore 'status'. match is mapped:
+      Regex   -> "regex"
+      Equals  -> "equals"
+      Contains-> "contains"
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    rules_in = data.get("rules")
+    if not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+
+    redis_rules = []
+    for idx, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            continue
+
+        rule_id = r.get("id")
+        if rule_id is None:
+            rule_id = idx + 1
+        try:
+            rule_id = int(rule_id)
+        except (TypeError, ValueError):
+            rule_id = idx + 1
+
+        url = r.get("url", "") or ""
+        ua = r.get("user_agent", "") or ""
+        match = r.get("match", "") or ""
+        behavior = r.get("behavior", "") or ""
+
+        action = _behavior_to_action(behavior)
+        rule_str = _build_useragent_rule_string(url, ua, match)
+
+        redis_rules.append({
+            "action": action,
+            "priority": rule_id,
+            "rule": rule_str
+        })
+
+    payload = {
+        "id": server_id,
+        "rules": redis_rules
+    }
+    ok, err = RedisClient.store_useragent(payload)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write useragent rules to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Useragent rules updated in Redis.",
         "serverId": server_id,
         "rulesCount": len(redis_rules)
     }), 200
