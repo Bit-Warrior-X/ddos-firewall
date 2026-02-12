@@ -277,3 +277,37 @@ class RedisClient:
         except Exception:
             return {}
 
+    SECONDFREQLIMIT_KEY = "secondfreqlimit"
+
+    @staticmethod
+    def store_secondfreqlimit(payload: Dict) -> tuple:
+        """Store L7 second frequency limit rules in Redis under key 'secondfreqlimit'.
+
+        payload must have: id (int), rules (list of {action, priority, rule}).
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(RedisClient.SECONDFREQLIMIT_KEY, value)
+            rcli.publish("acl:updates", RedisClient.SECONDFREQLIMIT_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_secondfreqlimit() -> Dict:
+        """Retrieve L7 second frequency limit rules from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.SECONDFREQLIMIT_KEY)
+            if not val:
+                return {}
+            return json.loads(val)
+        except Exception:
+            return {}
+
