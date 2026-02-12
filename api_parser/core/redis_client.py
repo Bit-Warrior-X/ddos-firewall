@@ -243,3 +243,37 @@ class RedisClient:
         except Exception:
             return {}
 
+    INTERVALFREQLIMIT_KEY = "intervalfreqlimit"
+
+    @staticmethod
+    def store_intervalfreqlimit(payload: Dict) -> tuple:
+        """Store L7 interval frequency limit rules in Redis under key 'intervalfreqlimit'.
+
+        payload must have: id (int), rules (list of {action, priority, rule}).
+        Returns (True, None) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(RedisClient.INTERVALFREQLIMIT_KEY, value)
+            rcli.publish("acl:updates", RedisClient.INTERVALFREQLIMIT_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_intervalfreqlimit() -> Dict:
+        """Retrieve L7 interval frequency limit rules from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.INTERVALFREQLIMIT_KEY)
+            if not val:
+                return {}
+            return json.loads(val)
+        except Exception:
+            return {}
+

@@ -458,6 +458,26 @@ def _build_antiheader_rule_string(url: str, header: str, value: str, block_mode:
     return " \nAND \n".join(parts) if parts else ""
 
 
+def _build_intervalfreq_rule_string(url: str, req_count: int, time_sec: int) -> str:
+    """Build ACL rule string for interval frequency limit rules."""
+    url = (url or "").strip()
+    try:
+        req_count = int(req_count)
+    except (TypeError, ValueError):
+        req_count = 0
+    try:
+        time_sec = int(time_sec)
+    except (TypeError, ValueError):
+        time_sec = 0
+    parts = []
+    if url:
+        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+    if req_count > 0 and time_sec > 0:
+        freq_str = f"{req_count}times/{time_sec}s"
+        parts.append(f'["Request Frequency","-",">=","{freq_str}"]')
+    return " \nAND \n".join(parts) if parts else ""
+
+
 @l7_bp.route('/l7_update_whitelist', methods=['POST'])
 def l7_update_whitelist():
     """Receive whitelist from backend and store in Redis under key 'whitelist'.
@@ -757,6 +777,96 @@ def l7_update_antiheader():
     return jsonify({
         "status": "success",
         "message": "Antiheader rules updated in Redis.",
+        "serverId": server_id,
+        "rulesCount": len(redis_rules)
+    }), 200
+
+
+@l7_bp.route('/l7_update_intervalfreqlimit', methods=['POST'])
+def l7_update_intervalfreqlimit():
+    """Receive interval frequency limit rules and store in Redis under key 'intervalfreqlimit'.
+
+    Expected JSON:
+      {
+        "serverId": 123,
+        "serverIp": "x.x.x.x",
+        "rules": [
+          {
+            "id": 1,
+            "serverId": 123,
+            "url": "/path",
+            "time": 100,
+            "request_count": 5,
+            "behavior": "Deny",
+            "status": "ENABLE"
+          },
+          ...
+        ]
+      }
+
+    We ignore 'status'. Rule format:
+      ["URI Path Regx","-","contains","/path"]
+      AND
+      ["Request Frequency","-",">=","5times/100s"]
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    rules_in = data.get("rules")
+    if not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+
+    redis_rules = []
+    for idx, r in enumerate(rules_in):
+        if not isinstance(r, dict):
+            continue
+
+        rule_id = r.get("id")
+        if rule_id is None:
+            rule_id = idx + 1
+        try:
+            rule_id = int(rule_id)
+        except (TypeError, ValueError):
+            rule_id = idx + 1
+
+        url = r.get("url", "") or ""
+        time_sec = r.get("time", 0)
+        req_count = r.get("request_count", 0)
+        behavior = r.get("behavior", "") or ""
+
+        action = _behavior_to_action(behavior)
+        rule_str = _build_intervalfreq_rule_string(url, req_count, time_sec)
+
+        redis_rules.append({
+            "action": action,
+            "priority": rule_id,
+            "rule": rule_str
+        })
+
+    payload = {
+        "id": server_id,
+        "rules": redis_rules
+    }
+    ok, err = RedisClient.store_intervalfreqlimit(payload)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write interval frequency limit rules to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Interval frequency limit rules updated in Redis.",
         "serverId": server_id,
         "rulesCount": len(redis_rules)
     }), 200
