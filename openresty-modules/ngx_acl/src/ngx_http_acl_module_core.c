@@ -497,11 +497,11 @@ static ngx_int_t ngx_http_acl_handler_check_geo(ngx_http_request_t* r, comparati
 
     MMDB_data_code_result_t continet_result;
     MMDB_data_code_result_t country_result;
-    MMDB_data_code_result_t province_result;
+    //MMDB_data_code_result_t province_result;
 
     memset(&continet_result, 0, sizeof (MMDB_data_code_result_t));
     memset(&country_result, 0, sizeof (MMDB_data_code_result_t));
-    memset(&province_result, 0, sizeof (MMDB_data_code_result_t));
+    //memset(&province_result, 0, sizeof (MMDB_data_code_result_t));
     
     inx_addr_t inx_addr;
     
@@ -516,7 +516,7 @@ static ngx_int_t ngx_http_acl_handler_check_geo(ngx_http_request_t* r, comparati
 
         continet_result = MMDB_get_continent_name_from_ip(main_conf->geo_db_ctx, str);
         country_result = MMDB_get_country_from_ip(main_conf->geo_db_ctx, str);
-        province_result = MMDB_get_province_from_ip(main_conf->geo_db_ctx, str);
+        //province_result = MMDB_get_province_from_ip(main_conf->geo_db_ctx, str);
         
     }
     
@@ -532,10 +532,11 @@ static ngx_int_t ngx_http_acl_handler_check_geo(ngx_http_request_t* r, comparati
         
         continet_result = MMDB_get_continent_name_from_ip(main_conf->geo_db_ctx, str);
         country_result = MMDB_get_country_from_ip(main_conf->geo_db_ctx, str);
-        province_result = MMDB_get_province_from_ip(main_conf->geo_db_ctx, str);
+        //province_result = MMDB_get_province_from_ip(main_conf->geo_db_ctx, str);
     }
 #endif
 
+#if 0
     unsigned char completed_geo_data[128];
     completed_geo_data[0] = '\0';
     
@@ -600,7 +601,55 @@ static ngx_int_t ngx_http_acl_handler_check_geo(ngx_http_request_t* r, comparati
         default:
             break;
     }
+#endif
     
+    ngx_http_acl_dpf(r, "completed_geo_data is '%s' '%s'", continet_result.data_code, country_result.data_code);
+
+    char * str_temp_exp = ngx_http_acl_clone_c_str(r, exp_node->exp_str);
+    if (str_temp_exp == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Failed to clone string");
+        return ret_value;
+    }
+    
+    remove_space_in_str(str_temp_exp);
+    
+    ngx_str_t ngx_str;
+    
+    ngx_str.data = (u_char*)str_temp_exp;
+    ngx_str.len = strlen(str_temp_exp);
+    
+    UT_array* args = NULL;
+    ngx_http_acl_str_split(r->pool, &ngx_str, ',', ngx_str.len, &args);
+    
+    ngx_str_t* p = NULL;
+    while (p = (ngx_str_t*)utarray_next(args, p), p != NULL) {
+        if (compare_case_insensitive(r, continet_result.data_code, (char*)p->data) == NGX_HTTP_ACL_SUCCESS) {
+            ret_value = NGX_HTTP_ACL_TRUE;
+            break;
+        }
+        else if (compare_case_insensitive(r, country_result.data_code, (char*)p->data) == NGX_HTTP_ACL_SUCCESS) {
+            ret_value = NGX_HTTP_ACL_TRUE;
+            break;
+        }
+    }
+    utarray_free(args);
+
+    switch(exp_node->op) {
+        case Operator_is_in:
+            ngx_http_acl_dpf(r, "Operator_is_in and exp_node->exp_str is '%s'", exp_node->exp_str);
+            break;
+        case Operator_not_is_in: {
+            ngx_http_acl_dpf(r, "Operator_not_is_in and exp_node->exp_str is '%s'", exp_node->exp_str);
+            if (ret_value == NGX_HTTP_ACL_TRUE) 
+                ret_value = NGX_HTTP_ACL_FALSE;
+            else
+                ret_value = NGX_HTTP_ACL_TRUE;
+            break;
+        }
+        default:
+            break;
+    }
+
     ngx_http_acl_dpf(r, "The geo compare is fully completed with %d\n", ret_value);
     
     return ret_value;
