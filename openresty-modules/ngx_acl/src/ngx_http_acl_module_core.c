@@ -354,7 +354,7 @@ ngx_int_t ngx_http_acl_handler_check_cookie(ngx_http_request_t* r, comparative_e
     ngx_http_acl_dp_func_start(r);
     ngx_int_t ret_value = NGX_HTTP_ACL_FALSE;
     
-    if (r == NULL || exp_node == NULL || &r->headers_in == NULL || r->connection == NULL || r->connection->log == NULL) {
+    if (r == NULL || exp_node == NULL || r->connection == NULL || r->connection->log == NULL) {
         return NGX_HTTP_ACL_FALSE;
     }
     
@@ -790,6 +790,10 @@ static ngx_int_t ngx_http_acl_handler_check_uri_path(ngx_http_request_t* r, comp
             if (check_contains_in_str(r, exp_node->exp_str, str_uri, NGX_HTTP_ACL_FALSE) != NGX_HTTP_ACL_SUCCESS)
                 ret_value = NGX_HTTP_ACL_TRUE;
             break;
+        case Operator_regex:
+            if (compare_regex(r, exp_node->exp_str, str_uri) == NGX_HTTP_ACL_SUCCESS)
+                ret_value = NGX_HTTP_ACL_TRUE;
+            break;
         default:
             break;
     }
@@ -893,6 +897,10 @@ static ngx_int_t ngx_http_acl_handler_check_user_agent(ngx_http_request_t* r, co
             break;
         case Operator_not_contains:
             if (!(p_ua != NULL && p_ua->data != NULL && check_contains_in_str(r, exp_node->exp_str, (char *)p_ua->data, NGX_HTTP_ACL_TRUE) == NGX_HTTP_ACL_SUCCESS))
+                ret_value = NGX_HTTP_ACL_TRUE;
+            break;
+        case Operator_regex:
+            if (p_ua != NULL && p_ua->data != NULL && compare_regex(r, exp_node->exp_str, (char *)p_ua->data) == NGX_HTTP_ACL_SUCCESS)
                 ret_value = NGX_HTTP_ACL_TRUE;
             break;
         default:

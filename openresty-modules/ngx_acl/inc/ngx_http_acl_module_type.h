@@ -192,7 +192,7 @@ typedef struct vm_code_s {
 
 
 #define FIELD_COUNT 12
-#define OPERATOR_COUNT 11
+#define OPERATOR_COUNT 12
 
 typedef enum field_s {
     Field_Cookie = 0,
@@ -222,6 +222,7 @@ typedef enum operator_s {
     Operator_small,
     Operator_small_equal,
     Operator_equal_equal,
+    Operator_regex,
     Operator_Unknown
 } operator_e;
 

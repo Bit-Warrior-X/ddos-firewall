@@ -11,7 +11,7 @@ ngx_int_t parse_comparative_expression(mem_pool_t * pool, char * exp_str, compar
 
 /*---------------------------- Definition of global variables ---------------------------------*/
 static char field_str[FIELD_COUNT][20] = {"Cookie", "Geo", "IP", "Referer", "RequestMethod", "URI Path", "URI Query String", "UserAgent", "Header", "Request Frequency", "AS Num", "Response Frequency"};
-static char operator_str[OPERATOR_COUNT][20] = {"equals", "contains", "is in", "does not equals", "does not contain", "is not in", ">", ">=", "<", "<=", "=="};
+static char operator_str[OPERATOR_COUNT][20] = {"equals", "contains", "is in", "does not equals", "does not contain", "is not in", ">", ">=", "<", "<=", "==", "regex"};
 
 /*---------------------------- Definition of functions ---------------------------------------*/
 
@@ -1093,6 +1093,13 @@ ngx_int_t compare_ip_in_ip_list(ngx_http_request_t* r, char * ip_addr, char *ip_
         return NGX_HTTP_ACL_FAIL;
     }
 
+    /* parse client IP once */
+    struct in_addr client_in;
+    if (inet_pton(AF_INET, ip_addr, &client_in) != 1) {
+        return NGX_HTTP_ACL_FAIL;
+    }
+    uint32_t client_ip = ntohl(client_in.s_addr);
+
     char * str_temp = ngx_http_acl_clone_c_str(r, ip_addr_list);
 
     if (str_temp == NULL)
@@ -1105,11 +1112,79 @@ ngx_int_t compare_ip_in_ip_list(ngx_http_request_t* r, char * ip_addr, char *ip_
     char *token = strtok_r(str_temp, ",", &save_ptr);
     
     while (token != NULL) {
-        if (ngx_strncmp(ip_addr, token, ngx_strlen(ip_addr)) == 0) {
-            return NGX_HTTP_ACL_SUCCESS;
+        if (*token != '\0') {
+            /* check for CIDR suffix */
+            char *slash = strchr(token, '/');
+            if (slash == NULL) {
+                /* plain IP: exact string match */
+                if (ngx_strcmp(ip_addr, token) == 0) {
+                    return NGX_HTTP_ACL_SUCCESS;
+                }
+            } else {
+                /* CIDR: base_ip/prefix */
+                *slash = '\0';
+                char *prefix_str = slash + 1;
+
+                ngx_int_t prefix = ngx_atoi((u_char*)prefix_str, ngx_strlen(prefix_str));
+                if (prefix >= 0 && prefix <= 32) {
+                    struct in_addr net_in;
+                    if (inet_pton(AF_INET, token, &net_in) == 1) {
+                        uint32_t net_ip = ntohl(net_in.s_addr);
+                        uint32_t mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
+
+                        if ((client_ip & mask) == (net_ip & mask)) {
+                            return NGX_HTTP_ACL_SUCCESS;
+                        }
+                    }
+                }
+            }
         }
         token = strtok_r(NULL, ",", &save_ptr);
     }
+    return NGX_HTTP_ACL_FAIL;
+}
+
+ngx_int_t compare_regex(ngx_http_request_t* r, char *regex_str, char *str) {
+    if (regex_str == NULL || str == NULL || r == NULL || r->pool == NULL) {
+        return NGX_HTTP_ACL_FAIL;
+    }
+
+    ngx_regex_compile_t   rc;
+    u_char                errstr[NGX_MAX_CONF_ERRSTR];
+    ngx_memzero(&rc, sizeof(ngx_regex_compile_t));
+
+    rc.pattern.data = (u_char *) regex_str;
+    rc.pattern.len  = ngx_strlen(regex_str);
+    rc.pool         = r->pool;
+    rc.err.len      = NGX_MAX_CONF_ERRSTR;
+    rc.err.data     = errstr;
+
+    if (ngx_regex_compile(&rc) != NGX_OK || rc.regex == NULL) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "ngx_http_acl: failed to compile regex \"%s\": %s",
+                      regex_str, rc.err.data ? (char *)rc.err.data : "unknown error");
+        return NGX_HTTP_ACL_FAIL;
+    }
+
+    int captures[(1 + 16) * 3]; /* support a few capture groups if needed */
+
+    ngx_str_t subject;
+    subject.data = (u_char *) str;
+    subject.len  = ngx_strlen(str);
+
+    ngx_int_t n = ngx_regex_exec(rc.regex, &subject,
+                                 captures,
+                                 (ngx_uint_t) (sizeof(captures) / sizeof(captures[0])));
+
+    if (n >= 0) {
+        return NGX_HTTP_ACL_SUCCESS;
+    }
+
+    if (n != NGX_REGEX_NO_MATCHED) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "ngx_http_acl: regex match error for \"%s\"", regex_str);
+    }
+
     return NGX_HTTP_ACL_FAIL;
 }
 

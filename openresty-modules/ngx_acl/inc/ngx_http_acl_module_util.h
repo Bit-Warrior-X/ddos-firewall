@@ -14,6 +14,8 @@ ngx_int_t convert_ip_to_c_str(inx_addr_t addr, char *str, int mode);
 
 ngx_int_t compare_ip_in_ip_list(ngx_http_request_t* r, char * ip_addr, char *ip_addr_list);
 
+ngx_int_t compare_regex(ngx_http_request_t* r, char *regex_str, char *str);
+
 ngx_int_t compare_cookie_in_cookie_list(ngx_http_request_t* r, char * str_cookie, char *str_cookie_list);
 
 ngx_int_t compare_header_value_in_list(ngx_http_request_t* r, char * str_value, char *str_value_list);

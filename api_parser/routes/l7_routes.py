@@ -390,15 +390,15 @@ def set_acl_get():
 
 
 def _build_whitelist_rule_string(ips: str, url: str, method: str) -> str:
-    """Build ACL rule string from backend rule fields (IP CIDR, URI path, RequestMethod)."""
+    """Build ACL rule string from backend rule fields (IP, URI path, RequestMethod)."""
     ips = (ips or "").strip()
     url = (url or "").strip()
     method = (method or "").strip()
     parts = []
     if ips:
-        parts.append(f'["IP CIDR","-","is in","{ips}"]')
+        parts.append(f'["IP","-","is in","{ips}"]')
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if method:
         parts.append(f'["RequestMethod","-","is in","{method}"]')
     return " \nAND \n".join(parts) if parts else ""
@@ -429,7 +429,7 @@ def _build_geo_rule_string(url: str, country: str) -> str:
     country = (country or "").strip()
     parts = []
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if country:
         parts.append(f'["Geo","-","is in","{country}"]')
     return " \nAND \n".join(parts) if parts else ""
@@ -452,7 +452,7 @@ def _build_antiheader_rule_string(url: str, header: str, value: str, block_mode:
     op = _block_mode_to_header_op(block_mode)
     parts = []
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if header and value:
         parts.append(f'["Header","{header}","{op}","{value}"]')
     return " \nAND \n".join(parts) if parts else ""
@@ -471,7 +471,7 @@ def _build_intervalfreq_rule_string(url: str, req_count: int, time_sec: int) -> 
         time_sec = 0
     parts = []
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if req_count > 0 and time_sec > 0:
         freq_str = f"{req_count}times/{time_sec}s"
         parts.append(f'["Request Frequency","-",">=","{freq_str}"]')
@@ -491,7 +491,7 @@ def _build_secondfreq_rule_string(url: str, req_count: int, burst: int) -> str:
         burst = 0
     parts = []
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if burst > 0 and req_count > 0:
         freq_str = f"{burst}/{req_count}"
         parts.append(f'["Burst Frequency","-","-","{freq_str}"]')
@@ -512,7 +512,7 @@ def _build_responsefreq_rule_string(url: str, response_code: str, response_count
         time_sec = 0
     parts = []
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if response_count > 0 and time_sec > 0:
         freq_str = f"{response_count}times/{time_sec}s"
         code_val = response_code if response_code else "-"
@@ -540,7 +540,7 @@ def _build_useragent_rule_string(url: str, user_agent: str, match: str) -> str:
     op = _match_to_useragent_op(match)
     parts = []
     if url:
-        parts.append(f'["URI Path Regx","-","contains","{url}"]')
+        parts.append(f'["URI Path","-","regex","{url}"]')
     if ua:
         parts.append(f'["UserAgent","-","{op}","{ua}"]')
     return " \nAND \n".join(parts) if parts else ""
@@ -566,8 +566,10 @@ def l7_update_whitelist():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
 
     redis_rules = []
     for idx, r in enumerate(rules_in):
@@ -591,7 +593,7 @@ def l7_update_whitelist():
         })
 
     whitelist_payload = {
-        "id": server_id,
+        "id": 1,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_whitelist(whitelist_payload)
@@ -630,9 +632,11 @@ def l7_update_blacklist():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
-
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
+    
     redis_rules = []
     for idx, r in enumerate(rules_in):
         if not isinstance(r, dict):
@@ -660,7 +664,7 @@ def l7_update_blacklist():
         })
 
     blacklist_payload = {
-        "id": server_id,
+        "id": 2,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_blacklist(blacklist_payload)
@@ -710,8 +714,10 @@ def l7_update_geo():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
 
     redis_rules = []
     for idx, r in enumerate(rules_in):
@@ -740,7 +746,7 @@ def l7_update_geo():
         })
 
     geo_payload = {
-        "id": server_id,
+        "id": 3,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_geo(geo_payload)
@@ -799,9 +805,10 @@ def l7_update_antiheader():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
-
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
     redis_rules = []
     for idx, r in enumerate(rules_in):
         if not isinstance(r, dict):
@@ -831,7 +838,7 @@ def l7_update_antiheader():
         })
 
     anti_payload = {
-        "id": server_id,
+        "id": 4,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_antiheader(anti_payload)
@@ -890,8 +897,10 @@ def l7_update_useragent():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
 
     redis_rules = []
     for idx, r in enumerate(rules_in):
@@ -921,7 +930,7 @@ def l7_update_useragent():
         })
 
     payload = {
-        "id": server_id,
+        "id": 8,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_useragent(payload)
@@ -963,7 +972,7 @@ def l7_update_intervalfreqlimit():
       }
 
     We ignore 'status'. Rule format:
-      ["URI Path Regx","-","contains","/path"]
+      ["URI Path","-","regex","/path"]
       AND
       ["Request Frequency","-",">=","5times/100s"]
     """
@@ -980,8 +989,10 @@ def l7_update_intervalfreqlimit():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
 
     redis_rules = []
     for idx, r in enumerate(rules_in):
@@ -1011,7 +1022,7 @@ def l7_update_intervalfreqlimit():
         })
 
     payload = {
-        "id": server_id,
+        "id": 5,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_intervalfreqlimit(payload)
@@ -1053,7 +1064,7 @@ def l7_update_secondfreqlimit():
       }
 
     We ignore 'status'. Rule format:
-      ["URI Path Regx","-","contains","/path"]
+      ["URI Path","-","regex","/path"]
       AND
       ["Burst Frequency","-","-","5/10"]
     """
@@ -1070,8 +1081,10 @@ def l7_update_secondfreqlimit():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
 
     redis_rules = []
     for idx, r in enumerate(rules_in):
@@ -1101,7 +1114,7 @@ def l7_update_secondfreqlimit():
         })
 
     payload = {
-        "id": server_id,
+        "id": 6,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_secondfreqlimit(payload)
@@ -1144,7 +1157,7 @@ def l7_update_responsefreq():
       }
 
     We ignore 'status'. Rule format:
-      ["URI Path Regx","-","contains","/path"]
+      ["URI Path","-","regex","/path"]
       AND
       ["Response Frequency","<response_code>",">=","<response_count>times/<time>s"]
     """
@@ -1161,8 +1174,10 @@ def l7_update_responsefreq():
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
     rules_in = data.get("rules")
-    if not isinstance(rules_in, list):
-        return jsonify({"status": "error", "message": "Missing or invalid 'rules' (must be array)."}), 400
+    if rules_in is None:
+        rules_in = []
+    elif not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'rules' (must be array)."}), 400
 
     redis_rules = []
     for idx, r in enumerate(rules_in):
@@ -1193,7 +1208,7 @@ def l7_update_responsefreq():
         })
 
     payload = {
-        "id": server_id,
+        "id": 7,
         "rules": redis_rules
     }
     ok, err = RedisClient.store_responsefreq(payload)
