@@ -612,6 +612,60 @@ def l7_update_whitelist():
     }), 200
 
 
+@l7_bp.route('/l7_update_upstreamservers', methods=['POST'])
+def l7_update_upstreamservers():
+    """Receive upstream servers from backend and store in Redis under key 'upstreamservers'.
+
+    Expected JSON: { serverId, upstreams: [ { id, serverId, ip_port, description }, ... ] }
+    Redis value: [ {"ip_port": "host:port", "description": "weight=4 max_fails=3 fail_timeout=30s"}, ... ]
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    upstreams_in = data.get("upstreams")
+    if upstreams_in is None:
+        upstreams_in = []
+    if not isinstance(upstreams_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'upstreams' (must be array)."}), 400
+
+    redis_upstreams = []
+    for u in upstreams_in:
+        if not isinstance(u, dict):
+            continue
+        ip_port = (u.get("ip_port") or "").strip()
+        if not ip_port:
+            continue
+        description = (u.get("description") or "").strip()
+        redis_upstreams.append({
+            "ip_port": ip_port,
+            "description": description or "weight=1 max_fails=3 fail_timeout=30s"
+        })
+
+    ok, err = RedisClient.store_upstreamservers(redis_upstreams)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write upstream servers to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Upstream servers updated in Redis.",
+        "serverId": server_id,
+        "upstreamsCount": len(redis_upstreams)
+    }), 200
+
+
 @l7_bp.route('/l7_update_blacklist', methods=['POST'])
 def l7_update_blacklist():
     """Receive blacklist from backend and store in Redis under key 'blacklist'.

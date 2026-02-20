@@ -379,3 +379,36 @@ class RedisClient:
         except Exception:
             return {}
 
+    UPSTREAMSERVERS_KEY = "upstreamservers"
+
+    @staticmethod
+    def store_upstreamservers(upstreams_list: List[Dict]) -> tuple:
+        """Store L7 dynamic upstream servers in Redis under key 'upstreamservers'.
+
+        upstreams_list must be a list of { "ip_port": str, "description": str }.
+        Consumed by resty.upstream_redis (OpenResty). Returns (True, None) on success.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                upstreams_list,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
+            rcli.set(RedisClient.UPSTREAMSERVERS_KEY, value)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_upstreamservers() -> List[Dict]:
+        """Retrieve L7 upstream servers list from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.UPSTREAMSERVERS_KEY)
+            if not val:
+                return []
+            return json.loads(val)
+        except Exception:
+            return []
+
