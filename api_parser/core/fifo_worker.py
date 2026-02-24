@@ -3,8 +3,10 @@
 import os
 import threading
 import time
-from typing import Dict, List
+import json
+from typing import Dict, List, Tuple
 from core.api_client import APIClient
+from core.redis_client import RedisClient
 import config
 from utils.auth import get_token
 
@@ -34,6 +36,46 @@ def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
         commands.append(current_command)
     
     return commands
+
+_geoip_reader = None
+
+
+def _lookup_geo(ip: str) -> Tuple[str, str]:
+    """
+    Lookup (country, province) for an IP using MaxMind GeoIP2 city DB.
+
+    If geo DB or library is unavailable, returns ("-", "-") and logs once.
+    """
+    global _geoip_reader
+    if not ip:
+        return "-", "-"
+
+    if _geoip_reader is None:
+        try:
+            import geoip2.database  # type: ignore
+
+            # Use the same DB path as nginx L7 (city.mmdb)
+            db_path = "/usr/local/openresty/nginx/lua/geoip2/city.mmdb"
+            _geoip_reader = geoip2.database.Reader(db_path)
+            print(f"[API_PARSER] GeoIP2 reader initialized with DB: {db_path}")
+        except Exception as e:
+            print(f"[API_PARSER] GeoIP2 init failed, geo will be '-': {e}")
+            _geoip_reader = False  # sentinel to avoid repeated attempts
+            return "-", "-"
+
+    if _geoip_reader is False:
+        return "-", "-"
+
+    try:
+        resp = _geoip_reader.city(ip)
+        country = resp.country.iso_code or resp.country.name or "-"
+        subdivision = resp.subdivisions.most_specific
+        province = subdivision.iso_code or subdivision.name or "-"
+        return country or "-", province or "-"
+    except Exception as e:
+        print(f"[API_PARSER] GeoIP2 lookup failed for ip={ip}: {e}")
+        return "-", "-"
+
 
 def process_command(cmd: Dict[str, str]) -> None:
     """Processes a single command dictionary."""
@@ -72,6 +114,41 @@ def process_command(cmd: Dict[str, str]) -> None:
                 'token': token
             }
             APIClient.send_report_xdp(payload)
+
+            # Also add this IP to temporaryblacklist in Redis (for L7 WAF), and publish.
+            ip = (cmd.get('ip') or '').strip()
+            ttl_raw = cmd.get('ttl') or ''
+            try:
+                ttl = int(ttl_raw)
+            except (TypeError, ValueError):
+                ttl = config.DEFAULT_BLOCK_DURATION
+
+            if ip and ttl > 0:
+                try:
+                    blocked_at = int(time.time())
+                    country, province = _lookup_geo(ip)
+                    entry = {
+                        "ip": ip,
+                        # Use a regex that matches any URI for this IP
+                        "url": ".*",
+                        "country": country,
+                        "province": province,
+                        "blocked_at": str(blocked_at),
+                        "ttl": ttl,
+                        # Mark that this came from L4 DDoS logic
+                        "trigger_rule": "l4ddos",
+                    }
+                    json_str = json.dumps(entry, ensure_ascii=False, separators=(",", ":")).replace("\\/", "/")
+
+                    rcli = RedisClient.get_client()
+                    key = f"temporaryblacklist:{ip}:{blocked_at}"
+                    rcli.set(key, json_str)
+                    rcli.expire(key, ttl)
+                    # Notify L7-side monitor & backend
+                    rcli.publish("temporaryblacklist:added", json_str)
+                    print(f"[API_PARSER] Added L4 temp blacklist entry key={key} ttl={ttl}")
+                except Exception as e:
+                    print(f"[API_PARSER] Failed to add L4 temp blacklist entry for ip={ip}: {e}")
         else:
             print(f"[API_PARSER] Unknown command: {cmd['command']}")
     except Exception as e:

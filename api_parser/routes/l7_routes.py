@@ -710,7 +710,57 @@ def l7_update_temporaryblacklist():
     if not isinstance(items, list):
         return jsonify({"status": "error", "message": "Invalid 'temporaryblacklist' (must be array)."}), 400
 
-    # Clear existing temporaryblacklist:* keys first
+    # Load existing temporaryblacklist entries before clearing, so we can detect removed L4 entries.
+    try:
+        rcli = RedisClient.get_client()
+        # Snapshot of existing keys: key -> parsed JSON
+        old_entries = {}
+        cursor = "0"
+        pattern = f"{RedisClient.TEMPORARYBLACKLIST_PREFIX}*"
+        while True:
+            cursor, keys = rcli.scan(cursor=cursor, match=pattern, count=100)
+            if keys:
+                for k in keys:
+                    try:
+                        raw = rcli.get(k)
+                        if raw:
+                            obj = json.loads(raw)
+                            if isinstance(obj, dict):
+                                old_entries[k] = obj
+                    except Exception:
+                        continue
+            if cursor == 0 or cursor == "0":
+                break
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to read old temporary blacklist from Redis: {e}"}), 500
+
+    # Build a fast lookup for new entries by IP+blocked_at, so we know which old keys disappeared.
+    new_index = set()
+    for e in items:
+        if not isinstance(e, dict):
+            continue
+        ip = (e.get("ip") or "").strip()
+        blocked_at = str(e.get("blocked_at") or "").strip()
+        if ip and blocked_at:
+            new_index.add((ip, blocked_at))
+
+    # For any old entry that was L4 (trigger_rule == "l4ddos") and is not in new_index,
+    # call l4_firewall_cli CLEAR_BLOCK_IP <ip> to clear the L4 block.
+    for key, obj in old_entries.items():
+        try:
+            trig = str(obj.get("trigger_rule", "")).strip().lower()
+            ip = str(obj.get("ip", "")).strip()
+            blocked_at = str(obj.get("blocked_at", "")).strip()
+            if trig == "l4ddos" and ip and blocked_at and (ip, blocked_at) not in new_index:
+                command_args = ["l4_firewall_cli", "CLEAR_BLOCK_IP", ip]
+                # Reuse the helper from l4_routes to execute CLI
+                from routes.l4_routes import execute_cli_command  # local import to avoid cycles at module load
+                res = execute_cli_command(command_args)
+                print(f"[L7] CLEAR_BLOCK_IP ip={ip} result={res.get('status')} msg={res.get('message')}")
+        except Exception as e:
+            print(f"[L7] Error while clearing L4 block for key={key}: {e}")
+
+    # Clear existing temporaryblacklist:* keys, then store new set.
     try:
         RedisClient.clear_temporaryblacklist()
     except Exception as e:
