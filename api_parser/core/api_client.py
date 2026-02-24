@@ -4,6 +4,7 @@ import requests
 import urllib3
 from typing import Dict, Any
 import config
+from utils.auth import get_token
 
 # Disable SSL warnings when verify=False is used
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -100,4 +101,30 @@ class APIClient:
             return True, response.json()
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    def notify_temporary_blacklist_added(item: Dict[str, Any]) -> bool:
+        """Notify backend that a new temporary blacklist entry was added (with item details and token)."""
+        # Include token in payload as requested
+        token = get_token()
+        payload = dict(item)
+        if token:
+            payload["token"] = token
+        try:
+            response = requests.post(
+                config.TEMPORARY_BLACKLIST_NOTIFY_URL,
+                headers={"Content-Type": "application/json"},
+                json=payload,
+                timeout=5,
+                verify=False,
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            # Extra debug logging for failures
+            print(
+                "[TEMP_BL_NOTIFY] backend request failed for ip=%s error=%s"
+                % (payload.get("ip", ""), str(e))
+            )
+            return False
 

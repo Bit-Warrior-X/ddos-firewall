@@ -33,6 +33,9 @@ BLOCKLIST_API_URL = f"{API_BASE_URL}/get_blocklist_ips"
 WHITELIST_API_URL = f"{API_BASE_URL}/get_whitelist_ips"
 CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
 
+# Temporary blacklist: notify backend when a new item is added to Redis (api_parser monitors Redis)
+TEMPORARY_BLACKLIST_NOTIFY_URL = f"{API_BASE_URL}/temporary_blacklist_added"
+
 # Deployment / licensing APIs
 BACKEND_DEPLOY_URL = f"{API_BASE_URL}/deploy_done"
 BACKEND_DEPLOY_COMPLETE_URL = f"{API_BASE_URL}/deploy_complete"

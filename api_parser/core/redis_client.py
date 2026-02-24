@@ -2,6 +2,7 @@
 """Redis client operations for ACL rules."""
 import redis
 import json
+import time
 from typing import List, Dict
 import config
 
@@ -411,4 +412,82 @@ class RedisClient:
             return json.loads(val)
         except Exception:
             return []
+
+    # -----------------------------
+    # Temporary blacklist helpers
+    # -----------------------------
+
+    TEMPORARYBLACKLIST_PREFIX = "temporaryblacklist:"
+
+    @staticmethod
+    def clear_temporaryblacklist() -> None:
+        """Delete all temporaryblacklist:* keys from Redis."""
+        rcli = RedisClient.get_client()
+        cursor: str = "0"
+        pattern = RedisClient.TEMPORARYBLACKLIST_PREFIX + "*"
+        while True:
+            cursor, keys = rcli.scan(cursor=cursor, match=pattern, count=100)
+            if keys:
+                # delete in batches
+                rcli.delete(*keys)
+            if cursor == 0 or cursor == "0":
+                break
+
+    @staticmethod
+    def store_temporaryblacklist(entries: List[Dict]) -> tuple:
+        """
+        Store temporary blacklist entries as individual keys with proper TTL.
+
+        Each entry is written as:
+          key:   temporaryblacklist:<ip>:<blocked_at>
+          value: JSON { ip, url, country, province, blocked_at, ttl, trigger_rule }
+
+        Redis TTL is computed as: blocked_at + ttl - now_epoch().
+        Expired entries (TTL <= 0) are skipped.
+        No publish is done here, so api_parser will NOT notify backend again.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            now_ts = int(time.time())
+            pipe = rcli.pipeline()
+
+            for e in entries or []:
+                if not isinstance(e, dict):
+                    continue
+                ip = (e.get("ip") or "").strip()
+                if not ip:
+                    continue
+                blocked_at_raw = e.get("blocked_at")
+                ttl_raw = e.get("ttl", 0)
+                try:
+                    blocked_at = int(blocked_at_raw)
+                    ttl_val = int(ttl_raw)
+                except (TypeError, ValueError):
+                    continue
+                if ttl_val <= 0:
+                    continue
+
+                remaining = blocked_at + ttl_val - now_ts
+                if remaining <= 0:
+                    # Already expired according to backend timing; skip
+                    continue
+
+                key = f"{RedisClient.TEMPORARYBLACKLIST_PREFIX}{ip}:{blocked_at}"
+                value_obj = {
+                    "ip": ip,
+                    "url": e.get("url", "") or "",
+                    "country": e.get("country", "") or "",
+                    "province": e.get("province", "") or "",
+                    "blocked_at": str(blocked_at),
+                    "ttl": ttl_val,
+                    "trigger_rule": e.get("trigger_rule", "") or "",
+                }
+                value = json.dumps(value_obj, ensure_ascii=False, separators=(",", ":")).replace("\\/", "/")
+                pipe.set(key, value)
+                pipe.expire(key, remaining)
+
+            pipe.execute()
+            return True, None
+        except Exception as e:
+            return False, str(e)
 

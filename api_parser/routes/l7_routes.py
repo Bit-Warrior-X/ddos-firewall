@@ -666,6 +666,73 @@ def l7_update_upstreamservers():
     }), 200
 
 
+@l7_bp.route('/l7_update_temporaryblacklist', methods=['POST'])
+def l7_update_temporaryblacklist():
+    """
+    Receive temporary blacklist from backend and store in Redis as per-key entries.
+
+    Expected JSON:
+    {
+      "serverId": 123,
+      "temporaryblacklist": [
+        {
+          "ip": "192.168.1.1",
+          "url": "/api/foo",
+          "country": "US",
+          "province": "CA",
+          "blocked_at": "1729876543",
+          "ttl": 180,
+          "trigger_rule": "intervalfreqlimit"
+        },
+        ...
+      ]
+    }
+
+    Behavior:
+      - Delete all existing temporaryblacklist:* keys in Redis.
+      - Store each entry as key temporaryblacklist:<ip>:<blocked_at> with JSON value.
+      - TTL for each key is computed as blocked_at + ttl - now_epoch().
+      - These writes do NOT notify backend again (no publish on temporaryblacklist:added).
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    items = data.get("temporaryblacklist") or []
+    if not isinstance(items, list):
+        return jsonify({"status": "error", "message": "Invalid 'temporaryblacklist' (must be array)."}), 400
+
+    # Clear existing temporaryblacklist:* keys first
+    try:
+        RedisClient.clear_temporaryblacklist()
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"Failed to clear temporary blacklist in Redis: {e}"}), 500
+
+    ok, err = RedisClient.store_temporaryblacklist(items)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write temporary blacklist to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    # Count only entries that were non-expired and had valid ip/ttl
+    return jsonify({
+        "status": "success",
+        "message": "Temporary blacklist updated in Redis.",
+        "serverId": server_id,
+        "itemsCount": len(items)
+    }), 200
+
+
 @l7_bp.route('/l7_update_blacklist', methods=['POST'])
 def l7_update_blacklist():
     """Receive blacklist from backend and store in Redis under key 'blacklist'.
