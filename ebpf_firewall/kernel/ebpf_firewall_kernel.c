@@ -451,7 +451,7 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         // If bursts per second threshold is reached, block source IP 
         if (total_bursts >= config->burst_count_threshold) {
             __u64 expire = now + global_config_val->black_ip_duration;
-            __u64 *blocked_time_p = bpf_map_lookup_elem(&blocked_ips, &src_ip);
+            __u64 *blocked_time_p = bpf_map_lookup_elem(&blocked_ips, &src_ip); 
             if (!blocked_time_p)
                 bpf_map_update_elem(&blocked_ips, &src_ip, &expire, BPF_ANY);
             else
