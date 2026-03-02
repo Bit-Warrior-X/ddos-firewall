@@ -1,0 +1,108 @@
+def now = new Date()
+pipeline {
+    agent any
+    environment {
+        PACKAGE1 = "skc-libmaxminddb-ngx-waf"
+        GIT_URL = "ssh://git@admin.skycloud.tw:1022/skycloud-rd/libmaxminddb.git"
+    }
+
+    stages {
+        stage('CheckOut') {
+            steps {
+                // Define Tag Name
+                script{
+                    // Checkout
+                    def scmVars = checkout scmGit(
+                        branches: [[name: "${env.gitlabTargetBranch}"]],
+                        extensions: [], 
+                        userRemoteConfigs: [[credentialsId: 'Git-Ansible', url: "${env.GIT_URL}"]]
+                    )
+                    //
+                    sh 'git submodule update --init'
+                    // define commit
+                    commit = "${scmVars.GIT_COMMIT}".substring(0,5)
+                    echo "current commit ${commit}"
+                    // define version & release
+                    def is_prod = (env.gitlabTargetBranch =~ /^v[0-9]+\.[0-9]+\.[0-9]+-prod(-[0-9]+|)/)
+                    if (is_prod) {
+                        echo "This build is prod"
+                        // Define release
+                        try {
+                            env.release = "${env.gitlabTargetBranch}".split("-")[2]
+                        } catch(Exception e) {
+                            env.release = 1
+                        }
+                        // Define Version
+                        env.version = "${env.gitlabTargetBranch}".split("-")[0].split("v")[1]
+                    }else{
+                        echo "This build is not Prod"
+                        date = "${now.format('yyyyMMddHHmm')}"
+                        env.version = "${date}_${commit}"
+                        env.release = 1
+                    }
+                    echo "Release = ${env.release}"
+                    echo "Version = ${env.version}"
+                    // Define RPM Name
+                    env.rpm_name1 = "${env.PACKAGE1}-${env.version}-${env.release}.x86_64.rpm"
+                    // Define Tar package name
+                    env.package_tar_name1 = "${env.PACKAGE1}-${env.commit}.tar.gz"
+                    // Print var for debug
+                    echo "${env.package_tar_name1}"
+                    echo "${env.rpm_name1}"
+
+                }
+            }
+        }
+        stage('Compile') {
+            parallel{
+                stage('RPMBuild') {
+                    steps {
+                        sh '''
+                        cd $WORKSPACE/ansible/rpmbuild
+                        rpmbuild --define "_topdir $WORKSPACE/ansible/rpmbuild" --define "version ${version}" --define "release ${release}" --define "_rpmfilename ${rpm_name1}" -ba SPECS/skc-libmaxminddb-ngx-waf.spec
+                        '''
+                    }
+                }
+            }
+        }
+        stage('Deploy') {
+            parallel {
+                stage('Deploy_To_Dev') {
+                    when {
+                        anyOf {
+                            environment name: 'gitlabTargetBranch', value: 'dev'
+                            environment name: 'gitlabTargetBranch', value: 'origin/dev'
+                        }
+                    }
+                    steps {
+                        // deploy service to VM
+                        ansiblePlaybook credentialsId: 'deploy_ssh_key', extras: "-e rpm_file_name=${env.rpm_name1}", installation: 'ansible-playbook', inventory: '$WORKSPACE/ansible/inventories/dev', playbook: '$WORKSPACE/ansible/deploy_service.yml', vaultCredentialsId: 'ansible-vault-key'
+                        // deploy rpm to Repo
+                        ansiblePlaybook credentialsId: 'deploy_ssh_key', extras: "-e package_name=rpmbuild/RPMS/${env.rpm_name1}",installation: 'ansible-playbook', inventory: '$WORKSPACE/ansible/inventories/dev', playbook: '$WORKSPACE/ansible/deploy_rpm.yml', vaultCredentialsId: 'ansible-vault-key'
+                    }
+                }
+                stage('Deploy_To_UAT') {
+                    when {
+                        anyOf {
+                            environment name: 'gitlabTargetBranch', value: 'develop'
+                            environment name: 'gitlabTargetBranch', value: 'origin/develop'
+                        }
+                    }
+                    steps {
+                        // deploy service to VM
+                        ansiblePlaybook credentialsId: 'deploy_ssh_key', extras: "-e rpm_file_name=${env.rpm_name1}", installation: 'ansible-playbook', inventory: '$WORKSPACE/ansible/inventories/uat', playbook: '$WORKSPACE/ansible/deploy_service.yml', vaultCredentialsId: 'ansible-vault-key'
+                        // deploy rpm to repo
+                        ansiblePlaybook credentialsId: 'deploy_ssh_key', extras: "-e package_name=rpmbuild/RPMS/${env.rpm_name1}",installation: 'ansible-playbook', inventory: '$WORKSPACE/ansible/inventories/uat', playbook: '$WORKSPACE/ansible/deploy_rpm.yml', vaultCredentialsId: 'ansible-vault-key'
+                    }
+                }
+                stage('Deploy_To_Prod') {
+                    when { expression { return env.gitlabTargetBranch =~ /^v[0-9]+\.[0-9]+\.[0-9]+-prod(-[0-9]+|)/ } }
+                    steps {
+                        // node.rpm
+                        ansiblePlaybook credentialsId: 'deploy_ssh_key', extras: "-e package_name=rpmbuild/RPMS/${env.rpm_name1}",installation: 'ansible-playbook', inventory: '$WORKSPACE/ansible/inventories/prod', playbook: '$WORKSPACE/ansible/deploy_rpm.yml', vaultCredentialsId: 'ansible-vault-key'
+                    }
+                }
+            }
+        }
+    }
+}

@@ -25,8 +25,8 @@ So the backend is informed as soon as a new entry is added, with no dependency o
 {
   "ip": "192.168.1.1",
   "url": "/api/foo",
-  "country": "US",
-  "province": "CA",
+  "country": "United States",
+  "city": "New York",
   "blocked_at": "1729876543",
   "ttl": 180,
   "trigger_rule": "intervalfreqlimit"

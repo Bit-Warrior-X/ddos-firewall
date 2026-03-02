@@ -55,47 +55,6 @@ char* ngx_http_acl_geo_database_path_conf(ngx_conf_t* cf, ngx_command_t* cmd, vo
     return NGX_CONF_OK;
 }
 
-char* ngx_http_acl_isp_database_path_conf(ngx_conf_t* cf, ngx_command_t* cmd, void* conf) {
-    ngx_http_acl_main_conf_t* main_conf = conf;
-    if (ngx_conf_set_str_slot(cf, cmd, conf) != NGX_CONF_OK) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ngx_http_acl: %s", "the path of the isp database is not specified");
-        return NGX_CONF_ERROR;
-    }
-
-    char* full_path = ngx_palloc(cf->pool, sizeof(char) * NGX_HTTP_ACL_RULE_MAX_LEN);
-    if (full_path == NULL) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "ngx_http_acl: Failed to alloc ngx_http_acl_isp_database_path_conf");
-        return NGX_CONF_ERROR;
-    }
-    char* end = ngx_http_acl_to_c_str((u_char*)full_path, main_conf->acl_isp_database_path);
-    if (end == NULL) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "Failed to convert acl_geo_database_path to C string");
-        ngx_pfree(cf->pool, full_path);
-        return NGX_CONF_ERROR;
-    }
-    *(end) = '\0';
-    
-    main_conf->isp_db_ctx = ngx_palloc(cf->pool, sizeof (MMDB_s));
-    if (main_conf->isp_db_ctx == NULL) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "Failed to allocate memory for geo_db_ctx");
-        ngx_pfree(cf->pool, full_path);
-        return NGX_CONF_ERROR;
-    }
-
-    int status;
-    status = MMDB_open(full_path, MMDB_MODE_MMAP, main_conf->isp_db_ctx);
-    
-    if (MMDB_SUCCESS != status) {
-        ngx_conf_log_error(NGX_LOG_ERR, cf, 0, "Can't open %s - %s", full_path, MMDB_strerror(status));
-        ngx_pfree(cf->pool, full_path);
-        return NGX_CONF_ERROR;
-    }
-    
-    ngx_pfree(cf->pool, full_path);
-    
-    return NGX_CONF_OK;
-}
-
 
 char* ngx_http_acl_shm_size(ngx_conf_t* cf, ngx_command_t* cmd, void* conf) {
     if (cf == NULL || cmd == NULL || conf == NULL) {
@@ -342,7 +301,6 @@ void* ngx_http_acl_create_main_conf(ngx_conf_t* cf) {
     main_conf->server_acl_rule = NGX_CONF_UNSET_PTR;
     
     main_conf->geo_db_ctx = NGX_CONF_UNSET_PTR;
-    main_conf->isp_db_ctx = NGX_CONF_UNSET_PTR;
 
     main_conf->shm_zone_cc_req_deny = NGX_CONF_UNSET_PTR;
     main_conf->shm_zone_cc_rsp_deny = NGX_CONF_UNSET_PTR;

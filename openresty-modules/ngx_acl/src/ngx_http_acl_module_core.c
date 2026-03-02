@@ -49,14 +49,6 @@ static ngx_command_t ngx_http_acl_commands[] = {
         NULL
    },
    {
-        ngx_string("acl_isp_database_path"),
-        NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
-        ngx_http_acl_isp_database_path_conf,
-        NGX_HTTP_MAIN_CONF_OFFSET,
-        offsetof(ngx_http_acl_main_conf_t, acl_isp_database_path),
-        NULL
-   },
-   {
         ngx_string("acl_rule_shm_size"),
         NGX_HTTP_MAIN_CONF | NGX_CONF_1MORE,
         ngx_http_acl_shm_size,
@@ -1169,7 +1161,7 @@ static ngx_int_t ngx_http_acl_handler_check_asn(ngx_http_request_t* r, comparati
     ngx_http_acl_main_conf_t* main_conf = NULL;
     ngx_http_acl_get_ctx_and_conf(r, &main_conf, &ctx);
 
-    if (main_conf == NULL || main_conf->isp_db_ctx == NULL) {
+    if (main_conf == NULL || main_conf->geo_db_ctx == NULL) {
         if (exp_node->op == Operator_is_in) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Failed to get location isp database context");
             return ret_value;
@@ -1193,7 +1185,7 @@ static ngx_int_t ngx_http_acl_handler_check_asn(ngx_http_request_t* r, comparati
             return ret_value;
         }
 
-        asn_result = MMDB_get_asn_code_from_ip(main_conf->isp_db_ctx, str);
+        asn_result = MMDB_get_asn_code_from_ip(main_conf->geo_db_ctx, str);
         if (asn_result.status != MMDB_SUCCESS) {
           ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to get ASN code from IP");
           return ret_value;
@@ -1209,7 +1201,7 @@ static ngx_int_t ngx_http_acl_handler_check_asn(ngx_http_request_t* r, comparati
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Failed to convert ip to c str");
             return ret_value;
         }
-        asn_result = MMDB_get_asn_code_from_ip(main_conf->isp_db_ctx, str);
+            asn_result = MMDB_get_asn_code_from_ip(main_conf->geo_db_ctx, str);
         if (asn_result.status != MMDB_SUCCESS) {
           ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to get ASN code from IP");
           return ret_value;

@@ -142,13 +142,6 @@ Allow checking acl rule for current server.
 
 Sets geo location database path for checking geo location rule.
 
-#### **acl_isp_database_path** (Mantatory)
-- **syntax:** `acl_isp_database_path geo_databse_path`
-- **default:** `none`
-- **context:** `http`
-
-Sets isp database path for checking AS number rule.
-
 #### **acl_rule_shm_size** (Mantatory)
 - **syntax:** `acl_rule_shm_size <shm_size>`
 - **default:** `none`

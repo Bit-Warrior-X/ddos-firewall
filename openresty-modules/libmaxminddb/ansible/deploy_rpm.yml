@@ -1,0 +1,14 @@
+- hosts: repo
+  vars:
+    package_name: skc-libmaxminddb.rpm
+    rpm_path: "/usr/local/app/download.cdnfox.com/cdnfox/{{ rpm_env }}/rpm"
+  tasks:
+    - name: copy
+      copy:
+        src: "{{ package_name }}"
+        dest: "{{ rpm_path }}"
+      register: new_rpm
+    
+    - name: create_repo
+      shell: "createrepo {{ rpm_path }}"
+      when: new_rpm is changed

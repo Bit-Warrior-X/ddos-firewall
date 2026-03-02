@@ -386,9 +386,6 @@ typedef struct ngx_http_acl_loc_conf_s {
 typedef struct ngx_http_acl_main_conf_s {
     ngx_str_t                            acl_geo_database_path;
     MMDB_s                             * geo_db_ctx;
-    
-    ngx_str_t                            acl_isp_database_path;
-    MMDB_s                             * isp_db_ctx;
 
     ngx_shm_zone_t                     * shm_zone_server_acl_rule;
     ngx_int_t                            acl_server_acl_shm_zone_size;

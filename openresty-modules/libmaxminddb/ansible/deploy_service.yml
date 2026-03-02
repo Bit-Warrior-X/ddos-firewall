@@ -1,0 +1,6 @@
+---
+- hosts: node
+  tasks:
+    - name: deploy_service
+      include_role:
+        name: deploy_service

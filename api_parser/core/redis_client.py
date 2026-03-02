@@ -440,7 +440,7 @@ class RedisClient:
 
         Each entry is written as:
           key:   temporaryblacklist:<ip>:<blocked_at>
-          value: JSON { ip, url, country, province, blocked_at, ttl, trigger_rule }
+          value: JSON { ip, url, country, city, blocked_at, ttl, trigger_rule }
 
         Redis TTL is computed as: blocked_at + ttl - now_epoch().
         Expired entries (TTL <= 0) are skipped.
@@ -477,7 +477,7 @@ class RedisClient:
                     "ip": ip,
                     "url": e.get("url", "") or "",
                     "country": e.get("country", "") or "",
-                    "province": e.get("province", "") or "",
+                    "city": e.get("city", "") or "",
                     "blocked_at": str(blocked_at),
                     "ttl": ttl_val,
                     "trigger_rule": e.get("trigger_rule", "") or "",

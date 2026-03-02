@@ -42,7 +42,7 @@ _geoip_reader = None
 
 def _lookup_geo(ip: str) -> Tuple[str, str]:
     """
-    Lookup (country, province) for an IP using MaxMind GeoIP2 city DB.
+    Lookup (country, city) for an IP using MaxMind GeoIP2 city DB.
 
     If geo DB or library is unavailable, returns ("-", "-") and logs once.
     """
@@ -53,9 +53,7 @@ def _lookup_geo(ip: str) -> Tuple[str, str]:
     if _geoip_reader is None:
         try:
             import geoip2.database  # type: ignore
-
-            # Use the same DB path as nginx L7 (city.mmdb)
-            db_path = "/usr/local/openresty/nginx/lua/geoip2/city.mmdb"
+            db_path = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
             _geoip_reader = geoip2.database.Reader(db_path)
             print(f"[API_PARSER] GeoIP2 reader initialized with DB: {db_path}")
         except Exception as e:
@@ -68,10 +66,22 @@ def _lookup_geo(ip: str) -> Tuple[str, str]:
 
     try:
         resp = _geoip_reader.city(ip)
-        country = resp.country.iso_code or resp.country.name or "-"
-        subdivision = resp.subdivisions.most_specific
-        province = subdivision.iso_code or subdivision.name or "-"
-        return country or "-", province or "-"
+
+        # Country (prefer English name)
+        country = (
+            resp.country.names.get("en")
+            if resp.country and resp.country.names
+            else None
+        ) or resp.country.iso_code or "-"
+
+        # City (prefer English name)
+        city = (
+            resp.city.names.get("en")
+            if resp.city and resp.city.names
+            else None
+        ) or "-"
+        
+        return country or "-", city or "-"
     except Exception as e:
         print(f"[API_PARSER] GeoIP2 lookup failed for ip={ip}: {e}")
         return "-", "-"
@@ -126,13 +136,13 @@ def process_command(cmd: Dict[str, str]) -> None:
             if ip and ttl > 0:
                 try:
                     blocked_at = int(time.time())
-                    country, province = _lookup_geo(ip)
+                    country, city = _lookup_geo(ip)
                     entry = {
                         "ip": ip,
                         # Use a regex that matches any URI for this IP
                         "url": ".*",
                         "country": country,
-                        "province": province,
+                        "city": city,
                         "blocked_at": str(blocked_at),
                         "ttl": ttl,
                         # Mark that this came from L4 DDoS logic

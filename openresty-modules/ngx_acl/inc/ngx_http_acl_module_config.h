@@ -10,8 +10,6 @@ char* ngx_http_acl_conf(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 
 char* ngx_http_acl_geo_database_path_conf(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 
-char* ngx_http_acl_isp_database_path_conf(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
-
 char* ngx_http_acl_shm_size(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);
 
 char* ngx_http_acl_req_shm_size(ngx_conf_t* cf, ngx_command_t* cmd, void* conf);

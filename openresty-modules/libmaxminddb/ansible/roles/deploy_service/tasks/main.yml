@@ -1,0 +1,10 @@
+- name: send libmaxminddb rpm file
+  copy:
+    src: 'rpmbuild/RPMS/{{ rpm_file_name }}'
+    dest: /tmp
+
+- name: yum install libmaxminddb
+  yum:
+    name: '/tmp/{{ rpm_file_name }}'
+    state: present
+  notify: restart_app

@@ -131,8 +131,10 @@ void MMDB_free_entry_data_list(MMDB_entry_data_list_s *const entry_data_list);
 void MMDB_close(MMDB_s *const mmdb);
 const char *gai_strerror(int errcode);
 MMDB_iso_code_result_t MMDB_get_iso_code_from_ip(MMDB_s *const mmdb, const char *ip_address);
-MMDB_iso_code_result_t  MMDB_get_province_from_ip(MMDB_s * const mmdb, const char *ip_address);
-MMDB_iso_code_result_t  MMDB_get_continent_from_ip(MMDB_s * const mmdb, const char *ip_address);
+MMDB_iso_code_result_t MMDB_get_country_from_ip(MMDB_s *const mmdb, const char *ip_address);
+MMDB_iso_code_result_t  MMDB_get_city_from_ip(MMDB_s * const mmdb, const char *ip_address);
+MMDB_iso_code_result_t  MMDB_get_continent_name_from_ip(MMDB_s * const mmdb, const char *ip_address);
+MMDB_iso_code_result_t  MMDB_get_isp_from_ip(MMDB_s * const mmdb, const char *ip_address);
 ]]
 
 -- error codes
@@ -354,13 +356,13 @@ function _M.lookup_country(ip)
     return res
   end
 
-function _M.lookup_province(ip)
+function _M.lookup_city(ip)
 
   if not initted then
       return nil, "not initialized"
   end
 
-  local result = maxm.MMDB_get_province_from_ip(mmdb,ip)
+  local result = maxm.MMDB_get_city_from_ip(mmdb,ip)
   if result.status ~= MMDB_SUCCESS then
     return nil,'lookup failed: ' .. mmdb_strerror(result.status)
   end
@@ -374,7 +376,22 @@ function _M.lookup_continent(ip)
       return nil, "not initialized"
   end
 
-  local result = maxm.MMDB_get_continent_from_ip(mmdb,ip)
+  local result = maxm.MMDB_get_continent_name_from_ip(mmdb,ip)
+  if result.status ~= MMDB_SUCCESS then
+    return nil,'lookup failed: ' .. mmdb_strerror(result.status)
+  end
+  local res = ffi_str(ffi_cast('char *', result.iso_code), result.iso_length)
+
+  return res
+end
+
+function _M.lookup_isp(ip)
+
+  if not initted then
+      return nil, "not initialized"
+  end
+
+  local result = maxm.MMDB_get_isp_from_ip(mmdb,ip)
   if result.status ~= MMDB_SUCCESS then
     return nil,'lookup failed: ' .. mmdb_strerror(result.status)
   end

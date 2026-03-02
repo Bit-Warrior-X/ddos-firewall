@@ -1,0 +1,9 @@
+- name: restart openresty
+  systemd:
+    name: openresty
+    state: restarted
+    daemon_reload: yes
+    enabled: yes
+  listen: "restart_app"
+  ignore_errors: yes
+  when: restart | default("true") == "true"

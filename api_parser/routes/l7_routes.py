@@ -32,8 +32,7 @@ _ACL_DEFAULT_STUB = """# Managed by /API/L7/acl_system_config
 # DO NOT EDIT MANUALLY — CHANGES WILL BE OVERWRITTEN
 
 # GeoIP database locations (keep/edit these paths as needed)
-acl_geo_database_path /usr/local/openresty/nginx/lua/geoip2/city.mmdb;
-acl_isp_database_path  /usr/local/openresty/nginx/lua/geoip2/isp.mmdb;
+acl_geo_database_path /usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb;
 
 """
 
@@ -678,8 +677,8 @@ def l7_update_temporaryblacklist():
         {
           "ip": "192.168.1.1",
           "url": "/api/foo",
-          "country": "US",
-          "province": "CA",
+          "country": "United States",
+          "city": "New York",
           "blocked_at": "1729876543",
           "ttl": 180,
           "trigger_rule": "intervalfreqlimit"
