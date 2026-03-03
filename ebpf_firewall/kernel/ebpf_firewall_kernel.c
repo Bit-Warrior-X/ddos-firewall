@@ -66,6 +66,15 @@ struct {
     __type(value, struct stats_config);
 } global_income_pkt_counter SEC(".maps");
 
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct traffic_stats_config);
+} global_income_pkt_traffic SEC(".maps");
+
+
 // Map: longest-prefix-match trie of CIDRs → allow/deny flag (u8)
 struct {
     __uint(type,        BPF_MAP_TYPE_LPM_TRIE);
@@ -144,21 +153,30 @@ int xdp_main(struct xdp_md *ctx) {
     struct stats_config *pkt_stats = bpf_map_lookup_elem(&global_income_pkt_counter, &key);
     if (!pkt_stats) return XDP_PASS;
 
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
+    __u64 packet_size = ctx->data_end - ctx->data;
+
     __u32 src_ip = iph->saddr;
+
+    traffic_stats->total_traffic += packet_size;
 
     // Handle TCP packets
     if (iph->protocol == IPPROTO_TCP) {
         // Calculate IP header length.
+        traffic_stats->tcp += packet_size;
         int ip_hdr_len = iph->ihl * 4;
         struct tcphdr *tcph = (void *)iph + ip_hdr_len;
         if ((void*)(tcph + 1) <= data_end) {
             // If SYN flag is set and ACK flag is not set, then it's a SYN packet.
             if (tcph->syn && !tcph->ack) {
                 __sync_fetch_and_add(&pkt_stats->syn, 1);
+                traffic_stats->syn += packet_size;
             }
             // If RST is set.
             if (tcph->rst && !tcph->ack) {
                 __sync_fetch_and_add(&pkt_stats->rst, 1);
+                traffic_stats->rst += packet_size;
             }
             // If URG is set.
             if (tcph->urg && !tcph->ack) {
@@ -175,6 +193,7 @@ int xdp_main(struct xdp_md *ctx) {
             // If ACK is set, excluding SYN, FIN, RST.
             if (tcph->ack && !tcph->syn && !tcph->fin && !tcph->rst) {
                 __sync_fetch_and_add(&pkt_stats->ack, 1);
+                traffic_stats->ack += packet_size;
             }
             // If SYN+ACK is set.
             if (tcph->syn && tcph->ack) {
@@ -192,15 +211,20 @@ int xdp_main(struct xdp_md *ctx) {
     }
     // Handle ICMP packets
     else if (iph->protocol == IPPROTO_ICMP) {
+        traffic_stats->icmp += packet_size;
         __sync_fetch_and_add(&pkt_stats->icmp, 1);
     }
     // Handle UDP packets
     else if (iph->protocol == IPPROTO_UDP) {
+        traffic_stats->udp += packet_size;
         __sync_fetch_and_add(&pkt_stats->udp, 1);
     }
     // Handle GRE packets
     else if (iph->protocol == IPPROTO_GRE) {
+        traffic_stats->gre += packet_size;
         __sync_fetch_and_add(&pkt_stats->gre, 1);
+    } else {
+        traffic_stats->other += packet_size;
     }
 
     /* Whitelist check: if source IP is in allowed_ips, bypass all other checks */
@@ -212,8 +236,10 @@ int xdp_main(struct xdp_md *ctx) {
     /* blocklist check */
     __u64 *blocked_exp = bpf_map_lookup_elem(&blocked_ips, &src_ip);
     if (blocked_exp) {
-        if (now < *blocked_exp)
+        if (now < *blocked_exp) {
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
+        }
         else {
             //bpf_printk("IP %pI4 removed from block list\n", &src_ip);
 
@@ -240,6 +266,7 @@ int xdp_main(struct xdp_md *ctx) {
             evt.srcip = src_ip;
             evt.reason = EVENT_IP_FRAG_MIDDLE_BLOCK;
             bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
     }
@@ -300,8 +327,10 @@ int xdp_main(struct xdp_md *ctx) {
     
     // If tail call fails or packet does not match above criteria,
     // then pass the packet.
-    if (!is_geo_allowed(src_ip))
+    if (!is_geo_allowed(src_ip)) {
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
+    }
 
     return XDP_PASS;
 }
@@ -347,7 +376,12 @@ SEC("xdp")
 int xdp_parse_syn(struct xdp_md *ctx) {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
+    __u64 packet_size = ctx->data_end - ctx->data;
     __u64 now = bpf_ktime_get_ns();
+
+    __u32 key = 0;
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
 
     // Parse Ethernet header.
     struct ethhdr *eth = data;
@@ -369,8 +403,7 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         return XDP_PASS;
     struct tcphdr *tcp = (void *)ip + ihl;
     
-    __u32 key = 0;
-
+    key = 0;
     volatile struct global_config *global_config_val = &global_fw_config.g_config;
 
     // Get the source IP address.
@@ -386,7 +419,7 @@ int xdp_parse_syn(struct xdp_md *ctx) {
     if (!pkt_cnt) return XDP_PASS;
     
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -422,8 +455,7 @@ int xdp_parse_syn(struct xdp_md *ctx) {
 
     volatile struct global_attack_stats * global_attack_stats_ptr = &global_fw_config.g_attack_stats;
     if (global_attack_stats_ptr->syn_attack == 0) {
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -465,7 +497,8 @@ int xdp_parse_syn(struct xdp_md *ctx) {
             evt.reason = EVENT_TCP_SYN_ATTACK_BURST_BLOCK;
             // Send the event to user space on the current CPU.
             bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
-
+            
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
 
@@ -519,6 +552,7 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         new_state.ts = now;
         new_state.seq = tcp->seq;
         bpf_map_update_elem(&syn_challenge, &src_ip, &new_state, BPF_ANY);
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
 
     } else if (cstate->stage == 1) {
@@ -601,11 +635,11 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         fixed_evt.pkt_count = fixed_stats->count;
         fixed_evt.over_fixed = 1;
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fixed_evt, sizeof(fixed_evt), 0);
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
     }
 
-    if (!is_geo_allowed(src_ip))
-        return XDP_DROP;
+    if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
@@ -647,6 +681,11 @@ int xdp_parse_ack(struct xdp_md *ctx) {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     __u64 now = bpf_ktime_get_ns();
+    __u64 packet_size = ctx->data_end - ctx->data;
+
+    __u32 key = 0;
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
 
     // Parse Ethernet header.
     struct ethhdr *eth = data;
@@ -678,14 +717,14 @@ int xdp_parse_ack(struct xdp_md *ctx) {
     //bpf_printk("%pI4:%d -----> %pI4:%d\n", &src_ip, bpf_htons(tcp->source));
 
     // Get current threshold from map
-    __u32 key = 0;
+    key = 0;
     volatile struct ack_config *config = &global_fw_config.g_ack_config;
 
     __u64 *pkt_cnt = bpf_map_lookup_elem(&global_ack_pkt_counter, &key);
     if (!pkt_cnt) return XDP_PASS;
 
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -719,8 +758,7 @@ int xdp_parse_ack(struct xdp_md *ctx) {
 
     volatile struct global_attack_stats * global_attack_stats_ptr = &global_fw_config.g_attack_stats;
     if (global_attack_stats_ptr->ack_attack == 0) {
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -731,8 +769,7 @@ int xdp_parse_ack(struct xdp_md *ctx) {
     __u8 * is_established = bpf_map_lookup_elem(&tcp_established_map, &established_key);
     if (is_established) {
         //bpf_printk("Established source IP %pI4: port is  = %d\n", &src_ip, tcp->source);
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -773,6 +810,7 @@ int xdp_parse_ack(struct xdp_md *ctx) {
                 // Send the event to user space on the current CPU.
                 bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
 
+                traffic_stats->blocked_traffic += packet_size;
                 return XDP_DROP;
             }
 
@@ -847,12 +885,11 @@ int xdp_parse_ack(struct xdp_md *ctx) {
         fixed_evt.pkt_count = fixed_stats->count;
         fixed_evt.over_fixed = 1;
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fixed_evt, sizeof(fixed_evt), 0);
-
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
     }
     
-    if (!is_geo_allowed(src_ip))
-        return XDP_DROP;
+    if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
@@ -893,6 +930,10 @@ int xdp_parse_rst(struct xdp_md *ctx) {
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     __u64 now = bpf_ktime_get_ns();
+    __u64 packet_size = ctx->data_end - ctx->data;
+    __u32 key = 0;
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
 
     // Parse Ethernet header.
     struct ethhdr *eth = data;
@@ -924,7 +965,7 @@ int xdp_parse_rst(struct xdp_md *ctx) {
     //bpf_printk("%pI4:%d -----> %pI4:%d\n", &src_ip, bpf_htons(tcp->source), &dst_ip, bpf_htons(tcp->dest));
 
     // Get current threshold from map
-    __u32 key = 0;
+    key = 0;
 
     volatile struct rst_config *config = &global_fw_config.g_rst_config;
 
@@ -932,7 +973,7 @@ int xdp_parse_rst(struct xdp_md *ctx) {
     if (!pkt_cnt) return XDP_PASS;
     
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -966,8 +1007,7 @@ int xdp_parse_rst(struct xdp_md *ctx) {
 
     volatile struct global_attack_stats * global_attack_stats_ptr = &global_fw_config.g_attack_stats;
     if (global_attack_stats_ptr->rst_attack == 0) {
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1009,6 +1049,7 @@ int xdp_parse_rst(struct xdp_md *ctx) {
             // Send the event to user space on the current CPU.
             bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
 
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
 
@@ -1082,11 +1123,10 @@ int xdp_parse_rst(struct xdp_md *ctx) {
         fixed_evt.pkt_count = fixed_stats->count;
         fixed_evt.over_fixed = 1;
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fixed_evt, sizeof(fixed_evt), 0);
-
+        traffic_stats->blocked_traffic += packet_size;  
         return XDP_DROP;
     }
-    if (!is_geo_allowed(src_ip))
-        return XDP_DROP;
+    if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
@@ -1129,6 +1169,11 @@ int xdp_parse_icmp(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     __u64 now = bpf_ktime_get_ns();
 
+    __u64 packet_size = ctx->data_end - ctx->data;
+    __u32 key = 0;
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
+
     // Parse Ethernet header.
     struct ethhdr *eth = data;
     if ((void*)(eth + 1) > data_end)
@@ -1149,7 +1194,7 @@ int xdp_parse_icmp(struct xdp_md *ctx) {
         return XDP_PASS;
     //struct icmphdr *icmp = (void *)ip + ihl;
 
-    __u32 key = 0;
+    key = 0;
 
     volatile struct global_config *global_config_val = &global_fw_config.g_config;
     
@@ -1167,7 +1212,7 @@ int xdp_parse_icmp(struct xdp_md *ctx) {
     if (!pkt_cnt) return XDP_PASS;
     
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1201,8 +1246,7 @@ int xdp_parse_icmp(struct xdp_md *ctx) {
 
     volatile struct global_attack_stats * global_attack_stats_ptr = &global_fw_config.g_attack_stats;
     if (global_attack_stats_ptr->icmp_attack == 0) {
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}  
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1244,7 +1288,7 @@ int xdp_parse_icmp(struct xdp_md *ctx) {
             evt.reason = EVENT_ICMP_ATTACK_BURST_BLOCK;
             // Send the event to user space on the current CPU.
             bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
-
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
 
@@ -1319,10 +1363,10 @@ int xdp_parse_icmp(struct xdp_md *ctx) {
         fixed_evt.over_fixed = 1;
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fixed_evt, sizeof(fixed_evt), 0);
 
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
     }
-    if (!is_geo_allowed(src_ip))
-        return XDP_DROP;
+    if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
@@ -1364,6 +1408,11 @@ int xdp_parse_udp(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     __u64 now = bpf_ktime_get_ns();
 
+    __u64 packet_size = ctx->data_end - ctx->data;
+    __u32 key = 0;
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
+
     // Parse Ethernet header.
     struct ethhdr *eth = data;
     if ((void*)(eth + 1) > data_end)
@@ -1386,7 +1435,7 @@ int xdp_parse_udp(struct xdp_md *ctx) {
         return XDP_PASS;
     //struct udphdr *udp = (void *)ip + ihl;
     
-    __u32 key = 0;
+    key = 0;
     volatile struct global_config *global_config_val = &global_fw_config.g_config;
     
     // Get the source IP address.
@@ -1402,7 +1451,7 @@ int xdp_parse_udp(struct xdp_md *ctx) {
     if (!pkt_cnt) return XDP_PASS;
         
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1435,8 +1484,7 @@ int xdp_parse_udp(struct xdp_md *ctx) {
 
     volatile struct global_attack_stats * global_attack_stats_ptr = &global_fw_config.g_attack_stats;
     if (global_attack_stats_ptr->udp_attack == 0) {
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1478,6 +1526,7 @@ int xdp_parse_udp(struct xdp_md *ctx) {
             // Send the event to user space on the current CPU.
             bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
 
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
 
@@ -1551,11 +1600,10 @@ int xdp_parse_udp(struct xdp_md *ctx) {
         fixed_evt.pkt_count = fixed_stats->count;
         fixed_evt.over_fixed = 1;
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fixed_evt, sizeof(fixed_evt), 0);
-        
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
     }
-    if (!is_geo_allowed(src_ip))
-        return XDP_DROP;
+    if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
@@ -1596,6 +1644,11 @@ int xdp_parse_gre(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     __u64 now = bpf_ktime_get_ns();
 
+    __u64 packet_size = ctx->data_end - ctx->data;
+    __u32 key = 0;
+    struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
+    if (!traffic_stats) return XDP_PASS;
+
     struct ethhdr *eth = data;
     if ((void*)(eth + 1) > data_end)
         return XDP_PASS;
@@ -1608,7 +1661,7 @@ int xdp_parse_gre(struct xdp_md *ctx) {
     if (ip->protocol != IPPROTO_GRE)
         return XDP_PASS;
 
-    __u32 key = 0;
+    key = 0;
 
     volatile struct global_config *global_config_val = &global_fw_config.g_config;
 
@@ -1622,7 +1675,7 @@ int xdp_parse_gre(struct xdp_md *ctx) {
     if (!pkt_cnt) return XDP_PASS;
     
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1655,8 +1708,7 @@ int xdp_parse_gre(struct xdp_md *ctx) {
 
     volatile struct global_attack_stats * global_attack_stats_ptr = &global_fw_config.g_attack_stats;
     if (global_attack_stats_ptr->gre_attack == 0) {
-        if (!is_geo_allowed(src_ip))
-            return XDP_DROP;
+        if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -1698,7 +1750,8 @@ int xdp_parse_gre(struct xdp_md *ctx) {
             evt.reason = EVENT_GRE_ATTACK_BURST_BLOCK;
             // Send the event to user space on the current CPU.
             bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
-
+            
+            traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
 
@@ -1773,11 +1826,11 @@ int xdp_parse_gre(struct xdp_md *ctx) {
         fixed_evt.over_fixed = 1;
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fixed_evt, sizeof(fixed_evt), 0);
         
+        traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
     }
 
-    if (!is_geo_allowed(src_ip))
-        return XDP_DROP;
+    if (!is_geo_allowed(src_ip)) {traffic_stats->blocked_traffic += packet_size; return XDP_DROP;}
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }

@@ -33,6 +33,9 @@ struct stats_config global_receive_stats = {0};
 struct stats_config global_passed_stats = {0};
 struct fixed_ip_pkt_stats global_max_ip_pkt_stats = {0};
 
+// one day is 1440 minutes
+struct traffic_stats_config global_traffic_stats[1441] = {0};
+
 int exiting = 0;
 char **process_argv = NULL;
 struct bpf_object *obj;
@@ -51,6 +54,88 @@ static inline __u64 now_ns(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (__u64)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
+
+static void * global_traffic_stats_check_worker(void * arg) {
+    size_t vsize = sizeof(__u64) * n_cpus;
+    __u64 *values = calloc(n_cpus, sizeof(__u64));
+
+    if (!values)
+        goto cleanup; 
+
+    struct bpf_object *obj = (struct bpf_object*)arg;
+    int map_fd = bpf_object__find_map_fd_by_name(obj, "global_income_pkt_traffic");
+    if (map_fd < 0) {
+        LOG_E( "Failed to find global_income_pkt_traffic eBPF map\n");
+        goto cleanup;
+    }
+
+    int index = 0;
+    while (!exiting) {
+        sleep(60);
+	    struct bpf_map_info info = {};
+	    __u32 info_len = sizeof(info);
+
+	    if (bpf_obj_get_info_by_fd(map_fd, &info, &info_len)) {
+	        LOG_E("bpf_obj_get_info_by_fd %s\n", strerror(errno));
+	        goto cleanup;
+	    }
+
+	    size_t elem_sz = info.value_size;
+
+	    void *raw = calloc(n_cpus, elem_sz);
+	    if (!raw) {
+	        goto cleanup;
+	    }
+
+	    __u32 key = 0;
+	    struct traffic_stats_config aggregate = {0};
+	    if (bpf_map_lookup_elem(map_fd, &key, raw)) {
+	        LOG_E( "bpf_map_lookup_elem");
+	        free(raw);
+	        goto cleanup;
+	    }
+
+	     for (int cpu = 0; cpu < n_cpus; cpu++) {
+	        struct traffic_stats_config *per_cpu_stats =
+	            (struct traffic_stats_config *)((char *)raw + cpu * elem_sz);
+	        aggregate.total_traffic += per_cpu_stats->total_traffic;
+	        aggregate.allowed_traffic += per_cpu_stats->allowed_traffic;
+	        aggregate.blocked_traffic += per_cpu_stats->blocked_traffic;
+
+	        aggregate.syn += per_cpu_stats->syn;
+	        aggregate.ack += per_cpu_stats->ack;
+	        aggregate.rst += per_cpu_stats->rst;
+	        aggregate.tcp += per_cpu_stats->tcp;
+	        aggregate.udp += per_cpu_stats->udp;
+	        aggregate.icmp += per_cpu_stats->icmp;
+	        aggregate.gre += per_cpu_stats->gre;
+	        aggregate.other += per_cpu_stats->other;
+	    }
+
+        aggregate.allowed_traffic = aggregate.total_traffic - aggregate.blocked_traffic;
+        LOG_T("TRAFFIC: TOTAL:%llu ALLOWED:%llu BLOCKED:%llu SYN:%llu ACK:%llu RST:%llu TCP:%llu UDP:%llu ICMP:%llu GRE:%llu OTHER:%llu\n",
+            aggregate.total_traffic, aggregate.allowed_traffic, aggregate.blocked_traffic,
+            aggregate.syn, aggregate.ack, aggregate.rst,
+            aggregate.tcp, aggregate.udp, aggregate.icmp, aggregate.gre, aggregate.other);
+    
+        memcpy(&global_traffic_stats[index], &aggregate, sizeof (struct traffic_stats_config));
+        global_traffic_stats[index].timestamp = time(NULL);
+        index++;
+        index = (index % 1440);
+
+	    memset(raw, 0, n_cpus * elem_sz);
+	    if (bpf_map_update_elem(map_fd, &key, raw, 0)) {
+	        LOG_E( "bpf_map_update_elem");
+	        free(raw);
+	        goto cleanup;
+	    }
+	    free(raw);
+	}
+cleanup:
+    if (values) free (values);
+    return NULL;
+}
+
 
 static void * global_attack_check_worker(void * arg) {
 
@@ -1099,6 +1184,12 @@ int main(int argc, char **argv) {
     pthread_t global_attack_ch_thr, blocked_ips_duration_thr;
     if (pthread_create(&global_attack_ch_thr, NULL, global_attack_check_worker, obj) != 0) {
         LOG_E("pthread_create for global_attack_ch_thr %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    pthread_t global_traffic_stats_check_thr;
+    if (pthread_create(&global_traffic_stats_check_thr, NULL, global_traffic_stats_check_worker, obj) != 0) {
+        LOG_E("pthread_create for global_traffic_stats_check_thr %s\n", strerror(errno));
         goto cleanup;
     }
 

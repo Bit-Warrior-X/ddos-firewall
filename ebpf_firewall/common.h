@@ -304,6 +304,22 @@ struct stats_config {
     __u64 gre;
 };
 
+struct traffic_stats_config {
+    __u64 timestamp;
+    __u64 total_traffic;
+    __u64 allowed_traffic;
+    __u64 blocked_traffic;
+
+    __u64 syn;
+    __u64 ack;
+    __u64 rst;
+
+    __u64 tcp;
+    __u64 udp;
+    __u64 icmp;
+    __u64 gre;
+    __u64 other;
+};
 
 struct fixed_ip_pkt_stats {
     __u64 normal_syn;

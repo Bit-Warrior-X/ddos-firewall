@@ -17,6 +17,8 @@ extern int exiting;
 extern struct stats_config global_receive_stats;
 extern struct stats_config global_passed_stats;
 extern struct fixed_ip_pkt_stats global_max_ip_pkt_stats;
+extern struct traffic_stats_config global_traffic_stats[1441];
+
 #define BUF_SZ    1024
 #if 0
 static void reply(int cfd, const char *fmt, ...) {
@@ -401,6 +403,67 @@ static void handle_getmachineid(int cfd, char **argv, int argc) {
     }
 }
 
+static void handle_traffic_timestamps(int cfd, char **argv, int argc) {
+    if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
+
+    char data[1000000] = {0};
+    int index = 0;
+    for (index = 1439 ; index >= 0 ; index --) {
+        if (global_traffic_stats[index].timestamp == 0) break;
+    }
+    if (index != 1439) {
+        for (index = 0; index < 1440; index++) {
+            if (global_traffic_stats[index].timestamp == 0) break;
+            char temp[256] = {0};
+            snprintf(temp, 256, "%llu,", global_traffic_stats[index].timestamp);
+            strcat(data, temp);
+        }
+        reply(cfd, "ok\n%s\n", data);
+    }
+    else {
+        for (index = 0; index < 1439; index++) {
+            if (global_traffic_stats[index].timestamp > global_traffic_stats[index + 1].timestamp) {
+                break;
+            }
+        }
+        for (int i = index + 1; i < 1440; i++) {
+            if (global_traffic_stats[i].timestamp == 0) continue;
+            char temp[256] = {0};
+            snprintf(temp, 256, "%llu,", global_traffic_stats[i].timestamp);
+            strcat(data, temp);
+        }
+        for (int i = 0; i <= index; i++) {
+            if (global_traffic_stats[i].timestamp == 0) continue;
+            char temp[256] = {0};
+            snprintf(temp, 256, "%llu,", global_traffic_stats[i].timestamp);
+            strcat(data, temp);
+        }
+        reply(cfd, "ok\n%s\n", data);
+    }
+}
+
+static void handle_traffic_stats(int cfd, char **argv, int argc) {
+    if (argc != 2) { reply(cfd, "failed\nUsage failed\n"); return; }
+    int ret = -1;
+    int timestamp = atoi(argv[1]);
+    int index = 0;
+    for (int i = 0; i < 1440; i++) {
+        if (global_traffic_stats[i].timestamp == timestamp) {
+            ret = 0;
+            index = i;
+            break;
+        }
+    }
+    if (ret == -1) {
+        reply(cfd, "failed\nNo data found for timestamp %d\n", timestamp);
+    } else {    
+        reply(cfd, "ok\ntotal:%llu,allow:%llu,block:%llu,syn:%llu,ack:%llu,rst:%llu,tcp:%llu,udp:%llu,icmp:%llu,gre:%llu,other:%llu\n",
+            global_traffic_stats[index].total_traffic, global_traffic_stats[index].allowed_traffic, global_traffic_stats[index].blocked_traffic,
+            global_traffic_stats[index].syn, global_traffic_stats[index].ack, global_traffic_stats[index].rst, global_traffic_stats[index].tcp,
+            global_traffic_stats[index].udp, global_traffic_stats[index].icmp, global_traffic_stats[index].gre, global_traffic_stats[index].other);
+    }
+}
+
 
 /* Table‐driven dispatch */
 struct cmd_entry { const char *name; void (*fn)(int,char**,int); };
@@ -428,7 +491,9 @@ static const struct cmd_entry cmds[] = {
     {"SET_CONN_LIMIT", handle_set_conn_limit},
     {"HEALTH_CHECK", handle_health_check},
     {"GET_BLOCKLIST", handle_getblocklist},
-    {"GET_MACHINE_ID", handle_getmachineid}
+    {"GET_MACHINE_ID", handle_getmachineid},
+    {"TRAFFIC_TIMESTAMPS", handle_traffic_timestamps},
+    {"TRAFFIC_STATS", handle_traffic_stats},
 };
 
 static void dispatch(int cfd, char *line) {

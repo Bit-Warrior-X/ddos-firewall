@@ -7,5 +7,5 @@ request = function()
       math.random(0,255),
       math.random(1,255))
   wrk.headers["X-Forwarded-For"] = ip
-  return wrk.format(nil, "/api/config")
+  return wrk.format(nil, "/api")
 end

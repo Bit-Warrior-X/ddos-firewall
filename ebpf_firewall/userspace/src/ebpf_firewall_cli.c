@@ -48,7 +48,8 @@ static void usage(void) {
 "  HEALTH_CHECK : Check the health status of ebpf_firewall\n"
 "  GET_BLOCKLIST <filter_type> <filter_ip> <filter_date> : Get the filtered block list ips\n"
 "  GET_MACHINE_ID : Get machine id\n"
-
+"  TRAFFIC_TIMESTAMPS : Get all traffic timestamps\n"
+"  TRAFFIC_STATS <timestamp> : Get traffic stats for a given timestamp\n"
 , stderr);
     exit(EXIT_FAILURE);
 }
