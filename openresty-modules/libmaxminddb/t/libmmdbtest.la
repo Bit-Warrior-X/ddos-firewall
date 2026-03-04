@@ -17,7 +17,7 @@ old_library='libmmdbtest.a'
 inherited_linker_flags=''
 
 # Libraries that this one depends upon.
-dependency_libs=' /usr/local/src/libmaxminddb/src/libmaxminddb.la -lm'
+dependency_libs=' /home/ddos-firewall/openresty-modules/libmaxminddb/src/libmaxminddb.la -lm'
 
 # Names of additional weak libraries provided by this library
 weak_library_names=''
@@ -39,4 +39,4 @@ dlpreopen=''
 
 # Directory that this library needs to be installed in:
 libdir=''
-relink_command="(cd /usr/local/src/libmaxminddb/t; /bin/bash \"/usr/local/src/libmaxminddb/libtool\"  --tag CC --mode=relink gcc -O2 -g -g -fms-extensions -I../src ../src/libmaxminddb.la -o libmmdbtest.la maxminddb_test_helper.lo -lm @inst_prefix_dir@)"
+relink_command="(cd /home/ddos-firewall/openresty-modules/libmaxminddb/t; /bin/bash \"/home/ddos-firewall/openresty-modules/libmaxminddb/libtool\"  --tag CC --mode=relink gcc -O2 -g -g -fms-extensions -I../src ../src/libmaxminddb.la -o libmmdbtest.la maxminddb_test_helper.lo -lm @inst_prefix_dir@)"

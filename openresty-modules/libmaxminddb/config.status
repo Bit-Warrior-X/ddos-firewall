@@ -430,7 +430,7 @@ Copyright (C) 2021 Free Software Foundation, Inc.
 This config.status script is free software; the Free Software Foundation
 gives unlimited permission to copy, distribute and modify it."
 
-ac_pwd='/usr/local/src/libmaxminddb'
+ac_pwd='/home/ddos-firewall/openresty-modules/libmaxminddb'
 srcdir='.'
 INSTALL='/usr/bin/install -c'
 MKDIR_P='/usr/bin/mkdir -p'
@@ -849,12 +849,12 @@ S["SET_MAKE"]=""
 S["mkdir_p"]="$(MKDIR_P)"
 S["MKDIR_P"]="/usr/bin/mkdir -p"
 S["INSTALL_STRIP_PROGRAM"]="$(install_sh) -c -s"
-S["install_sh"]="${SHELL} /usr/local/src/libmaxminddb/install-sh"
-S["MAKEINFO"]="${SHELL} '/usr/local/src/libmaxminddb/missing' makeinfo"
-S["AUTOHEADER"]="${SHELL} '/usr/local/src/libmaxminddb/missing' autoheader"
-S["AUTOMAKE"]="${SHELL} '/usr/local/src/libmaxminddb/missing' automake-1.16"
-S["AUTOCONF"]="${SHELL} '/usr/local/src/libmaxminddb/missing' autoconf"
-S["ACLOCAL"]="${SHELL} '/usr/local/src/libmaxminddb/missing' aclocal-1.16"
+S["install_sh"]="${SHELL} /home/ddos-firewall/openresty-modules/libmaxminddb/install-sh"
+S["MAKEINFO"]="${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' makeinfo"
+S["AUTOHEADER"]="${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' autoheader"
+S["AUTOMAKE"]="${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' automake-1.16"
+S["AUTOCONF"]="${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' autoconf"
+S["ACLOCAL"]="${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' aclocal-1.16"
 S["VERSION"]="1.7.1"
 S["PACKAGE"]="libmaxminddb"
 S["CYGPATH_W"]="echo"

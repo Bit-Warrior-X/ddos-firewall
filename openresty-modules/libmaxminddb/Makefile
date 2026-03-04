@@ -197,7 +197,8 @@ am__define_uniq_tagged_files = \
 DIST_SUBDIRS = src bin t
 am__DIST_COMMON = $(srcdir)/Makefile.in $(srcdir)/config.h.in \
 	$(top_srcdir)/include/maxminddb_config.h.in AUTHORS README.md \
-	compile config.guess config.sub install-sh ltmain.sh missing
+	compile config.guess config.sub depcomp install-sh ltmain.sh \
+	missing
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
 distdir = $(PACKAGE)-$(VERSION)
 top_distdir = $(distdir)
@@ -242,13 +243,13 @@ distuninstallcheck_listfiles = find . -type f -print
 am__distuninstallcheck_listfiles = $(distuninstallcheck_listfiles) \
   | sed 's|^\./|$(prefix)/|' | grep -v '$(infodir)/dir$$'
 distcleancheck_listfiles = find . -type f -print
-ACLOCAL = ${SHELL} '/usr/local/src/libmaxminddb/missing' aclocal-1.16
+ACLOCAL = ${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' aclocal-1.16
 AMTAR = $${TAR-tar}
 AM_DEFAULT_VERBOSITY = 1
 AR = ar
-AUTOCONF = ${SHELL} '/usr/local/src/libmaxminddb/missing' autoconf
-AUTOHEADER = ${SHELL} '/usr/local/src/libmaxminddb/missing' autoheader
-AUTOMAKE = ${SHELL} '/usr/local/src/libmaxminddb/missing' automake-1.16
+AUTOCONF = ${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' autoconf
+AUTOHEADER = ${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' autoheader
+AUTOMAKE = ${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' automake-1.16
 AWK = gawk
 CC = gcc
 CCDEPMODE = depmode=gcc3
@@ -284,7 +285,7 @@ LIPO =
 LN_S = ln -s
 LTLIBOBJS = 
 LT_SYS_LIBRARY_PATH = 
-MAKEINFO = ${SHELL} '/usr/local/src/libmaxminddb/missing' makeinfo
+MAKEINFO = ${SHELL} '/home/ddos-firewall/openresty-modules/libmaxminddb/missing' makeinfo
 MANIFEST_TOOL = :
 MKDIR_P = /usr/bin/mkdir -p
 NM = /usr/bin/nm -B
@@ -310,10 +311,10 @@ SET_MAKE =
 SHELL = /bin/bash
 STRIP = strip
 VERSION = 1.7.1
-abs_builddir = /usr/local/src/libmaxminddb
-abs_srcdir = /usr/local/src/libmaxminddb
-abs_top_builddir = /usr/local/src/libmaxminddb
-abs_top_srcdir = /usr/local/src/libmaxminddb
+abs_builddir = /home/ddos-firewall/openresty-modules/libmaxminddb
+abs_srcdir = /home/ddos-firewall/openresty-modules/libmaxminddb
+abs_top_builddir = /home/ddos-firewall/openresty-modules/libmaxminddb
+abs_top_srcdir = /home/ddos-firewall/openresty-modules/libmaxminddb
 ac_ct_AR = ar
 ac_ct_CC = gcc
 ac_ct_DUMPBIN = 
@@ -342,7 +343,7 @@ host_vendor = pc
 htmldir = ${docdir}
 includedir = ${prefix}/include
 infodir = ${datarootdir}/info
-install_sh = ${SHELL} /usr/local/src/libmaxminddb/install-sh
+install_sh = ${SHELL} /home/ddos-firewall/openresty-modules/libmaxminddb/install-sh
 libdir = ${exec_prefix}/lib
 libexecdir = ${exec_prefix}/libexec
 localedir = ${datarootdir}/locale
