@@ -35,6 +35,8 @@ static void usage(void) {
 "  UDP <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set udp parameters.\n"
 "  GRE <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set gre parameters.\n"
 "  SET_TCP_SEG <status> : Set tcp segment status parameters.\n"
+"  SET_GEO <status> <countries> : Set geo location status parameters.\n"
+"  SET_CONN_LIMIT <status> <count> : Set tcp connection limit parameters.\n"
 "  CLEAR_FW : Clear all packet statistics. (Reset all statistics as zero).\n"
 "  STATS_FW : Display all packet information captured. (SYN, ACK, RST, PSH, FIN, URG, SYN+ACK, FIN+ACK, RST+ACK, ICMP UDP, GRE)\n"
 "  LIST_BLOCK_IP : Dump current blacklist ip. (ip expire_ns per line)\n"

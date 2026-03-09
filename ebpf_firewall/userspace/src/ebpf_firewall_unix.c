@@ -87,6 +87,10 @@ static void reply(int cfd, const char *fmt, ...)
 /* ---------- stub command handlers -------------------------------------- */
 
 static void handle_restart_fw(int cfd, char **argv, int argc) {
+    LOG_D("handle_restart_fw: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     int ret = -1;
     ret = restart_fw();
     if (ret == -1 ) {
@@ -97,6 +101,10 @@ static void handle_restart_fw(int cfd, char **argv, int argc) {
 }
 
 static void handle_reload_fw(int cfd, char **argv, int argc) {
+    LOG_D("handle_reload_fw: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     int ret = -1;
     ret = reload_fw();
     if (ret == -1 ) {
@@ -107,6 +115,10 @@ static void handle_reload_fw(int cfd, char **argv, int argc) {
 }
 
 static void handle_clear_fw(int cfd, char **argv, int argc) {
+    LOG_D("handle_clear_fw: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     int ret = -1;
     ret = clear_fw();
     if (ret == -1) {
@@ -117,6 +129,10 @@ static void handle_clear_fw(int cfd, char **argv, int argc) {
 }
 
 static void handle_stats_fw(int cfd, char **argv, int argc) {
+    LOG_D("handle_stats_fw: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     reply(cfd, "OK SYN:%llu/%llu ACK:%llu/%llu RST:%llu/%llu PSH:%llu/%llu FIN:%llu/%llu URG:%llu/%llu SYN_ACK:%llu/%llu FIN_ACK:%llu/%llu RST_ACK:%llu/%llu ICMP:%llu/%llu UDP:%llu/%llu GRE:%llu/%llu PKT_SYN:%llu/%llu PKT_ACK:%llu/%llu PKT_RST:%llu/%llu PKT_PSH:%llu/%llu PKT_FIN:%llu/%llu PKT_URG:%llu/%llu PKT_SYN_ACK:%llu/%llu PKT_FIN_ACK:%llu/%llu PKT_RST_ACK:%llu/%llu PKT_ICMP:%llu/%llu PKT_UDP:%llu/%llu PKT_GRE:%llu/%llu\n",
         global_receive_stats.syn, global_passed_stats.syn,
         global_receive_stats.ack, global_passed_stats.ack,
@@ -146,6 +162,10 @@ static void handle_stats_fw(int cfd, char **argv, int argc) {
 }
 
 static void handle_list_block_ip(int cfd, char **argv, int argc) {
+    LOG_D("handle_list_block_ip: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     int ret = -1;
     char * data = NULL;
 
@@ -160,6 +180,10 @@ static void handle_list_block_ip(int cfd, char **argv, int argc) {
 
 
 static void handle_clear_deny_ip(int cfd, char **argv, int argc) {
+    LOG_D("handle_clear_deny_ip: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 2) { reply(cfd, "ERR usage: CLEAR_BLOCK_IP <ip>\n"); return; }
     int ret = -1;
 
@@ -173,6 +197,10 @@ static void handle_clear_deny_ip(int cfd, char **argv, int argc) {
 }
 
 static void handle_clear_deny_ip_all(int cfd, char **argv, int argc) {
+    LOG_D("handle_clear_deny_ip_all: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     int ret = -1;
     ret = clear_deny_ip_all();
     if (ret == 0) {        
@@ -183,6 +211,10 @@ static void handle_clear_deny_ip_all(int cfd, char **argv, int argc) {
 }
 
 static void handle_add_block_ip(int cfd, char **argv, int argc) {
+    LOG_D("handle_add_block_ip: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc < 2 || argc > 3) {
         reply(cfd, "ERR usage: ADD_BLOCK_IP <ip> [seconds]\n"); return;
     }
@@ -211,6 +243,10 @@ static void handle_add_block_ip(int cfd, char **argv, int argc) {
 
 /* -------------------- whitelist handlers -------------------- */
 static void handle_list_allow_ip(int cfd, char **argv, int argc) {
+    LOG_D("handle_list_allow_ip: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     char *data = NULL;
     if (list_allow_ip(&data) == -1) {
         reply(cfd, "Failed! List ALLOW_IP failed\n");
@@ -221,6 +257,10 @@ static void handle_list_allow_ip(int cfd, char **argv, int argc) {
 }
 
 static void handle_clear_allow_ip(int cfd, char **argv, int argc) {
+    LOG_D("handle_clear_allow_ip: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 2) { reply(cfd, "ERR usage: CLEAR_ALLOW_IP <ip>\n"); return; }
     int ret = clear_allow_ip(argv[1]);
     if (ret == 0)
@@ -232,12 +272,20 @@ static void handle_clear_allow_ip(int cfd, char **argv, int argc) {
 }
 
 static void handle_clear_allow_ip_all(int cfd, char **argv, int argc) {
+    LOG_D("handle_clear_allow_ip_all: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     int ret = clear_allow_ip_all();
     if (ret == 0) reply(cfd, "ok\nsuccess\n");
     else reply(cfd, "failed\nError occured while clearing whitelist\n");
 }
 
 static void handle_add_allow_ip(int cfd, char **argv, int argc) {
+    LOG_D("handle_add_allow_ip: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 2) { reply(cfd, "ERR usage: ADD_ALLOW_IP <ip>\n"); return; }
     int ret = add_allow_ip(argv[1]);
 
@@ -251,6 +299,10 @@ static void handle_add_allow_ip(int cfd, char **argv, int argc) {
 
 
 static void handle_tcp_syn_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_tcp_syn_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 9) { reply(cfd, "failed\nUsage failed %d\n", argc); return; }
     int tcp_syn_valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) tcp_syn_valid = 1;
@@ -264,6 +316,10 @@ static void handle_tcp_syn_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_tcp_ack_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_tcp_ack_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -277,6 +333,10 @@ static void handle_tcp_ack_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_tcp_rst_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_tcp_rst_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -290,6 +350,10 @@ static void handle_tcp_rst_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_icmp_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_icmp_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -303,6 +367,10 @@ static void handle_icmp_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_udp_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_udp_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -316,6 +384,10 @@ static void handle_udp_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_gre_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_gre_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -329,6 +401,10 @@ static void handle_gre_set(int cfd, char **argv, int argc) {
 }
 
 static void handle_tcp_set_seg(int cfd, char **argv, int argc) {
+    LOG_D("handle_tcp_set_seg: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 2) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -342,6 +418,10 @@ static void handle_tcp_set_seg(int cfd, char **argv, int argc) {
 }
 
 static void handle_set_geo(int cfd, char **argv, int argc) {
+    LOG_D("handle_set_geo: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 3) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -355,6 +435,10 @@ static void handle_set_geo(int cfd, char **argv, int argc) {
 }
 
 static void handle_set_conn_limit(int cfd, char **argv, int argc) {
+    LOG_D("handle_set_conn_limit: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 3) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
     if (strncmp(argv[1], "on", 2) == 0) valid = 1;
@@ -373,6 +457,10 @@ static void handle_health_check(int cfd, char **argv, int argc) {
 
 //l4_cli GET_BLOCKLIST auto 1.1.2.4 '2025-8-12 12:30:29'
 static void handle_getblocklist(int cfd, char **argv, int argc) {
+    LOG_D("handle_getblocklist: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 4) { reply(cfd, "failed\nUsage failed\n"); return; }
 
     int ret = -1;
@@ -389,6 +477,10 @@ static void handle_getblocklist(int cfd, char **argv, int argc) {
 }
 
 static void handle_getmachineid(int cfd, char **argv, int argc) {
+    LOG_D("handle_getmachineid: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
 
     int ret = -1;
@@ -404,6 +496,10 @@ static void handle_getmachineid(int cfd, char **argv, int argc) {
 }
 
 static void handle_traffic_timestamps(int cfd, char **argv, int argc) {
+    LOG_D("handle_traffic_timestamps: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
 
     char data[1000000] = {0};
@@ -443,6 +539,10 @@ static void handle_traffic_timestamps(int cfd, char **argv, int argc) {
 }
 
 static void handle_traffic_stats(int cfd, char **argv, int argc) {
+    LOG_D("handle_traffic_stats: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
     if (argc != 2) { reply(cfd, "failed\nUsage failed\n"); return; }
     int ret = -1;
     int timestamp = atoi(argv[1]);
