@@ -24,12 +24,12 @@ fi
 if [[ ! -f "/usr/include/sqlite3.h" ]]; then
   missing_deps+=("libsqlite3-dev")
 fi
-#if [[ ! -f "/usr/include/bpf/libbpf.h" && ! -f "${LIBBPF_KERNEL_INCLUDE}/bpf/libbpf.h" ]]; then
-#  missing_deps+=("libbpf-dev")
-#fi
-if [[ ! -f "/usr/include/xdp/libxdp.h" ]]; then
-  missing_deps+=("libxdp-dev")
+if [[ ! -f "/usr/include/bpf/libbpf.h" && ! -f "${LIBBPF_KERNEL_INCLUDE}/bpf/libbpf.h" ]]; then
+  missing_deps+=("libbpf-dev")
 fi
+#if [[ ! -f "/usr/include/xdp/libxdp.h" ]]; then
+#  missing_deps+=("libxdp-dev")
+#fi
 if [[ ! -f "/usr/include/microhttpd.h" ]]; then
   missing_deps+=("libmicrohttpd-dev")
 fi
