@@ -2384,12 +2384,12 @@ int geo_set(int valid,
     int key = 0;   
     int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
     
-    if (countries == NULL) {
+    if (valid && countries == NULL) {
         LOG_E( "Received countries is NULL\n");
         return -1;
     }
 
-    LOG_D("Geo Set command is received (%d:%s)\n", valid, countries);
+    LOG_D("Geo Set command is received (%d:%s)\n", valid, countries == NULL ? "NULL" : countries);
     
     if (map_fd < 0) {
         LOG_E( "ERROR: finding .bss map fd: %d\n", map_fd);

@@ -24,9 +24,9 @@ fi
 if [[ ! -f "/usr/include/sqlite3.h" ]]; then
   missing_deps+=("libsqlite3-dev")
 fi
-if [[ ! -f "/usr/include/bpf/libbpf.h" && ! -f "${LIBBPF_KERNEL_INCLUDE}/bpf/libbpf.h" ]]; then
-  missing_deps+=("libbpf-dev")
-fi
+#if [[ ! -f "/usr/include/bpf/libbpf.h" && ! -f "${LIBBPF_KERNEL_INCLUDE}/bpf/libbpf.h" ]]; then
+#  missing_deps+=("libbpf-dev")
+#fi
 if [[ ! -f "/usr/include/xdp/libxdp.h" ]]; then
   missing_deps+=("libxdp-dev")
 fi
@@ -59,6 +59,8 @@ else
   echo "Skipping install: sudo is unavailable or not configured."
 fi
 
+systemctl stop ebpf-firewall
+
 mkdir -p "${PAYLOAD_L4_DIR}/bin" "${PAYLOAD_L4_DIR}/geodb"
 
 cp -f "${SCRIPT_DIR}/build/ebpf_firewall_cli" "${PAYLOAD_L4_DIR}/bin/"
@@ -71,3 +73,5 @@ cp -f "${SCRIPT_DIR}/build/ebpf_firewall_userspace" "${PAYLOAD_L4_DIR}/bin/"
 cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_L4_DIR}/"
 cp -f "${SCRIPT_DIR}/build/ebpf_firewall_kernel.o" "${PAYLOAD_L4_DIR}/"
 cp -af "${SCRIPT_DIR}/geodb/." "${PAYLOAD_L4_DIR}/geodb/"
+
+systemctl start ebpf-firewall

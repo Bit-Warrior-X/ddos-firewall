@@ -53,4 +53,5 @@ autom4te.cache/
 *.out
 *.app
 
+api_parser/config.py
 
