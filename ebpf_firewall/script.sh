@@ -7,7 +7,7 @@ PAYLOAD_L4_DIR="${ROOT_DIR}/setup/payload/l4"
 KERNEL_RELEASE="$(uname -r)"
 LIBBPF_KERNEL_INCLUDE="/usr/src/linux-headers-${KERNEL_RELEASE}/tools/bpf/resolve_btfids/libbpf/include"
 
-systemctl stop ebpf_firewall.service >/dev/null 2>&1 || true
+systemctl stop ebpf-firewall.service >/dev/null 2>&1 || true
 
 cd "${SCRIPT_DIR}"
 
@@ -58,8 +58,6 @@ if sudo -n true >/dev/null 2>&1; then
 else
   echo "Skipping install: sudo is unavailable or not configured."
 fi
-
-systemctl stop ebpf-firewall
 
 mkdir -p "${PAYLOAD_L4_DIR}/bin" "${PAYLOAD_L4_DIR}/geodb"
 
