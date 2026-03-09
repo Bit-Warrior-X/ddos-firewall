@@ -13,3 +13,44 @@ api_parser/utils/*.so
 api_parser/core/*.so
 api_parser/routes/*.so
 api_parser/core/__pycache__/
+
+# Object files
+*.o
+*.ko
+*.obj
+*.elf
+
+# Build artifacts
+objs/
+build/
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Binary files
+ebpf_firewall_cli
+ebpf_firewall_userspace
+*.bin
+
+# eBPF specific
+*.o.tmp
+*.o.cmd
+*.tmp
+*.s
+*.so.tmp
+
+# Nginx/OpenResty build files
+nginx-*/
+openresty-*/
+Makefile
+config.status
+config.log
+autom4te.cache/
+
+# Compiled output
+*.out
+*.app
+
+
