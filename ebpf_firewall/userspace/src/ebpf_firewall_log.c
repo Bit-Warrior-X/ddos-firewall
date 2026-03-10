@@ -240,8 +240,8 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
 
-    strncpy(build_message, temp, build_message_size - 1);
-    build_message[build_message_size - 1] = '\0';
+    snprintf(build_message, build_message_size, "%s", temp);
+
     return;
 }
 //Use this function carefully!!!!
