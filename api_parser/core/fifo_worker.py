@@ -9,6 +9,7 @@ from core.api_client import APIClient
 from core.redis_client import RedisClient
 import config
 from utils.auth import get_token
+import maxminddb
 
 def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     """Parses raw FIFO data into command dictionaries."""
@@ -39,56 +40,38 @@ def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
 
 _geoip_reader = None
 
-
 def _lookup_geo(ip: str) -> Tuple[str, str]:
-    """
-    Lookup (country, city) for an IP using MaxMind GeoIP2 city DB.
-
-    If geo DB or library is unavailable, returns ("-", "-") and logs once.
-    """
     global _geoip_reader
+
     if not ip:
         return "-", "-"
 
     if _geoip_reader is None:
         try:
-            import geoip2.database  # type: ignore
             db_path = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
-            _geoip_reader = geoip2.database.Reader(db_path)
-            print(f"[API_PARSER] GeoIP2 reader initialized with DB: {db_path}")
+            _geoip_reader = maxminddb.open_database(db_path)
+            print(f"[API_PARSER] MaxMind DB reader initialized with DB: {db_path}")
         except Exception as e:
-            print(f"[API_PARSER] GeoIP2 init failed, geo will be '-': {e}")
-            _geoip_reader = False  # sentinel to avoid repeated attempts
+            print(f"[API_PARSER] MaxMind DB init failed: {e}")
+            _geoip_reader = False
             return "-", "-"
 
     if _geoip_reader is False:
         return "-", "-"
 
     try:
-        resp = _geoip_reader.city(ip)
-
-        # Country (prefer English name)
-        country = (
-            resp.country.names.get("en")
-            if resp.country and resp.country.names
-            else None
-        ) or resp.country.iso_code or "-"
-
-        # City (prefer English name)
-        city = (
-            resp.city.names.get("en")
-            if resp.city and resp.city.names
-            else None
-        ) or "-"
-        
-        return country or "-", city or "-"
+        record = _geoip_reader.get(ip)
+        country = record.get("country", {}).get("iso_code", "-")
+        city = record.get("city", {}).get("names", {}).get("en", "-")
+        return country, city
     except Exception as e:
-        print(f"[API_PARSER] GeoIP2 lookup failed for ip={ip}: {e}")
+        print(f"[API_PARSER] Geo lookup failed for ip={ip}: {e}")
         return "-", "-"
 
 
 def process_command(cmd: Dict[str, str]) -> None:
     """Processes a single command dictionary."""
+    print(f"[API_PARSER] Processing command: {cmd}")
     token = get_token()
     if not token:
         print(f"[API_PARSER] No API token configured; skipping command: {cmd}")
@@ -172,12 +155,16 @@ def fifo_reader_thread():
     while True:
         try:
             with open(config.FIFO_PATH, 'r') as fifo:
+                print(f"[API_PARSER] FIFO opened")
                 buf = []
                 for line in fifo:
+                    print(f"[API_PARSER] FIFO line: {line}")
                     line = line.rstrip('\n')
                     if line == "":  # delimiter between commands
                         raw = "\n".join(buf).strip()
+                        print(f"[API_PARSER] FIFO raw: {raw}")
                         if raw:
+                            print(f"[API_PARSER] FIFO raw: {raw}")
                             for cmd in parse_fifo_message(raw):
                                 process_command(cmd)
                         buf = []
