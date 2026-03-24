@@ -457,7 +457,7 @@ int load_config(struct bpf_object *obj) {
                 LOG_I("Loaded config: %s = %s\n", key, geo_db_location_path);
                 continue;
             }
-            if (strcmp(key, "geo_allow_countries") == 0) {
+            if (strcmp(key, "geo_countries") == 0) {
                 LOG_I("Loaded config: %s = %s\n", key, str_value);
                 char * str_token = strtok(str_value, ",");
                 while (str_token != NULL) {
@@ -664,6 +664,22 @@ int load_config(struct bpf_object *obj) {
 
         if (init_geo(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_map_fd) < 0) {
             LOG_E("Failed to update geoip_trie_map");
+            return -1;
+        }
+
+        int geo_block_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_block_map");
+        if (geo_block_map_fd < 0) {
+            LOG_E( "ERROR: finding geo_block_map_fd: %d\n", geo_block_map_fd);
+            return -1;
+        }
+
+        if (clear_geoip_trie_map(geo_block_map_fd) < 0) {
+            LOG_E("Failed to clear geoip_trie_map\n");    
+        } else 
+            LOG_D("geoip_trie_block_map is cleared\n");
+
+        if (init_geo(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_block_map_fd) < 0) {
+            LOG_E("Failed to update geoip_trie_block_map");
             return -1;
         }
     }

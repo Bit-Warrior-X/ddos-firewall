@@ -35,7 +35,7 @@ static void usage(void) {
 "  UDP <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set udp parameters.\n"
 "  GRE <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set gre parameters.\n"
 "  SET_TCP_SEG <status> : Set tcp segment status parameters.\n"
-"  SET_GEO <status> <countries> : Set geo location status parameters.\n"
+"  SET_GEO <status> <countries> : Set geo location status parameters. status can be allow or block or off\n"
 "  SET_CONN_LIMIT <status> <count> : Set tcp connection limit parameters.\n"
 "  CLEAR_FW : Clear all packet statistics. (Reset all statistics as zero).\n"
 "  STATS_FW : Display all packet information captured. (SYN, ACK, RST, PSH, FIN, URG, SYN+ACK, FIN+ACK, RST+ACK, ICMP UDP, GRE)\n"
@@ -126,7 +126,7 @@ typedef struct {
     int geo_check;
     char *geo_db_ipv4_path;
     char *geo_db_location_path;
-    char *geo_allow_countries;
+    char *geo_countries;
     
     // TCP Connection Limit
     int tcp_connection_limit_check;
@@ -151,7 +151,7 @@ void free_config(FirewallConfig *config) {
     if (config->attach_mode) free(config->attach_mode);
     if (config->geo_db_ipv4_path) free(config->geo_db_ipv4_path);
     if (config->geo_db_location_path) free(config->geo_db_location_path);
-    if (config->geo_allow_countries) free(config->geo_allow_countries);
+    if (config->geo_countries) free(config->geo_countries);
 }
 
 int parse_config(const char *filename, FirewallConfig *config) {
@@ -350,9 +350,9 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->geo_db_ipv4_path = strdup(value);
             } else if (strcmp(key, "geo_db_location_path") == 0) {
                 config->geo_db_location_path = strdup(value);
-            } else if (strcmp(key, "geo_allow_countries") == 0) {
-                config->geo_allow_countries = strdup(value);
-            }
+            } else if (strcmp(key, "geo_countries") == 0) {
+                config->geo_countries = strdup(value);
+            }   
         }
         else if (strcmp(current_section, "TCP_CONN") == 0) {
             if (strcmp(key, "tcp_connection_limit_check") == 0) {
@@ -461,7 +461,7 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "geo_check = %d\n", config->geo_check);
     fprintf(file, "geo_db_ipv4_path = %s\n", config->geo_db_ipv4_path);
     fprintf(file, "geo_db_location_path = %s\n", config->geo_db_location_path);
-    fprintf(file, "geo_allow_countries = %s\n", config->geo_allow_countries);
+    fprintf(file, "geo_countries = %s\n", config->geo_countries);
     
     // Write TCP Connection Limit
     fprintf(file, "\n%s\n", config->tcp_conn_comment);
@@ -716,11 +716,20 @@ int main(int argc, char *argv[]) {
         if (argc != 4) usage();
 
         int valid = 0;
-        if (strncmp(argv[2], "on", 2) == 0) valid = 1;
+        if (strncmp(argv[2], "allow", 5) == 0) valid = 1;
+        else if (strncmp(argv[2], "block", 5) == 0) valid = 2;
         else valid = 0;
+        if (valid == 1) {
+            if (config.geo_countries) free (config.geo_countries);
+            config.geo_countries = strdup(argv[3]);
+        } else if (valid == 2) {
+            if (config.geo_countries) free (config.geo_countries);
+            config.geo_countries = strdup(argv[3]);
+        } else {
+            if (config.geo_countries) free (config.geo_countries);
+            config.geo_countries = NULL;
+        }
         config.geo_check = valid;
-        if (config.geo_allow_countries) free (config.geo_allow_countries);
-        config.geo_allow_countries = strdup(argv[3]);
         
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");

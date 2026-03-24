@@ -68,7 +68,7 @@ else
   echo "Prometheus exporter binary not built; skipping copy."
 fi
 cp -f "${SCRIPT_DIR}/build/ebpf_firewall_userspace" "${PAYLOAD_L4_DIR}/bin/"
-#cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_L4_DIR}/"
+cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_L4_DIR}/"
 cp -f "${SCRIPT_DIR}/build/ebpf_firewall_kernel.o" "${PAYLOAD_L4_DIR}/"
 cp -af "${SCRIPT_DIR}/geodb/." "${PAYLOAD_L4_DIR}/geodb/"
 

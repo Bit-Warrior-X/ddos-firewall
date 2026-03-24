@@ -84,6 +84,15 @@ struct {
     __type(value,       __u8);
 } geoip_trie_map SEC(".maps");
 
+// Map: longest-prefix-match trie of CIDRs → allow/deny flag (u8)
+struct {
+    __uint(type,        BPF_MAP_TYPE_LPM_TRIE);
+    __uint(max_entries, 700000);               // tweak if you load more CIDRs
+    __uint(map_flags,   BPF_F_NO_PREALLOC);
+    __type(key,         struct lpm_key);
+    __type(value,       __u8);
+} geoip_trie_block_map SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 100000);
@@ -122,8 +131,16 @@ static __always_inline __u8 is_geo_allowed(__u32 ip) {
         .prefixlen = 32,
         .ip        = ip,
     };
-    __u8 *allowed = bpf_map_lookup_elem(&geoip_trie_map, &key);
-    return (allowed && *allowed != 0);
+
+    if (geo_config_val->check == 1) {
+        __u8 *allowed = bpf_map_lookup_elem(&geoip_trie_map, &key);
+        return (allowed && *allowed != 0);
+    }
+    else {
+        __u8 *blocked = bpf_map_lookup_elem(&geoip_trie_block_map, &key);
+        if (!blocked) return 1;
+        else return *blocked == 0;
+    }
 }
 
 /*--------------------------------------------------------------------------------------------------*/

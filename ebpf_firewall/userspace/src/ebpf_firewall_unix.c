@@ -424,10 +424,11 @@ static void handle_set_geo(int cfd, char **argv, int argc) {
     }
     if (argc != 2 && argc != 3) { reply(cfd, "failed\nUsage failed\n"); return; }
     int valid = 0;
-    if (strncmp(argv[1], "on", 2) == 0) valid = 1;
+    if (strncmp(argv[1], "allow", 5) == 0) valid = 1;
+    else if (strncmp(argv[1], "block", 5) == 0) valid = 2;
     else valid = 0;
 
-    int ret = geo_set(valid, argc == 3 ? argv[2] : NULL);
+    int ret = geo_set(valid, argv[2]);
     if (ret == 0)
         reply(cfd, "ok\nsuccess\n");
     else

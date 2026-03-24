@@ -1439,7 +1439,7 @@ int clear_geoip_trie_map(int map_fd) {
         memcpy(lookup_key, next_key, sizeof(lookup_key));
     }
 
-    LOG_D("Successfully cleared geoip_trie_map\n");
+    LOG_D("Successfully done clear_geoip_trie_map\n");
     return 0;
 }
 
@@ -2405,11 +2405,23 @@ int geo_set(int valid,
     
 
     if (global_fw_config.g_geo_config.check) {
-        int geo_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_map");
-        if (geo_map_fd < 0) {
-            LOG_E( "ERROR: finding geo_map_fd: %d\n", geo_map_fd);
-            return -1;
+        int geo_map_fd = -1;
+        if (global_fw_config.g_geo_config.check == 1) {
+            LOG_D("Clearing geoip_trie_map\n");
+            geo_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_map");
+            if (geo_map_fd < 0) {
+                LOG_E( "ERROR: finding geo_map_fd: %d\n", geo_map_fd);
+                return -1;
+            }
+        } else {
+            LOG_D("Clearing geoip_trie_block_map\n");
+            geo_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_block_map");
+            if (geo_map_fd < 0) {
+                LOG_E( "ERROR: finding geo_block_map_fd: %d\n", geo_map_fd);
+                return -1;
+            }
         }
+        
 
         if (clear_geoip_trie_map(geo_map_fd) < 0) {
             LOG_E("Failed to clear geoip_trie_map\n");    

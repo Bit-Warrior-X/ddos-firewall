@@ -99,13 +99,13 @@ def _load_geo_name_map(location_path):
     _GEO_NAME_TO_ISO_CACHE[location_path] = mapping
     return mapping
 
-def _normalize_geo_allow(geo_allow_value, location_path):
-    if isinstance(geo_allow_value, str):
-        items = [item.strip() for item in geo_allow_value.split(",") if item.strip()]
-    elif isinstance(geo_allow_value, list):
-        items = [str(item).strip() for item in geo_allow_value if str(item).strip()]
+def _normalize_geo(geo_value, location_path):
+    if isinstance(geo_value, str):
+        items = [item.strip() for item in geo_value.split(",") if item.strip()]
+    elif isinstance(geo_value, list):
+        items = [str(item).strip() for item in geo_value if str(item).strip()]
     else:
-        raise ValueError("geoAllowCountries must be a list or string")
+        raise ValueError("geo_value must be a list or string")
 
     if not items:
         return "", []
@@ -462,7 +462,7 @@ def tcp_geo():
         config_ok, current_config = _read_firewall_config()
         if not config_ok:
             return jsonify({"status": "error", "message": current_config}), 500
-        geo_allow, unknown_geo = _normalize_geo_allow(
+        geo_value, unknown_geo = _normalize_geo(
             data['geo'],
             current_config.get("geo_db_location_path")
         )
@@ -471,7 +471,7 @@ def tcp_geo():
                 "status": "error",
                 "message": f"Unknown country names: {', '.join(unknown_geo)}"
             }), 400
-        command_args.extend([geo_allow])
+        command_args.extend([geo_value])
     
     result = execute_cli_command(command_args)
     
@@ -642,7 +642,7 @@ def l4_firewall_data():
         "greValid", "greThreshold", "greBurstPkt", "greBurstCountPerSec",
         "greFixedThreshold", "greFixedCheckDuration", "greProtectionDuration",
         "tcpSegCheck", "geoCheck", "geoDbIpv4Path", "geoDbLocationPath",
-        "geoAllowCountries", "tcpConnectionLimitCheck", "tcpConnectionLimitCnt",
+        "geoAllowCountries", "geoCountriesBlockMode", "tcpConnectionLimitCheck", "tcpConnectionLimitCnt",
     ]
 
     missing_fields = [field for field in required_fields if field not in data]
@@ -653,7 +653,7 @@ def l4_firewall_data():
         }), 400
 
     try:
-        geo_allow, unknown_geo = _normalize_geo_allow(
+        geo_value, unknown_geo = _normalize_geo(
             data["geoAllowCountries"],
             data["geoDbLocationPath"]
         )
@@ -712,9 +712,10 @@ def l4_firewall_data():
             "gre_protection_duration": int(data["greProtectionDuration"]),
             "tcp_seg_check": _normalize_bool_int(data["tcpSegCheck"]),
             "geo_check": _normalize_bool_int(data["geoCheck"]),
+            "geo_countries_block_mode": _normalize_bool_int(data["geoCountriesBlockMode"]),
             "geo_db_ipv4_path": data["geoDbIpv4Path"],
             "geo_db_location_path": data["geoDbLocationPath"],
-            "geo_allow_countries": geo_allow,
+            "geo_countries": geo_value,
             "tcp_connection_limit_check": _normalize_bool_int(data["tcpConnectionLimitCheck"]),
             "tcp_connection_limit_cnt": int(data["tcpConnectionLimitCnt"]),
         }
@@ -746,7 +747,7 @@ def l4_firewall_data():
     gre_changed = any(key.startswith("gre_") for key in changed_updates)
     tcp_seg_changed = "tcp_seg_check" in changed_updates
     geo_runtime_changed = any(
-        key in changed_updates for key in {"geo_check", "geo_allow_countries"}
+        key in changed_updates for key in {"geo_check", "geo_countries", "geo_countries_block_mode"}
     )
     conn_limit_changed = any(
         key in changed_updates for key in {"tcp_connection_limit_check", "tcp_connection_limit_cnt"}
@@ -826,9 +827,19 @@ def l4_firewall_data():
             ["l4_firewall_cli", "SET_TCP_SEG", _normalize_status(data["tcpSegCheck"])]
         )
     if geo_runtime_changed:
-        results["tcp_geo"] = execute_cli_command(
-            ["l4_firewall_cli", "SET_GEO", _normalize_status(data["geoCheck"]), geo_allow]
-        )
+        if _normalize_status(data["geoCheck"]) == "on":     # geo check is on
+            if _normalize_status(data["geoCountriesBlockMode"]) == "on": # geo countries block mode is on
+                results["tcp_geo"] = execute_cli_command(
+                    ["l4_firewall_cli", "SET_GEO", "block", geo_value]
+                )
+            else: # geo countries block mode is off
+                results["tcp_geo"] = execute_cli_command(
+                    ["l4_firewall_cli", "SET_GEO", "allow", geo_value]
+                )
+        else: # geo check is off
+            results["tcp_geo"] = execute_cli_command(
+                ["l4_firewall_cli", "SET_GEO", "off", ""]
+            )
     if conn_limit_changed:
         results["tcp_connection_limit"] = execute_cli_command(
             ["l4_firewall_cli", "SET_CONN_LIMIT", _normalize_status(data["tcpConnectionLimitCheck"]),

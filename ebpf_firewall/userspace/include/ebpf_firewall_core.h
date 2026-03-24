@@ -3,6 +3,7 @@
 
 int clear_batch_map(int map_fd);
 int clear_geoip_trie_map(int map_fd);
+int clear_geoip_trie_block_map(int map_fd);
 int restart_fw();
 int reload_fw();
 int clear_fw();
