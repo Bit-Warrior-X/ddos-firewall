@@ -17,6 +17,8 @@
 #include <fcntl.h>
 #include <sqlite3.h>
 #include <stdarg.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 extern char token[128];             // Token used for expiration check
 extern char ifname[IFNAMSIZ];       // Network interface name
@@ -29,6 +31,61 @@ extern char geo_db_location_path[512]; // Geo location code database path
 
 extern struct global_firewall_config global_fw_config;
 
+/* PERCPU map ABI: each CPU slot is round_up(value_size, 8) bytes; count CPUs via libbpf. */
+static inline size_t bpf_percpu_stride(__u32 value_size)
+{
+    return (size_t)(((unsigned)value_size + 7U) & ~7U);
+}
+
+static int bpf_percpu_nr_cpus(void)
+{
+    int n = libbpf_num_possible_cpus();
+    return (n > 0) ? n : n_cpus;
+}
+
+static void stats_config_sum_percpu(const void *raw, size_t stride, int nr,
+                                    struct stats_config *sum)
+{
+    memset(sum, 0, sizeof(*sum));
+    for (int cpu = 0; cpu < nr; cpu++) {
+        const struct stats_config *p =
+            (const struct stats_config *)((const char *)raw + cpu * stride);
+        sum->syn += p->syn;
+        sum->ack += p->ack;
+        sum->rst += p->rst;
+        sum->fin += p->fin;
+        sum->psh += p->psh;
+        sum->urg += p->urg;
+        sum->syn_ack += p->syn_ack;
+        sum->fin_ack += p->fin_ack;
+        sum->rst_ack += p->rst_ack;
+        sum->icmp += p->icmp;
+        sum->udp += p->udp;
+        sum->gre += p->gre;
+    }
+}
+
+static void traffic_stats_config_sum_percpu(const void *raw, size_t stride, int nr,
+                                           struct traffic_stats_config *sum)
+{
+    memset(sum, 0, sizeof(*sum));
+    for (int cpu = 0; cpu < nr; cpu++) {
+        const struct traffic_stats_config *p =
+            (const struct traffic_stats_config *)((const char *)raw + cpu * stride);
+        sum->total_traffic += p->total_traffic;
+        sum->allowed_traffic += p->allowed_traffic;
+        sum->blocked_traffic += p->blocked_traffic;
+        sum->syn += p->syn;
+        sum->ack += p->ack;
+        sum->rst += p->rst;
+        sum->tcp += p->tcp;
+        sum->udp += p->udp;
+        sum->icmp += p->icmp;
+        sum->gre += p->gre;
+        sum->other += p->other;
+    }
+}
+
 struct stats_config global_receive_stats = {0};
 struct stats_config global_passed_stats = {0};
 struct fixed_ip_pkt_stats global_max_ip_pkt_stats = {0};
@@ -40,8 +97,82 @@ int exiting = 0;
 char **process_argv = NULL;
 struct bpf_object *obj;
 
+#define FIFO_MSG_QUEUE_CAPACITY 16384
+static char *fifo_msg_queue[FIFO_MSG_QUEUE_CAPACITY];
+static int fifo_q_head = 0;
+static int fifo_q_tail = 0;
+static int fifo_q_size = 0;
+static int fifo_q_dropped = 0;
+static pthread_mutex_t fifo_q_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t fifo_q_cv = PTHREAD_COND_INITIALIZER;
+static pthread_once_t fifo_sender_once = PTHREAD_ONCE_INIT;
+static pthread_t fifo_sender_thr;
+static int api_parser_sock_fd = -1;
+static struct sockaddr_un api_parser_sock_addr;
+
 /* Forward declaration for startup IP sync helper */
 static void load_initial_ip_lists_from_sqlite(void);
+
+static int send_message_to_api_parser_direct(const char *message);
+
+static void * fifo_sender_worker(void *arg)
+{
+    (void)arg;
+
+    while (!exiting) {
+        char *msg = NULL;
+
+        pthread_mutex_lock(&fifo_q_mutex);
+        while (!exiting && fifo_q_size == 0) {
+            pthread_cond_wait(&fifo_q_cv, &fifo_q_mutex);
+        }
+
+        if (fifo_q_size > 0) {
+            msg = fifo_msg_queue[fifo_q_head];
+            fifo_msg_queue[fifo_q_head] = NULL;
+            fifo_q_head = (fifo_q_head + 1) % FIFO_MSG_QUEUE_CAPACITY;
+            fifo_q_size--;
+        }
+        pthread_mutex_unlock(&fifo_q_mutex);
+
+        if (!msg) {
+            continue;
+        }
+
+        (void)send_message_to_api_parser_direct(msg);
+        free(msg);
+    }
+
+    return NULL;
+}
+
+static void init_fifo_sender_worker_once(void)
+{
+    int sndbuf_bytes = 4 * 1024 * 1024;
+
+    memset(&api_parser_sock_addr, 0, sizeof(api_parser_sock_addr));
+    api_parser_sock_addr.sun_family = AF_UNIX;
+    strncpy(api_parser_sock_addr.sun_path, API_PARSER_UNIX_DGRAM_PATH,
+            sizeof(api_parser_sock_addr.sun_path) - 1);
+
+    /*
+     * Use blocking mode in dedicated sender thread so we naturally apply
+     * backpressure instead of busy-failing with EAGAIN under burst traffic.
+     */
+    api_parser_sock_fd = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (api_parser_sock_fd < 0) {
+        LOG_E("Failed to create AF_UNIX DGRAM socket: %s\n", strerror(errno));
+    }
+    if (api_parser_sock_fd >= 0 &&
+        setsockopt(api_parser_sock_fd, SOL_SOCKET, SO_SNDBUF,
+                   &sndbuf_bytes, sizeof(sndbuf_bytes)) != 0) {
+        LOG_W("Failed to set AF_UNIX DGRAM SO_SNDBUF: %s\n", strerror(errno));
+    }
+
+    if (pthread_create(&fifo_sender_thr, NULL, fifo_sender_worker, NULL) != 0) {
+        LOG_E("pthread_create for fifo_sender_thr %s\n", strerror(errno));
+    }
+}
 
 static void sig_handler(int signo)
 {
@@ -56,17 +187,11 @@ static inline __u64 now_ns(void)
 }
 
 static void * global_traffic_stats_check_worker(void * arg) {
-    size_t vsize = sizeof(__u64) * n_cpus;
-    __u64 *values = calloc(n_cpus, sizeof(__u64));
-
-    if (!values)
-        goto cleanup; 
-
     struct bpf_object *obj = (struct bpf_object*)arg;
     int map_fd = bpf_object__find_map_fd_by_name(obj, "global_income_pkt_traffic");
     if (map_fd < 0) {
         LOG_E( "Failed to find global_income_pkt_traffic eBPF map\n");
-        goto cleanup;
+        return NULL;
     }
 
     int index = 0;
@@ -80,9 +205,11 @@ static void * global_traffic_stats_check_worker(void * arg) {
 	        goto cleanup;
 	    }
 
-	    size_t elem_sz = info.value_size;
+	    int nr = bpf_percpu_nr_cpus();
+	    size_t stride = bpf_percpu_stride(info.value_size);
+	    size_t buf_sz = stride * (size_t)nr;
 
-	    void *raw = calloc(n_cpus, elem_sz);
+	    void *raw = calloc(1, buf_sz);
 	    if (!raw) {
 	        goto cleanup;
 	    }
@@ -95,22 +222,7 @@ static void * global_traffic_stats_check_worker(void * arg) {
 	        goto cleanup;
 	    }
 
-	     for (int cpu = 0; cpu < n_cpus; cpu++) {
-	        struct traffic_stats_config *per_cpu_stats =
-	            (struct traffic_stats_config *)((char *)raw + cpu * elem_sz);
-	        aggregate.total_traffic += per_cpu_stats->total_traffic;
-	        aggregate.allowed_traffic += per_cpu_stats->allowed_traffic;
-	        aggregate.blocked_traffic += per_cpu_stats->blocked_traffic;
-
-	        aggregate.syn += per_cpu_stats->syn;
-	        aggregate.ack += per_cpu_stats->ack;
-	        aggregate.rst += per_cpu_stats->rst;
-	        aggregate.tcp += per_cpu_stats->tcp;
-	        aggregate.udp += per_cpu_stats->udp;
-	        aggregate.icmp += per_cpu_stats->icmp;
-	        aggregate.gre += per_cpu_stats->gre;
-	        aggregate.other += per_cpu_stats->other;
-	    }
+	    traffic_stats_config_sum_percpu(raw, stride, nr, &aggregate);
 
         aggregate.allowed_traffic = aggregate.total_traffic - aggregate.blocked_traffic;
         LOG_T("TRAFFIC: TOTAL:%llu ALLOWED:%llu BLOCKED:%llu SYN:%llu ACK:%llu RST:%llu TCP:%llu UDP:%llu ICMP:%llu GRE:%llu OTHER:%llu\n",
@@ -123,7 +235,7 @@ static void * global_traffic_stats_check_worker(void * arg) {
         index++;
         index = (index % 1440);
 
-	    memset(raw, 0, n_cpus * elem_sz);
+	    memset(raw, 0, buf_sz);
 	    if (bpf_map_update_elem(map_fd, &key, raw, 0)) {
 	        LOG_E( "bpf_map_update_elem");
 	        free(raw);
@@ -132,15 +244,15 @@ static void * global_traffic_stats_check_worker(void * arg) {
 	    free(raw);
 	}
 cleanup:
-    if (values) free (values);
     return NULL;
 }
 
 
 static void * global_attack_check_worker(void * arg) {
 
-    size_t vsize = sizeof(__u64) * n_cpus;
-    __u64 *values = calloc(n_cpus, sizeof(__u64));
+    int nr = bpf_percpu_nr_cpus();
+    size_t vsize = sizeof(__u64) * (size_t)nr;
+    __u64 *values = calloc((size_t)nr, sizeof(__u64));
 
     if (!values)
         goto cleanup; 
@@ -221,7 +333,7 @@ static void * global_attack_check_worker(void * arg) {
             LOG_E( "bpf_map_lookup_elem");
             goto cleanup;
         }
-        for (int cpu = 0; cpu < n_cpus; cpu++) {
+        for (int cpu = 0; cpu < nr; cpu++) {
             total_syn_cnt += values[cpu];
         }
         memset(values, 0, vsize);
@@ -235,7 +347,7 @@ static void * global_attack_check_worker(void * arg) {
             LOG_E( "bpf_map_lookup_elem");
             goto cleanup;
         }
-        for (int cpu = 0; cpu < n_cpus; cpu++) {
+        for (int cpu = 0; cpu < nr; cpu++) {
             total_ack_cnt += values[cpu];
         }
         memset(values, 0, vsize);
@@ -249,7 +361,7 @@ static void * global_attack_check_worker(void * arg) {
             LOG_E( "bpf_map_lookup_elem");
             goto cleanup;
         }
-        for (int cpu = 0; cpu < n_cpus; cpu++) {
+        for (int cpu = 0; cpu < nr; cpu++) {
             total_rst_cnt += values[cpu];
         }
         memset(values, 0, vsize);
@@ -263,7 +375,7 @@ static void * global_attack_check_worker(void * arg) {
             LOG_E( "bpf_map_lookup_elem");
             goto cleanup;
         }
-        for (int cpu = 0; cpu < n_cpus; cpu++) {
+        for (int cpu = 0; cpu < nr; cpu++) {
             total_icmp_cnt += values[cpu];
         }
         memset(values, 0, vsize);
@@ -277,7 +389,7 @@ static void * global_attack_check_worker(void * arg) {
             LOG_E( "bpf_map_lookup_elem");
             goto cleanup;
         }
-        for (int cpu = 0; cpu < n_cpus; cpu++) {
+        for (int cpu = 0; cpu < nr; cpu++) {
             total_udp_cnt += values[cpu];
         }
         memset(values, 0, vsize);
@@ -291,7 +403,7 @@ static void * global_attack_check_worker(void * arg) {
             LOG_E( "bpf_map_lookup_elem");
             goto cleanup;
         }
-        for (int cpu = 0; cpu < n_cpus; cpu++) {
+        for (int cpu = 0; cpu < nr; cpu++) {
             total_gre_cnt += values[cpu];
         }
         memset(values, 0, vsize);
@@ -309,9 +421,10 @@ static void * global_attack_check_worker(void * arg) {
             goto cleanup;
         }
 
-        size_t elem_sz = info.value_size;
+        size_t inc_stride = bpf_percpu_stride(info.value_size);
+        size_t inc_buf = inc_stride * (size_t)nr;
 
-        void *raw = calloc(n_cpus, elem_sz);
+        void *raw = calloc(1, inc_buf);
         if (!raw) {
             goto cleanup;
         }
@@ -323,26 +436,9 @@ static void * global_attack_check_worker(void * arg) {
             goto cleanup;
         }
 
-         for (int cpu = 0; cpu < n_cpus; cpu++) {
-            struct stats_config *per_cpu_stats =
-                (struct stats_config *)((char *)raw + cpu * elem_sz);
-            aggregate.syn += per_cpu_stats->syn;
-            aggregate.ack += per_cpu_stats->ack;
-            aggregate.rst += per_cpu_stats->rst;
-            aggregate.fin += per_cpu_stats->fin;
-            aggregate.psh += per_cpu_stats->psh;
-            aggregate.urg += per_cpu_stats->urg;
+        stats_config_sum_percpu(raw, inc_stride, nr, &aggregate);
 
-            aggregate.syn_ack += per_cpu_stats->syn_ack;
-            aggregate.fin_ack += per_cpu_stats->fin_ack;
-            aggregate.rst_ack += per_cpu_stats->rst_ack;
-
-            aggregate.icmp += per_cpu_stats->icmp;
-            aggregate.udp += per_cpu_stats->udp;
-            aggregate.gre += per_cpu_stats->gre;
-        }
-
-        memset(raw, 0, n_cpus * elem_sz);
+        memset(raw, 0, inc_buf);
         if (bpf_map_update_elem(income_stats_fd, &key, raw, 0)) {
             LOG_E( "bpf_map_update_elem");
             free(raw);
@@ -887,10 +983,18 @@ static void * fixed_ip_ringbuf_poll_worker(void * arg)
 
 static void * license_check_worker(void * arg) 
 {
+    int transient_failures = 0;
+
     while (!exiting) {
         int ret = get_license_status();
         if (ret < 0) {
-            if (ret == -2) {
+            if (ret == -3) {
+                /* Transient read/open failure (e.g. fd pressure): retry. */
+                transient_failures++;
+                LOG_W("Transient license check failure (%d)\n", transient_failures);
+                sleep(5);
+                continue;
+            } else if (ret == -2) {
                 const char * message = "command:report_license\ndata:expired\n";
                 send_message_to_api_parser(message);
             } else {
@@ -904,6 +1008,7 @@ static void * license_check_worker(void * arg)
 
             break;
         }
+        transient_failures = 0;
         sleep(LICENSE_CHECK_INTERVAL);
     }
 }
@@ -1446,7 +1551,8 @@ int clear_geoip_trie_map(int map_fd) {
 
 static int clear_pkt_counter_map(int map_fd) {
     __u32 key = 0;
-    __u64 *values = calloc(n_cpus, sizeof(__u64));
+    int nr = bpf_percpu_nr_cpus();
+    __u64 *values = calloc((size_t)nr, sizeof(__u64));
 
     if (values == NULL)
         goto error;
@@ -1455,7 +1561,7 @@ static int clear_pkt_counter_map(int map_fd) {
         LOG_E( "bpf_map_lookup_elem");
         goto error;
     }
-    for (int cpu = 0; cpu < n_cpus; cpu++) {
+    for (int cpu = 0; cpu < nr; cpu++) {
         values[cpu] = 0;
     }
 
@@ -2398,12 +2504,6 @@ int geo_set(int valid,
 
     global_fw_config.g_geo_config.check = valid;
 
-    if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
-        LOG_E("bpf_map_update_elem");
-        return -1;
-    }
-    
-
     if (global_fw_config.g_geo_config.check) {
         int geo_map_fd = -1;
         if (global_fw_config.g_geo_config.check == 1) {
@@ -2447,6 +2547,18 @@ int geo_set(int valid,
         }
     }
 
+    {
+        __u32 g = global_fw_config.g_geo_config.cache_generation + 1;
+        if (g == 0)
+            g = 1;
+        global_fw_config.g_geo_config.cache_generation = g;
+    }
+
+    if (bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
+        LOG_E("bpf_map_update_elem");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -2476,26 +2588,68 @@ int tcp_conn_limit_set(int valid,
 }
 
 
-int send_message_to_api_parser(const char *message) {
-    LOG_D("%s", message);
+static int send_message_to_api_parser_direct(const char *message)
+{
+    if (api_parser_sock_fd < 0) {
+        LOG_E("AF_UNIX DGRAM sender is not initialized\n");
+        return -1;
+    }
 
-    int fd = open(FIFO_PATH, O_WRONLY | O_NONBLOCK);  // Blocks until reader is ready
-    if (fd == -1) {
-        if (errno == ENXIO) {
-            LOG_E("No reader available on FIFO\n");
-            return -1;
+    for (int attempt = 0; attempt < 50; attempt++) {
+        ssize_t written = sendto(api_parser_sock_fd, message, strlen(message), 0,
+                                 (const struct sockaddr *)&api_parser_sock_addr,
+                                 sizeof(api_parser_sock_addr));
+        if (written >= 0) {
+            return 0;
         }
-        LOG_E("Failed to open FIFO\n");
+
+        if (errno == EAGAIN || errno == ENOBUFS || errno == EINTR ||
+            errno == ENOENT || errno == ECONNREFUSED) {
+            usleep(10 * 1000);
+            continue;
+        }
+
+        LOG_E("Failed to send AF_UNIX dgram '%s': %s\n",
+              API_PARSER_UNIX_DGRAM_PATH, strerror(errno));
         return -1;
     }
 
-    ssize_t written = write(fd, message, strlen(message));
-    if (written == -1) {
-        LOG_E("Failed to write to FIFO\n");
+    LOG_E("Failed to send AF_UNIX dgram '%s' after retries: %s\n",
+          API_PARSER_UNIX_DGRAM_PATH, strerror(errno));
+    return -1;
+}
+
+int send_message_to_api_parser(const char *message) {
+    if (!message) {
         return -1;
     }
 
-    close(fd);
+    LOG_D("%s", message);
+    (void)pthread_once(&fifo_sender_once, init_fifo_sender_worker_once);
+
+    char *msg_copy = strdup(message);
+    if (!msg_copy) {
+        LOG_E("Failed to allocate FIFO message copy\n");
+        return -1;
+    }
+
+    pthread_mutex_lock(&fifo_q_mutex);
+    if (fifo_q_size >= FIFO_MSG_QUEUE_CAPACITY) {
+        fifo_q_dropped++;
+        if ((fifo_q_dropped % 100) == 1) {
+            LOG_W("API parser queue is full, dropping messages (dropped=%d)\n", fifo_q_dropped);
+        }
+        pthread_mutex_unlock(&fifo_q_mutex);
+        free(msg_copy);
+        return -1;
+    }
+
+    fifo_msg_queue[fifo_q_tail] = msg_copy;
+    fifo_q_tail = (fifo_q_tail + 1) % FIFO_MSG_QUEUE_CAPACITY;
+    fifo_q_size++;
+    pthread_cond_signal(&fifo_q_cv);
+    pthread_mutex_unlock(&fifo_q_mutex);
+
     return 0;
 }
 

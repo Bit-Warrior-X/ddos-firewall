@@ -14,6 +14,7 @@
 #define SOCK_PATH                   "/tmp/ebpf_fw.sock"
 #define NGINX_UNIX_PATH             "/tmp/unix.sock"
 #define FIFO_PATH                   "/tmp/firewall_to_api_parser.fifo"
+#define API_PARSER_UNIX_DGRAM_PATH  "/tmp/firewall_to_api_parser.sock"
 
 #define PUBKEY_PATH                 "PUBKEY_PATH"
 #define LICENSE_PATH                "LICENSE_PATH"
@@ -121,6 +122,9 @@
 
 struct global_config {
     __u8 tcp_seg_check;
+    __u8 _pad_cfg[3];
+    /* 1 = count every packet; N>1 = update detailed pkt/type counters ~1/N of the time with scale N (expected value preserved). */
+    __u32 stats_detail_sample_divisor;
     __u64 black_ip_duration;     // Blacklist duration in seconds
 };
 
@@ -237,6 +241,17 @@ struct gre_config {
 
 struct geo_config {
     __u8 check;
+    __u8 _pad_geo[3];
+    /* Incremented when geo rules/maps change; invalidates geo_result_cache entries in XDP. */
+    __u32 cache_generation;
+};
+
+/* LRU value for geo_result_cache (kernel + userspace layout). */
+struct geo_cache_val {
+    __u32 generation;
+    __u8 allowed;   /* 1 = pass geo, 0 = drop */
+    __u8 mode;      /* copy of geo_config.check when entry was stored (1=allow trie, 2=block trie) */
+    __u16 _reserved;
 };
 
 struct tcp_connection_config {

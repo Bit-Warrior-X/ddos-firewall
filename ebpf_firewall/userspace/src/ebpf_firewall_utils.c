@@ -529,7 +529,14 @@ int get_license_status() {
     }
 
     FILE* f = fopen(lic_path, "rb");
-    if (!f) { LOG_E("Cannot open license file\n"); return -1; }
+    if (!f) {
+        /* Under heavy load, fd pressure can make fopen fail transiently. */
+        LOG_E("Cannot open license file '%s': %s\n", lic_path, strerror(errno));
+        if (errno == EMFILE || errno == ENFILE || errno == ENOMEM || errno == EAGAIN) {
+            return -3;
+        }
+        return -1;
+    }
     lic_b64 = slurp_fd(f, &lic_b64_len);
     fclose(f);
     

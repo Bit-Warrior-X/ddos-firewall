@@ -25,7 +25,11 @@ long tz_offset_sec = 0;      // Timezone offset
 
 struct global_firewall_config global_fw_config ={
     .g_attack_stats = {0},
-    .g_config = {0},
+    .g_config = {
+        .tcp_seg_check = 0,
+        .stats_detail_sample_divisor = 1,
+        .black_ip_duration = 0,
+    },
     .g_syn_config = {
         .valid = 1,
         .syn_threshold = SYN_THRESHOLD,
@@ -82,7 +86,8 @@ struct global_firewall_config global_fw_config ={
         .gre_protect_duration = GRE_PROTECTION_DURATION
     },
     .g_geo_config = {
-        .check = 0
+        .check = 0,
+        .cache_generation = 0,
     },
     .g_tcp_connection_config = {
         .check = 0,
@@ -583,7 +588,14 @@ int load_config(struct bpf_object *obj) {
             //TCP segment
             else if (strcmp(key, "tcp_seg_check") == 0) {
                 global_fw_config.g_config.tcp_seg_check = int_value;
-            } 
+            }
+            else if (strcmp(key, "stats_detail_sample_divisor") == 0) {
+                if (int_value < 1)
+                    int_value = 1;
+                if (int_value > 64)
+                    int_value = 64;
+                global_fw_config.g_config.stats_detail_sample_divisor = (__u32)int_value;
+            }
             //GEO check
             else if (strcmp(key, "geo_check") == 0) {
                 global_fw_config.g_geo_config.check = int_value;
@@ -645,11 +657,6 @@ int load_config(struct bpf_object *obj) {
         return -1;
     }
 
-    if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
-        LOG_E("bpf_map_update_elem");
-        return -1;
-    }
-    
     if (global_fw_config.g_geo_config.check) {
         int geo_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_map");
         if (geo_map_fd < 0) {
@@ -680,6 +687,18 @@ int load_config(struct bpf_object *obj) {
 
         if (init_geo(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_block_map_fd) < 0) {
             LOG_E("Failed to update geoip_trie_block_map");
+            return -1;
+        }
+    }
+
+    /* Bump generation so XDP geo_result_cache drops stale trie results; then push full .bss once. */
+    {
+        __u32 g = global_fw_config.g_geo_config.cache_generation + 1;
+        if (g == 0)
+            g = 1;
+        global_fw_config.g_geo_config.cache_generation = g;
+        if (bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
+            LOG_E("bpf_map_update_elem");
             return -1;
         }
     }

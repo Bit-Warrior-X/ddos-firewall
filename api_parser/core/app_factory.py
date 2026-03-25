@@ -51,9 +51,9 @@ def initialize_app():
 
 def cleanup_on_exit():
     """Cleanup resources on application exit."""
-    if os.path.exists(config.FIFO_PATH):
+    if os.path.exists(config.UNIX_DGRAM_PATH):
         try:
-            os.unlink(config.FIFO_PATH)
+            os.unlink(config.UNIX_DGRAM_PATH)
         except Exception:
             pass
 

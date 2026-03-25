@@ -9,6 +9,7 @@ API_PARSER_DIR = Path("/usr/local/share/api_parser")
 
 # File paths
 FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
+UNIX_DGRAM_PATH = "/tmp/firewall_to_api_parser.sock"
 FIREWALL_DB_NAME = str(BASE_DIR / "firewall_control.db")
 INIT_FILE = str(BASE_DIR / "initialize")
 MACHINE_FILE = str(BASE_DIR / "machine_id")

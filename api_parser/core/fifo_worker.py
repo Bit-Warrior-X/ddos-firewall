@@ -4,6 +4,8 @@ import os
 import threading
 import time
 import json
+import socket
+from queue import Queue, Full
 from typing import Dict, List, Tuple
 from core.api_client import APIClient
 from core.redis_client import RedisClient
@@ -39,6 +41,18 @@ def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     return commands
 
 _geoip_reader = None
+_cmd_queue = Queue(maxsize=20000)
+_dgram_drop_count = 0
+
+
+def _command_worker() -> None:
+    """Worker that handles parsed commands off the receive path."""
+    while True:
+        cmd = _cmd_queue.get()
+        try:
+            process_command(cmd)
+        finally:
+            _cmd_queue.task_done()
 
 def _lookup_geo(ip: str) -> Tuple[str, str]:
     global _geoip_reader
@@ -148,30 +162,42 @@ def process_command(cmd: Dict[str, str]) -> None:
         print(f"[API_PARSER] Error processing command {cmd}: {str(e)}")
 
 def fifo_reader_thread():
-    """FIFO reader thread function."""
-    if not os.path.exists(config.FIFO_PATH):
-        os.mkfifo(config.FIFO_PATH)
-    print(f"... listening at {config.FIFO_PATH}")
+    """AF_UNIX datagram listener for firewall commands."""
+    global _dgram_drop_count
+
+    if os.path.exists(config.UNIX_DGRAM_PATH):
+        os.unlink(config.UNIX_DGRAM_PATH)
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+    except OSError as e:
+        print(f"[API_PARSER] Failed to set SO_RCVBUF: {e}")
+    sock.bind(config.UNIX_DGRAM_PATH)
+    os.chmod(config.UNIX_DGRAM_PATH, 0o666)
+    print(f"[API_PARSER] AF_UNIX DGRAM listening at {config.UNIX_DGRAM_PATH}")
+
+    worker_count = 4
+    for _ in range(worker_count):
+        threading.Thread(target=_command_worker, daemon=True).start()
+
     while True:
         try:
-            with open(config.FIFO_PATH, 'r') as fifo:
-                print(f"[API_PARSER] FIFO opened")
-                buf = []
-                for line in fifo:
-                    print(f"[API_PARSER] FIFO line: {line}")
-                    line = line.rstrip('\n')
-                    if line == "":  # delimiter between commands
-                        raw = "\n".join(buf).strip()
-                        print(f"[API_PARSER] FIFO raw: {raw}")
-                        if raw:
-                            print(f"[API_PARSER] FIFO raw: {raw}")
-                            for cmd in parse_fifo_message(raw):
-                                process_command(cmd)
-                        buf = []
-                    else:
-                        buf.append(line)
+            raw_bytes = sock.recv(65535)
+            if not raw_bytes:
+                continue
+            raw = raw_bytes.decode("utf-8", errors="replace").strip()
+            if not raw:
+                continue
+            for cmd in parse_fifo_message(raw):
+                try:
+                    _cmd_queue.put_nowait(cmd)
+                except Full:
+                    _dgram_drop_count += 1
+                    if (_dgram_drop_count % 100) == 1:
+                        print(f"[API_PARSER] Command queue full, dropping commands (dropped={_dgram_drop_count})")
         except Exception as e:
-            print(f"[API_PARSER] FIFO error: {e}; retrying in 1s")
+            print(f"[API_PARSER] AF_UNIX DGRAM error: {e}; retrying in 1s")
             time.sleep(1)
 
 def start_fifo_listener():

@@ -93,6 +93,14 @@ struct {
     __type(value,       __u8);
 } geoip_trie_block_map SEC(".maps");
 
+/* Per-source geo decision cache (invalidated via g_geo_config.cache_generation). */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 262144);
+    __type(key, __u32);
+    __type(value, struct geo_cache_val);
+} geo_result_cache SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 100000);
@@ -122,25 +130,39 @@ iph_csum(struct iphdr *iph)
     return csum_fold_helper(csum);
 }
 
-static __always_inline __u8 is_geo_allowed(__u32 ip) {
-    volatile struct geo_config *geo_config_val = &global_fw_config.g_geo_config;
-    if (!geo_config_val->check)
+static __u8 is_geo_allowed(__u32 ip) {
+    volatile struct geo_config *geo = &global_fw_config.g_geo_config;
+    __u8 mode = geo->check;
+    if (!mode)
         return 1;
+
+    __u32 gen = geo->cache_generation;
+    struct geo_cache_val *cached = bpf_map_lookup_elem(&geo_result_cache, &ip);
+    if (cached && cached->generation == gen && cached->mode == mode)
+        return cached->allowed;
 
     struct lpm_key key = {
         .prefixlen = 32,
         .ip        = ip,
     };
 
-    if (geo_config_val->check == 1) {
-        __u8 *allowed = bpf_map_lookup_elem(&geoip_trie_map, &key);
-        return (allowed && *allowed != 0);
+    __u8 allowed;
+    if (mode == 1) {
+        __u8 *a = bpf_map_lookup_elem(&geoip_trie_map, &key);
+        allowed = (a && *a != 0) ? 1 : 0;
+    } else {
+        __u8 *b = bpf_map_lookup_elem(&geoip_trie_block_map, &key);
+        allowed = (!b || *b == 0) ? 1 : 0;
     }
-    else {
-        __u8 *blocked = bpf_map_lookup_elem(&geoip_trie_block_map, &key);
-        if (!blocked) return 1;
-        else return *blocked == 0;
-    }
+
+    struct geo_cache_val nv = {
+        .generation = gen,
+        .allowed = allowed,
+        .mode = mode,
+        ._reserved = 0,
+    };
+    bpf_map_update_elem(&geo_result_cache, &ip, &nv, BPF_ANY);
+    return allowed;
 }
 
 /*--------------------------------------------------------------------------------------------------*/
@@ -150,104 +172,110 @@ SEC("xdp")
 int xdp_main(struct xdp_md *ctx) {
     void *data     = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
-    __u64 now = bpf_ktime_get_ns();
-    
-    // Parse Ethernet header.
+
+    /* Parse Ethernet header. */
     struct ethhdr *eth = data;
     if ((void*)(eth + 1) > data_end)
         return XDP_PASS;
-    
-    // Only handle IP packets.
+
     if (eth->h_proto != __constant_htons(ETH_P_IP))
         return XDP_PASS;
-    
-    // Parse IP header.
+
     struct iphdr *iph = data + sizeof(*eth);
     if ((void*)(iph + 1) > data_end)
         return XDP_PASS;
-    
+
+    __u32 src_ip = iph->saddr;
+
+    /* Whitelist first: no ktime, no traffic/counter maps (those packets won't appear in global_* stats). */
+    __u8 *whitelisted = bpf_map_lookup_elem(&allowed_ips, &src_ip);
+    if (whitelisted)
+        return XDP_PASS;
+
+    __u64 now = bpf_ktime_get_ns();
+
     __u32 key = 0;
     struct stats_config *pkt_stats = bpf_map_lookup_elem(&global_income_pkt_counter, &key);
     if (!pkt_stats) return XDP_PASS;
 
     struct traffic_stats_config *traffic_stats = bpf_map_lookup_elem(&global_income_pkt_traffic, &key);
     if (!traffic_stats) return XDP_PASS;
-    __u64 packet_size = ctx->data_end - ctx->data;
 
-    __u32 src_ip = iph->saddr;
+    __u64 packet_size = (__u64)((unsigned long)data_end - (unsigned long)data);
+
+    volatile struct global_config *gcfg = &global_fw_config.g_config;
+    __u32 sdiv = gcfg->stats_detail_sample_divisor;
+    if (sdiv == 0)
+        sdiv = 1;
+    if (sdiv > 64)
+        sdiv = 64;
+    __u32 det_scale = 1;
+    if (sdiv > 1) {
+        if (bpf_get_prandom_u32() % sdiv != 0)
+            det_scale = 0;
+        else
+            det_scale = sdiv;
+    }
 
     traffic_stats->total_traffic += packet_size;
 
-    // Handle TCP packets
+    /* One TCP parse: stats now, tail-call dispatch later (after block/fragment). */
+    __u8 have_tcp = 0;
+    __u8 tcp_syn = 0, tcp_ack = 0, tcp_fin = 0, tcp_rst = 0;
+
     if (iph->protocol == IPPROTO_TCP) {
-        // Calculate IP header length.
         traffic_stats->tcp += packet_size;
         int ip_hdr_len = iph->ihl * 4;
         struct tcphdr *tcph = (void *)iph + ip_hdr_len;
+        /* Same as before: count TCP bytes even if L4 header is truncated; flags only if valid. */
         if ((void*)(tcph + 1) <= data_end) {
-            // If SYN flag is set and ACK flag is not set, then it's a SYN packet.
-            if (tcph->syn && !tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->syn, 1);
-                traffic_stats->syn += packet_size;
-            }
-            // If RST is set.
-            if (tcph->rst && !tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->rst, 1);
-                traffic_stats->rst += packet_size;
-            }
-            // If URG is set.
-            if (tcph->urg && !tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->urg, 1);
-            }
-            // If PSH is set.
-            if (tcph->psh && !tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->psh, 1);
-            }
-            // If PSH is set.
-            if (tcph->fin && !tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->fin, 1);
-            }
-            // If ACK is set, excluding SYN, FIN, RST.
-            if (tcph->ack && !tcph->syn && !tcph->fin && !tcph->rst) {
-                __sync_fetch_and_add(&pkt_stats->ack, 1);
-                traffic_stats->ack += packet_size;
-            }
-            // If SYN+ACK is set.
-            if (tcph->syn && tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->syn_ack, 1);
-            }
-            // If FIN+ACK is set.
-            if (tcph->fin && tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->fin_ack, 1);
-            }
-            // If RST+ACK is set.
-            if (tcph->rst && tcph->ack) {
-                __sync_fetch_and_add(&pkt_stats->rst_ack, 1);
+            have_tcp = 1;
+            tcp_syn = tcph->syn;
+            tcp_ack = tcph->ack;
+            tcp_fin = tcph->fin;
+            tcp_rst = tcph->rst;
+
+            if (det_scale) {
+                if (tcp_syn && !tcp_ack) {
+                    pkt_stats->syn += det_scale;
+                    traffic_stats->syn += packet_size * det_scale;
+                }
+                if (tcp_rst && !tcp_ack) {
+                    pkt_stats->rst += det_scale;
+                    traffic_stats->rst += packet_size * det_scale;
+                }
+                if (tcph->urg && !tcp_ack)
+                    pkt_stats->urg += det_scale;
+                if (tcph->psh && !tcp_ack)
+                    pkt_stats->psh += det_scale;
+                if (tcp_fin && !tcp_ack)
+                    pkt_stats->fin += det_scale;
+                if (tcp_ack && !tcp_syn && !tcp_fin && !tcp_rst) {
+                    pkt_stats->ack += det_scale;
+                    traffic_stats->ack += packet_size * det_scale;
+                }
+                if (tcp_syn && tcp_ack)
+                    pkt_stats->syn_ack += det_scale;
+                if (tcp_fin && tcp_ack)
+                    pkt_stats->fin_ack += det_scale;
+                if (tcp_rst && tcp_ack)
+                    pkt_stats->rst_ack += det_scale;
             }
         }
-    }
-    // Handle ICMP packets
-    else if (iph->protocol == IPPROTO_ICMP) {
+    } else if (iph->protocol == IPPROTO_ICMP) {
         traffic_stats->icmp += packet_size;
-        __sync_fetch_and_add(&pkt_stats->icmp, 1);
-    }
-    // Handle UDP packets
-    else if (iph->protocol == IPPROTO_UDP) {
+        if (det_scale)
+            pkt_stats->icmp += det_scale;
+    } else if (iph->protocol == IPPROTO_UDP) {
         traffic_stats->udp += packet_size;
-        __sync_fetch_and_add(&pkt_stats->udp, 1);
-    }
-    // Handle GRE packets
-    else if (iph->protocol == IPPROTO_GRE) {
+        if (det_scale)
+            pkt_stats->udp += det_scale;
+    } else if (iph->protocol == IPPROTO_GRE) {
         traffic_stats->gre += packet_size;
-        __sync_fetch_and_add(&pkt_stats->gre, 1);
+        if (det_scale)
+            pkt_stats->gre += det_scale;
     } else {
         traffic_stats->other += packet_size;
-    }
-
-    /* Whitelist check: if source IP is in allowed_ips, bypass all other checks */
-    __u8 *whitelisted = bpf_map_lookup_elem(&allowed_ips, &src_ip);
-    if (whitelisted) {
-        return XDP_PASS;
     }
 
     /* blocklist check */
@@ -257,27 +285,21 @@ int xdp_main(struct xdp_md *ctx) {
             traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }
-        else {
-            //bpf_printk("IP %pI4 removed from block list\n", &src_ip);
 
-            struct event evt = {0};
-            evt.time = now;
-            evt.srcip = src_ip;
-            evt.reason = EVENT_IP_BLOCK_END;
-            bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
+        struct event evt = {0};
+        evt.time = now;
+        evt.srcip = src_ip;
+        evt.reason = EVENT_IP_BLOCK_END;
+        bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
 
-            bpf_map_delete_elem(&blocked_ips, &src_ip);
-        }
+        bpf_map_delete_elem(&blocked_ips, &src_ip);
     }
 
-    /* -------------------- Fragment attack mitigation -------------------- */
-    /* If this packet is a non-initial fragment (offset > 0), drop it directly.
-       Such middle fragments lack L4 headers and can be easily used to exhaust the reassembly buffer. Regular traffic rarely has a single offset>0 fragment. */
-
-    volatile struct global_config *global_config_val = &global_fw_config.g_config;
-    if (global_config_val->tcp_seg_check) {
+    /* Fragment attack mitigation */
+    __u8 tcp_seg_check = gcfg->tcp_seg_check;
+    if (tcp_seg_check) {
         __u16 frag_off_host = bpf_ntohs(iph->frag_off);
-        if (frag_off_host & 0x1FFF) {                 /* Fragment offset ≠ 0 */
+        if (frag_off_host & 0x1FFF) {
             struct event evt = {0};
             evt.time = now;
             evt.srcip = src_ip;
@@ -288,62 +310,29 @@ int xdp_main(struct xdp_md *ctx) {
         }
     }
 
-    // Handle TCP packets
-    if (iph->protocol == IPPROTO_TCP) {
-        // Calculate IP header length.
-        int ip_hdr_len = iph->ihl * 4;
-        struct tcphdr *tcph = (void *)iph + ip_hdr_len;
-        if ((void*)(tcph + 1) > data_end)
-            return XDP_PASS;
-
-        // Snapshot TCP flags before any tail calls.
-        __u8 tcp_syn = tcph->syn;
-        __u8 tcp_ack = tcph->ack;
-        __u8 tcp_fin = tcph->fin;
-        __u8 tcp_rst = tcph->rst;
-
-        // Check TCP flags:
-        // If SYN flag is set and ACK flag is not set, then it's a SYN packet.
-        if (tcp_syn && !tcp_ack) {
-            // Tail call to xdp_parse_syn (map key 0).
+    if (have_tcp) {
+        if (tcp_syn && !tcp_ack)
             bpf_tail_call(ctx, &prog_array, 0);
-        }
-        // If ACK is set, excluding SYN, FIN, RST.
-        if (tcp_ack && !tcp_syn && !tcp_fin && !tcp_rst) {
-            // Tail call to xdp_parse_ack (map key 1).
+        if (tcp_ack && !tcp_syn && !tcp_fin && !tcp_rst)
             bpf_tail_call(ctx, &prog_array, 1);
-        }
-        // If RST is set.
-        if (tcp_rst && !tcp_ack) {
-            // Tail call to xdp_parse_ack (map key 2).
+        if (tcp_rst && !tcp_ack)
             bpf_tail_call(ctx, &prog_array, 2);
-        }
-    }
-    // Handle ICMP packets
-    else if (iph->protocol == IPPROTO_ICMP) {
-        // Calculate IP header length.
+    } else if (iph->protocol == IPPROTO_ICMP) {
         int ip_hdr_len = iph->ihl * 4;
         struct icmphdr *icmph = (void *)iph + ip_hdr_len;
         if ((void*)(icmph + 1) > data_end)
             return XDP_PASS;
         bpf_tail_call(ctx, &prog_array, 3);
-    }
-    // Handle UDP packets
-    else if (iph->protocol == IPPROTO_UDP) {
-        // Calculate IP header length.
+    } else if (iph->protocol == IPPROTO_UDP) {
         int ip_hdr_len = iph->ihl * 4;
         struct udphdr *udphdr = (void *)iph + ip_hdr_len;
         if ((void*)(udphdr + 1) > data_end)
             return XDP_PASS;
         bpf_tail_call(ctx, &prog_array, 4);
-    }
-    // Handle GRE packets
-    else if (iph->protocol == IPPROTO_GRE) {
+    } else if (iph->protocol == IPPROTO_GRE) {
         bpf_tail_call(ctx, &prog_array, 5);
     }
-    
-    // If tail call fails or packet does not match above criteria,
-    // then pass the packet.
+
     if (!is_geo_allowed(src_ip)) {
         traffic_stats->blocked_traffic += packet_size;
         return XDP_DROP;
