@@ -57,3 +57,6 @@ api_parser/config.py
 
 **/__pycache__/
 *.pyc
+
+
+openresty-modules/openresty-1.27.1.2/build/

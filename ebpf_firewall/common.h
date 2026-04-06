@@ -6,8 +6,6 @@
 // Define time constants (in nanoseconds)
 
 #define MAX_LINE_LEN                128
-//#define XDP_CORE_FILE               "ebpf_firewall_kernel.o"
-//#define CONFIG_FILE                 "firewall.config"
 #define XDP_CORE_FILE               "EBPF_FIREWALL_XDP_KO"
 #define CONFIG_FILE                 "EBPF_FIREWALL_XDP_CONFIG"
 #define SQLITE_DB_NAME              "/usr/local/share/ebpf_firewall/firewall_control.db"
@@ -72,7 +70,25 @@
 #define GRE_BURST_GAP_NS            ONE_SECOND_NS / GRE_BURST_PKT_THRESHOLD
 #define GRE_PROTECTION_DURATION     0                         // Protection duration for GRE
 
+#define STOMP_THRESHOLD               200000                     // 200K STOMP packets per second
+#define STOMP_BURST_COUNT_THRESHOLD   10                         /* bursts per sec */
+#define STOMP_BURST_PKT_THRESHOLD     20                         /* Each burst must have >=20 STOMP packets */
+#define STOMP_FIXED_THRESHOLD         20000                      // 15‑sec window
+#define STOMP_FIXED_CHECK_DURATION_NS (15ULL * ONE_SECOND_NS)
+#define STOMP_BURST_GAP_NS            ONE_SECOND_NS / STOMP_BURST_PKT_THRESHOLD
+#define STOMP_PROTECTION_DURATION     0                         // Protection duration for STOMP
+
+#define HANDSHAKE_THRESHOLD               200000                     // 200K HandShake packets per second
+#define HANDSHAKE_BURST_COUNT_THRESHOLD   10                         /* bursts per sec */
+#define HANDSHAKE_BURST_PKT_THRESHOLD     20                         /* Each burst must have >=20 HandShake packets */
+#define HANDSHAKE_FIXED_THRESHOLD         20000                      // 15‑sec window
+#define HANDSHAKE_FIXED_CHECK_DURATION_NS (15ULL * ONE_SECOND_NS)
+#define HANDSHAKE_BURST_GAP_NS            ONE_SECOND_NS / HANDSHAKE_BURST_PKT_THRESHOLD
+#define HANDSHAKE_PROTECTION_DURATION     0                         // Protection duration for HandShake
+
+/* ---- Event codes ---- */
 #define EVENT_IP_BLOCK_END                         0
+
 #define EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START  10
 #define EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END    11
 #define EVENT_TCP_SYN_ATTACK_BURST_BLOCK           12
@@ -103,10 +119,21 @@
 #define EVENT_GRE_ATTACK_BURST_BLOCK               62
 #define EVENT_GRE_ATTACK_FIXED_BLOCK               63
 
-// >>> New event for Fragment attack <<<
 #define EVENT_IP_FRAG_MIDDLE_BLOCK                 70
 
+#define EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_START  80
+#define EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_END    81
+#define EVENT_TCP_STOMP_ATTACK_BURST_BLOCK           82
+#define EVENT_TCP_STOMP_ATTACK_FIXED_BLOCK           83
 
+#define EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_START  90
+#define EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_END    91
+#define EVENT_TCP_HANDSHAKE_ATTACK_BURST_BLOCK           92
+#define EVENT_TCP_HANDSHAKE_ATTACK_FIXED_BLOCK           93
+
+#define EVENT_TCP_SOCKET_ATTACK_FIXED_BLOCK            100
+
+/* ---- Fixed IP ring buffer type codes ---- */
 #define FIXED_IP_RING_BUF_SYN                      1
 #define FIXED_IP_RING_BUF_ACK                      2
 #define FIXED_IP_RING_BUF_RST                      3
@@ -119,6 +146,11 @@
 #define FIXED_IP_RING_BUF_UDP                      10
 #define FIXED_IP_RING_BUF_ICMP                     11
 #define FIXED_IP_RING_BUF_GRE                      12
+// Newly added 2026/4/1
+#define FIXED_IP_RING_BUF_STOMP                    13     // PSH + ACK flood
+#define FIXED_IP_RING_BUF_HANDSHAKE                14     // SYN + ACK flood
+
+/* ---- Structures ---- */
 
 struct global_config {
     __u8 tcp_seg_check;
@@ -150,11 +182,11 @@ struct flood_stats {
 };
 
 struct global_attack_stats {
-    __u8 syn_attack;    
+    __u8 syn_attack;
     __u64 syn_protect_expire;
     __u8 ack_attack;
     __u64 ack_protect_expire;
-    __u8 rst_attack ;
+    __u8 rst_attack;
     __u64 rst_protect_expire;
     __u8 icmp_attack;
     __u64 icmp_protect_expire;
@@ -162,6 +194,10 @@ struct global_attack_stats {
     __u64 udp_protect_expire;
     __u8 gre_attack;
     __u64 gre_protect_expire;
+    __u8 stomp_attack;
+    __u64 stomp_protect_expire;
+    __u8 handshake_attack;
+    __u64 handshake_protect_expire;
 };
 
 // Per-source state for SYN packet bursts.
@@ -174,8 +210,8 @@ struct burst_state {
 
 struct syn_config {
     __u32 valid;
-    __u32 syn_threshold;       
-    __u64 burst_gap_ns; 
+    __u32 syn_threshold;
+    __u64 burst_gap_ns;
     __u32 burst_pkt_threshold;
     __u64 burst_count_threshold;
     __u64 challenge_timeout;
@@ -186,8 +222,8 @@ struct syn_config {
 
 struct ack_config {
     __u32 valid;
-    __u32 ack_threshold;       
-    __u64 burst_gap_ns; 
+    __u32 ack_threshold;
+    __u64 burst_gap_ns;
     __u32 burst_pkt_threshold;
     __u64 burst_count_threshold;
     __u32 ack_fixed_threshold;
@@ -197,8 +233,8 @@ struct ack_config {
 
 struct rst_config {
     __u32 valid;
-    __u32 rst_threshold;       
-    __u64 burst_gap_ns; 
+    __u32 rst_threshold;
+    __u64 burst_gap_ns;
     __u32 burst_pkt_threshold;
     __u64 burst_count_threshold;
     __u32 rst_fixed_threshold;
@@ -208,8 +244,8 @@ struct rst_config {
 
 struct icmp_config {
     __u32 valid;
-    __u32 icmp_threshold;       
-    __u64 burst_gap_ns; 
+    __u32 icmp_threshold;
+    __u64 burst_gap_ns;
     __u32 burst_pkt_threshold;
     __u64 burst_count_threshold;
     __u32 icmp_fixed_threshold;
@@ -219,8 +255,8 @@ struct icmp_config {
 
 struct udp_config {
     __u32 valid;
-    __u32 udp_threshold;       
-    __u64 burst_gap_ns; 
+    __u32 udp_threshold;
+    __u64 burst_gap_ns;
     __u32 burst_pkt_threshold;
     __u64 burst_count_threshold;
     __u32 udp_fixed_threshold;
@@ -237,6 +273,28 @@ struct gre_config {
     __u32 gre_fixed_threshold;
     __u64 gre_fixed_check_duration;
     __u32 gre_protect_duration;
+};  
+
+struct stomp_config {
+    __u32 valid;
+    __u32 stomp_threshold;
+    __u64 burst_gap_ns;
+    __u32 burst_pkt_threshold;
+    __u64 burst_count_threshold;
+    __u32 stomp_fixed_threshold;
+    __u64 stomp_fixed_check_duration;
+    __u32 stomp_protect_duration;
+};
+
+struct handshake_config {
+    __u32 valid;
+    __u32 handshake_threshold;
+    __u64 burst_gap_ns;
+    __u32 burst_pkt_threshold;
+    __u64 burst_count_threshold;
+    __u32 handshake_fixed_threshold;
+    __u64 handshake_fixed_check_duration;
+    __u32 handshake_protect_duration;
 };
 
 struct geo_config {
@@ -261,16 +319,18 @@ struct tcp_connection_config {
 };
 
 struct global_firewall_config {
-    struct global_attack_stats g_attack_stats;
-    struct global_config       g_config;
-    struct syn_config          g_syn_config;
-    struct ack_config          g_ack_config;
-    struct rst_config          g_rst_config;
-    struct icmp_config         g_icmp_config;
-    struct udp_config          g_udp_config;
-    struct gre_config          g_gre_config;
-    struct geo_config          g_geo_config;
-    struct tcp_connection_config  g_tcp_connection_config;
+    struct global_attack_stats   g_attack_stats;
+    struct global_config         g_config;
+    struct syn_config            g_syn_config;
+    struct ack_config            g_ack_config;
+    struct rst_config            g_rst_config;
+    struct icmp_config           g_icmp_config;
+    struct udp_config            g_udp_config;
+    struct gre_config            g_gre_config;
+    struct stomp_config          g_stomp_config;
+    struct handshake_config      g_handshake_config;
+    struct geo_config            g_geo_config;
+    struct tcp_connection_config g_tcp_connection_config;
 };
 
 // New structure and map for the SYN challenge state.
@@ -305,15 +365,13 @@ struct stats_config {
     __u64 syn;
     __u64 ack;
     __u64 rst;
-
     __u64 urg;
     __u64 psh;
     __u64 fin;
-
     __u64 syn_ack;
     __u64 fin_ack;
     __u64 rst_ack;
-    
+    __u64 psh_ack;
     __u64 icmp;
     __u64 udp;
     __u64 gre;
@@ -324,11 +382,9 @@ struct traffic_stats_config {
     __u64 total_traffic;
     __u64 allowed_traffic;
     __u64 blocked_traffic;
-
     __u64 syn;
     __u64 ack;
     __u64 rst;
-
     __u64 tcp;
     __u64 udp;
     __u64 icmp;
@@ -339,39 +395,34 @@ struct traffic_stats_config {
 struct fixed_ip_pkt_stats {
     __u64 normal_syn;
     __u64 attack_syn;
-
     __u64 normal_ack;
     __u64 attack_ack;
-
     __u64 normal_rst;
     __u64 attack_rst;
-
     __u64 normal_urg;
     __u64 attack_urg;
-
     __u64 normal_psh;
     __u64 attack_psh;
-
     __u64 normal_fin;
     __u64 attack_fin;
-
     __u64 normal_syn_ack;
     __u64 attack_syn_ack;
-
     __u64 normal_fin_ack;
     __u64 attack_fin_ack;
-
     __u64 normal_rst_ack;
     __u64 attack_rst_ack;
-
     __u64 normal_icmp;
     __u64 attack_icmp;
-
     __u64 normal_udp;
     __u64 attack_udp;
-    
     __u64 normal_gre;
     __u64 attack_gre;
+    __u64 normal_stomp;
+    __u64 attack_stomp;
+    __u64 normal_socket;
+    __u64 attack_socket;
+    __u64 normal_handshake;
+    __u64 attack_handshake;
 };
 
 
@@ -380,8 +431,5 @@ struct lpm_key {
     __u32 prefixlen;
     __u32 ip;
 };
-
-
-
 
 #endif

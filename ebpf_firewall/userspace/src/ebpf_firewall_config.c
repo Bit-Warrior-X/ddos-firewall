@@ -92,6 +92,24 @@ struct global_firewall_config global_fw_config ={
     .g_tcp_connection_config = {
         .check = 0,
         .limit_cnt = 0
+    },
+    .g_stomp_config = {
+        .valid = 1,
+        .stomp_threshold = STOMP_THRESHOLD,
+        .burst_pkt_threshold = STOMP_BURST_PKT_THRESHOLD,
+        .burst_count_threshold = STOMP_BURST_COUNT_THRESHOLD,
+        .stomp_fixed_threshold = STOMP_FIXED_THRESHOLD,
+        .stomp_fixed_check_duration = STOMP_FIXED_CHECK_DURATION_NS,
+        .stomp_protect_duration = STOMP_PROTECTION_DURATION
+    },
+    .g_handshake_config = {
+        .valid = 1,
+        .handshake_threshold = HANDSHAKE_THRESHOLD,
+        .burst_pkt_threshold = HANDSHAKE_BURST_PKT_THRESHOLD,
+        .burst_count_threshold = HANDSHAKE_BURST_COUNT_THRESHOLD,
+        .handshake_fixed_threshold = HANDSHAKE_FIXED_THRESHOLD,
+        .handshake_fixed_check_duration = HANDSHAKE_FIXED_CHECK_DURATION_NS,
+        .handshake_protect_duration = HANDSHAKE_PROTECTION_DURATION
     }
 };
 
@@ -120,17 +138,68 @@ static long get_timezone_offset() {
     return offset;
 }
 
+/* Context for loading blocked/whitelist from SQLite; used to prune expired blocked rows. */
+struct load_block_white_ctx {
+    struct bpf_object *obj;
+    sqlite3_int64 *expired_blocked_ids;
+    size_t expired_cap;
+    size_t expired_n;
+};
+
+static int append_expired_blocked_id(struct load_block_white_ctx *ctx, sqlite3_int64 id)
+{
+    if (id <= 0)
+        return 0;
+    if (ctx->expired_n >= ctx->expired_cap) {
+        size_t newcap = ctx->expired_cap ? ctx->expired_cap * 2 : 16;
+        sqlite3_int64 *p = realloc(ctx->expired_blocked_ids,
+                                   newcap * sizeof(*p));
+        if (!p)
+            return -1;
+        ctx->expired_blocked_ids = p;
+        ctx->expired_cap = newcap;
+    }
+    ctx->expired_blocked_ids[ctx->expired_n++] = id;
+    return 0;
+}
+
+static int delete_expired_blocked_rows(sqlite3 *db, struct load_block_white_ctx *ctx)
+{
+    char *err_msg = NULL;
+    int any_err = 0;
+
+    for (size_t i = 0; i < ctx->expired_n; i++) {
+        char sql[96];
+        snprintf(sql, sizeof(sql), "DELETE FROM blocked_ips WHERE id=%lld;",
+                 (long long)ctx->expired_blocked_ids[i]);
+        int r = sqlite3_exec(db, sql, NULL, NULL, &err_msg);
+        if (r != SQLITE_OK) {
+            LOG_E("Failed to delete expired blocked_ips row id %lld: %s\n",
+                  (long long)ctx->expired_blocked_ids[i],
+                  err_msg ? err_msg : "(unknown)");
+            any_err = 1;
+        }
+        if (err_msg) {
+            sqlite3_free(err_msg);
+            err_msg = NULL;
+        }
+    }
+    return any_err ? -1 : 0;
+}
+
 // Callback function for blocked_ips
 int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColName) {
-    struct bpf_object *obj = (struct bpf_object *)param_obj;
+    struct load_block_white_ctx *ctx = (struct load_block_white_ctx *)param_obj;
+    struct bpf_object *obj = ctx->obj;
     
-    LOG_D("Blocked IP Record:\n");
+    //LOG_D("Blocked IP Record:\n");
 
     __u32 ip = 0, duration = 0;
     __u64 created = 0;
-
+    sqlite3_int64 row_id = 0;
+    char reason[256] = {0};
     for(int i = 0; i < argc; i++) {
-        LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+        //LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
         if (strncmp(azColName[i], "ip", 2) == 0 && argv[i]) {
             // Store IP address;
             struct in_addr addr;
@@ -158,10 +227,15 @@ int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColNam
                 created = timegm(&tm);
             }
         }
+        if (strncmp(azColName[i], "reason", 6) == 0 && argv[i]) {
+            // Store reason;
+            strncpy(reason, argv[i], sizeof(reason));
+        }
+        if (strcmp(azColName[i], "id") == 0 && argv[i])
+            row_id = strtoll(argv[i], NULL, 10);
     }
 
     if (ip != 0) {
-        LOG_D("ip = %X, duration = %d, created = %ld\n", ip, duration, created);
         int blocked_ips_fd;
         blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
         if (blocked_ips_fd < 0) {
@@ -177,11 +251,20 @@ int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColNam
             gmtime_r(&t, &tm);  // Thread-safe UTC conversion
             __u64 current_epoch = timegm(&tm);  // Direct UTC conversion (non-standard but widely available)
 
-            if (created + duration <= current_epoch) return 0;
+            if (created + duration <= current_epoch) {
+                if (append_expired_blocked_id(ctx, row_id) < 0)
+                    return -1;
+                return 0;
+            }
             __u64 seconds =  created + duration - current_epoch;
             if (seconds < 0) return 0;
-            
-            LOG_D("expect seconds is %d\n", seconds);
+            {
+                struct in_addr addr = { .s_addr = ip };
+                char ip_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+                LOG_D("ip = %s, duration = %d, created = %ld expire in %llu seconds reason = %s\n",
+                      ip_str, duration, created, (unsigned long long)seconds, reason);
+            }
 
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -200,12 +283,12 @@ int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColNam
 int white_ips_callback(void *param_obj, int argc, char **argv, char **azColName) {
     struct bpf_object *obj = (struct bpf_object *)param_obj;
     
-    LOG_D("Whitelisted IP Record:\n");
+    //LOG_D("Whitelisted IP Record:\n");
      __u32 ip = 0;
     __u64 created = 0;
 
     for(int i = 0; i < argc; i++) {
-        LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
+        //LOG_D("%s = %s\n", azColName[i], argv[i] ? argv[i] : "NULL");
         if (strncmp(azColName[i], "ip", 2) == 0 && argv[i]) {
             // Store IP address;
             struct in_addr addr;
@@ -231,7 +314,10 @@ int white_ips_callback(void *param_obj, int argc, char **argv, char **azColName)
     }
 
     if (ip != 0) {
-        LOG_D("ip = %X created = %ld\n", ip, created);
+        struct in_addr addr = { .s_addr = ip };
+        char ip_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
+        LOG_D("ip = %s created = %ld\n", ip_str, created);
         int white_ips_fd;
         white_ips_fd = bpf_object__find_map_fd_by_name(obj, "allowed_ips");
         if (white_ips_fd < 0) {
@@ -249,7 +335,13 @@ static int load_block_white_list(struct bpf_object *obj) {
     sqlite3 *db;
     char *err_msg = 0;
     int rc;
-    
+    struct load_block_white_ctx ctx = {
+        .obj = obj,
+        .expired_blocked_ids = NULL,
+        .expired_cap = 0,
+        .expired_n = 0,
+    };
+
     // Open database connection
     rc = sqlite3_open(SQLITE_DB_NAME, &db);
     
@@ -265,7 +357,7 @@ static int load_block_white_list(struct bpf_object *obj) {
         "id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "ip TEXT NOT NULL,"
         "type TEXT NOT NULL,"
-        "duration INTEGER,"
+        "duration TEXT NOT NULL,"
         "reason TEXT,"
         "created DATETIME DEFAULT CURRENT_TIMESTAMP,"
         "timestamp DATETIME DEFAULT CURRENT_TIMESTAMP"
@@ -304,7 +396,7 @@ static int load_block_white_list(struct bpf_object *obj) {
     char *sql_blocked = "SELECT * FROM blocked_ips;";
     
     LOG_D("Reading blocked IPs...\n");
-    rc = sqlite3_exec(db, sql_blocked, blocked_ips_callback, obj, &err_msg);
+    rc = sqlite3_exec(db, sql_blocked, blocked_ips_callback, &ctx, &err_msg);
     
     if (rc != SQLITE_OK) {
         LOG_E("SQL error (blocked_ips): %s\n", err_msg ? err_msg : "(unknown)");
@@ -313,6 +405,9 @@ static int load_block_white_list(struct bpf_object *obj) {
         goto cleanup;  // <-- ensure DB is closed
     }
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+
+    if (delete_expired_blocked_rows(db, &ctx) < 0)
+        rc = -1;
 
     // Read from white_ips table
     char *sql_white = "SELECT * FROM white_ips;";
@@ -328,7 +423,8 @@ static int load_block_white_list(struct bpf_object *obj) {
     }
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
     
-cleanup:    
+cleanup:
+    free(ctx.expired_blocked_ids);
     // Close database connection
     sqlite3_close(db);
     return (rc == 0) ? 0 : -1;
@@ -584,6 +680,38 @@ int load_config(struct bpf_object *obj) {
                 global_fw_config.g_gre_config.gre_fixed_check_duration = (__u64)int_value * ONE_SECOND_NS;
             } else if (strcmp(key, "gre_protection_duration") == 0) {
                 global_fw_config.g_gre_config.gre_protect_duration = int_value;
+            }
+            //STOMP config
+            else if (strcmp(key, "stomp_valid") == 0) {
+                global_fw_config.g_stomp_config.valid = int_value;
+            } else if (strcmp(key, "stomp_threshold") == 0) {
+                global_fw_config.g_stomp_config.stomp_threshold = (__u64)int_value;
+            } else if (strcmp(key, "stomp_burst_pkt") == 0) {
+                global_fw_config.g_stomp_config.burst_pkt_threshold = (__u64)int_value;
+            } else if (strcmp(key, "stomp_burst_count_per_sec") == 0) {
+                global_fw_config.g_stomp_config.burst_count_threshold = (__u64)int_value;
+            } else if (strcmp(key, "stomp_fixed_threshold") == 0) {
+                global_fw_config.g_stomp_config.stomp_fixed_threshold = int_value;
+            } else if (strcmp(key, "stomp_fixed_check_duration") == 0) {
+                global_fw_config.g_stomp_config.stomp_fixed_check_duration = (__u64)int_value * ONE_SECOND_NS;
+            } else if (strcmp(key, "stomp_protection_duration") == 0) {
+                global_fw_config.g_stomp_config.stomp_protect_duration = int_value;
+            }
+            //HandShake config
+            else if (strcmp(key, "handshake_valid") == 0) {
+                global_fw_config.g_handshake_config.valid = int_value;
+            } else if (strcmp(key, "handshake_threshold") == 0) {
+                global_fw_config.g_handshake_config.handshake_threshold = (__u64)int_value;
+            } else if (strcmp(key, "handshake_burst_pkt") == 0) {
+                global_fw_config.g_handshake_config.burst_pkt_threshold = (__u64)int_value;
+            } else if (strcmp(key, "handshake_burst_count_per_sec") == 0) {
+                global_fw_config.g_handshake_config.burst_count_threshold = (__u64)int_value;
+            } else if (strcmp(key, "handshake_fixed_threshold") == 0) {
+                global_fw_config.g_handshake_config.handshake_fixed_threshold = int_value;
+            } else if (strcmp(key, "handshake_fixed_check_duration") == 0) {
+                global_fw_config.g_handshake_config.handshake_fixed_check_duration = (__u64)int_value * ONE_SECOND_NS;
+            } else if (strcmp(key, "handshake_protection_duration") == 0) {
+                global_fw_config.g_handshake_config.handshake_protect_duration = int_value;
             }
             //TCP segment
             else if (strcmp(key, "tcp_seg_check") == 0) {

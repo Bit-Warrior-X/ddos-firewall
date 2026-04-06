@@ -31,6 +31,7 @@ extern char geo_db_location_path[512]; // Geo location code database path
 
 extern struct global_firewall_config global_fw_config;
 
+
 /* PERCPU map ABI: each CPU slot is round_up(value_size, 8) bytes; count CPUs via libbpf. */
 static inline size_t bpf_percpu_stride(__u32 value_size)
 {
@@ -59,6 +60,7 @@ static void stats_config_sum_percpu(const void *raw, size_t stride, int nr,
         sum->syn_ack += p->syn_ack;
         sum->fin_ack += p->fin_ack;
         sum->rst_ack += p->rst_ack;
+        sum->psh_ack += p->psh_ack;
         sum->icmp += p->icmp;
         sum->udp += p->udp;
         sum->gre += p->gre;
@@ -86,6 +88,181 @@ static void traffic_stats_config_sum_percpu(const void *raw, size_t stride, int 
     }
 }
 
+/* ---------- Helper function ---------- */
+
+static int resize_map(struct bpf_object *obj, const char *name, __u32 max_entries)
+{
+    struct bpf_map *map = bpf_object__find_map_by_name(obj, name);
+    if (!map) {
+        LOG_W("Map '%s' not found, skipping resize\n", name);
+        return 0;  /* non-fatal: map might not exist in older .o files */
+    }
+
+    __u32 old = bpf_map__max_entries(map);
+    if (max_entries == old)
+        return 0;
+
+    int err = bpf_map__set_max_entries(map, max_entries);
+    if (err) {
+        LOG_E("Failed to resize map '%s' from %u to %u: %s\n",
+              name, old, max_entries, strerror(-err));
+        return err;
+    }
+
+    LOG_I("Map '%s' resized: %u -> %u entries\n", name, old, max_entries);
+    return 0;
+}
+
+#if 0
+static int apply_map_sizing(struct bpf_object *obj)
+{
+    /*
+     * Read these from your parsed config. Below uses globals for illustration.
+     * Default to 0 = "don't resize, keep compiled-in default".
+     */
+    struct {
+        const char *map_name;
+        __u32 size;
+    } resize_list[] = {
+        /* --- Critical: undersized in original code --- */
+        { "blocked_ips",               global_fw_config_map_sizes.blocked_ips      },
+
+        /* --- SYN maps (already 100K, but configurable now) --- */
+        { "syn_counter_fixed",         global_fw_config_map_sizes.syn              },
+        { "syn_counter_fixed_metrics", global_fw_config_map_sizes.syn              },
+        { "burst_syn_state",           global_fw_config_map_sizes.syn              },
+        { "syn_challenge",             global_fw_config_map_sizes.syn              },
+
+        /* --- ACK maps (was 65535) --- */
+        { "ack_counter_fixed",         global_fw_config_map_sizes.ack              },
+        { "ack_counter_fixed_metrics", global_fw_config_map_sizes.ack              },
+        { "burst_ack_state",           global_fw_config_map_sizes.ack              },
+
+        /* --- RST maps (was 65535) --- */
+        { "rst_counter_fixed",         global_fw_config_map_sizes.rst              },
+        { "rst_counter_fixed_metrics", global_fw_config_map_sizes.rst              },
+        { "burst_rst_state",           global_fw_config_map_sizes.rst              },
+
+        /* --- ICMP maps --- */
+        { "icmp_counter_fixed",         global_fw_config_map_sizes.icmp            },
+        { "icmp_counter_fixed_metrics", global_fw_config_map_sizes.icmp            },
+        { "burst_icmp_state",           global_fw_config_map_sizes.icmp            },
+
+        /* --- UDP maps --- */
+        { "udp_counter_fixed",         global_fw_config_map_sizes.udp              },
+        { "udp_counter_fixed_metrics", global_fw_config_map_sizes.udp              },
+        { "burst_udp_state",           global_fw_config_map_sizes.udp              },
+
+        /* --- GRE maps --- */
+        { "gre_counter_fixed",         global_fw_config_map_sizes.gre              },
+        { "gre_counter_fixed_metrics", global_fw_config_map_sizes.gre              },
+        { "burst_gre_state",           global_fw_config_map_sizes.gre              },
+
+        /* --- NEW: PSH/STOMP maps --- */
+        { "stomp_counter_fixed",         global_fw_config_map_sizes.stomp              },
+        { "stomp_counter_fixed_metrics", global_fw_config_map_sizes.stomp              },
+        { "burst_stomp_state",           global_fw_config_map_sizes.stomp              },
+
+        /* --- NEW: SOCKET maps --- */
+        { "socket_counter_fixed",      global_fw_config_map_sizes.socket           },
+
+        /* --- NEW: Handshake maps --- */
+        { "handshake_counter_fixed",   global_fw_config_map_sizes.handshake        },
+        { "handshake_counter_fixed_metrics", global_fw_config_map_sizes.handshake  },
+        { "burst_handshake_state",     global_fw_config_map_sizes.handshake        },
+
+        /* --- Shared maps --- */
+        { "tcp_established_map",       global_fw_config_map_sizes.tcp_established  },
+        { "tcp_connection_map",        global_fw_config_map_sizes.tcp_established  },
+        { "allowed_ips",               global_fw_config_map_sizes.tcp_established  },
+        { "geo_result_cache",          global_fw_config_map_sizes.geo_cache        },
+    };
+
+    int count = sizeof(resize_list) / sizeof(resize_list[0]);
+    for (int i = 0; i < count; i++) {
+        if (resize_list[i].size == 0)
+            continue;  /* 0 = use compiled-in default */
+
+        /* Enforce minimum of 1024 to prevent misconfiguration */
+        __u32 sz = resize_list[i].size;
+        if (sz < 1024) sz = 1024;
+
+        /* Enforce maximum of 1M to prevent OOM */
+        if (sz > 1048576) {
+            LOG_W("Map '%s' size %u exceeds 1M max, capping to 1048576\n",
+                  resize_list[i].map_name, sz);
+            sz = 1048576;
+        }
+
+        int err = resize_map(obj, resize_list[i].map_name, sz);
+        if (err)
+            return err;
+    }
+
+    return 0;
+}
+#endif
+
+static void log_map_memory_usage(struct bpf_object *obj)
+{
+    struct bpf_map *map;
+    __u64 total_bytes = 0;
+
+    bpf_object__for_each_map(map, obj) {
+        struct bpf_map_info info = {};
+        __u32 len = sizeof(info);
+        int fd = bpf_map__fd(map);
+
+        if (fd < 0) continue;
+        if (bpf_obj_get_info_by_fd(fd, &info, &len)) continue;
+
+        /*
+         * Rough memory estimate per entry for LRU_HASH:
+         *   key_size + value_size + ~128 bytes overhead (hash bucket, LRU pointers, etc.)
+         * For PERCPU_ARRAY:
+         *   (value_size * nr_cpus) * max_entries
+         * For LPM_TRIE:
+         *   ~(key_size + value_size + 64) * max_entries (with NO_PREALLOC)
+         */
+        __u64 per_entry;
+        switch (info.type) {
+        case BPF_MAP_TYPE_LRU_HASH:
+        case BPF_MAP_TYPE_HASH:
+            per_entry = info.key_size + info.value_size + 128;
+            break;
+        case BPF_MAP_TYPE_PERCPU_ARRAY:
+            per_entry = info.value_size * (__u64)bpf_percpu_nr_cpus();
+            break;
+        case BPF_MAP_TYPE_LPM_TRIE:
+            per_entry = info.key_size + info.value_size + 64;
+            break;
+        case BPF_MAP_TYPE_RINGBUF:
+            per_entry = 1;  /* max_entries IS the byte size */
+            break;
+        default:
+            per_entry = info.key_size + info.value_size + 64;
+        }
+
+        __u64 map_bytes;
+        if (info.type == BPF_MAP_TYPE_RINGBUF)
+            map_bytes = info.max_entries;
+        else
+            map_bytes = per_entry * info.max_entries;
+
+        total_bytes += map_bytes;
+
+        if (map_bytes > (1024 * 1024)) {  /* only log maps > 1MB */
+            LOG_D("Map %-64s  entries=%-8u  entry≈%-5llu B  total≈%.1f MB\n",
+                  info.name, info.max_entries, per_entry,
+                  (double)map_bytes / (1024.0 * 1024.0));
+        }
+    }
+
+    LOG_I("Total estimated BPF map memory: %.1f MB\n",
+          (double)total_bytes / (1024.0 * 1024.0));
+}
+
+
 struct stats_config global_receive_stats = {0};
 struct stats_config global_passed_stats = {0};
 struct fixed_ip_pkt_stats global_max_ip_pkt_stats = {0};
@@ -110,8 +287,6 @@ static pthread_t fifo_sender_thr;
 static int api_parser_sock_fd = -1;
 static struct sockaddr_un api_parser_sock_addr;
 
-/* Forward declaration for startup IP sync helper */
-static void load_initial_ip_lists_from_sqlite(void);
 
 static int send_message_to_api_parser_direct(const char *message);
 
@@ -315,6 +490,22 @@ static void * global_attack_check_worker(void * arg) {
         goto cleanup;
     }
 
+    int global_stomp_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_stomp_pkt_counter");
+    if (global_stomp_pkt_counter_map_fd < 0) {
+        LOG_E( "Failed to find global_stomp_pkt_counter eBPF map\n");
+        goto cleanup;
+    }
+    int global_socket_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_socket_pkt_counter");
+    if (global_socket_pkt_counter_map_fd < 0) {
+        LOG_E( "Failed to find global_socket_pkt_counter eBPF map\n");
+        goto cleanup;
+    }
+    int global_handshake_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_handshake_pkt_counter");
+    if (global_handshake_pkt_counter_map_fd < 0) {
+        LOG_E( "Failed to find global_handshake_pkt_counter eBPF map\n");
+        goto cleanup;
+    }
+
     while (!exiting) {
         __u32 key = 0;
         time_t now = time(NULL);     /* current epoch seconds */
@@ -412,6 +603,41 @@ static void * global_attack_check_worker(void * arg) {
             goto cleanup;
         }
 
+        __u64 total_stomp_cnt = 0;
+        if (bpf_map_lookup_elem(global_stomp_pkt_counter_map_fd, &key, values)) {
+            LOG_E( "bpf_map_lookup_elem");
+            goto cleanup;
+        }
+        for (int cpu = 0; cpu < nr; cpu++) {
+            total_stomp_cnt += values[cpu];
+        }
+        memset(values, 0, vsize);
+        if (bpf_map_update_elem(global_stomp_pkt_counter_map_fd, &key, values, 0)) {
+            LOG_E( "bpf_map_update_elem");
+            goto cleanup;
+        }
+
+        /* Drain SOCKET counter */
+        if (global_socket_pkt_counter_map_fd >= 0) {
+            if (!bpf_map_lookup_elem(global_socket_pkt_counter_map_fd, &key, values)) {
+                memset(values, 0, vsize);
+                bpf_map_update_elem(global_socket_pkt_counter_map_fd, &key, values, 0);
+            }
+        }
+
+        __u64 total_handshake_cnt = 0;
+        if (bpf_map_lookup_elem(global_handshake_pkt_counter_map_fd, &key, values)) {
+            LOG_E( "bpf_map_lookup_elem");
+            goto cleanup;
+        }
+        for (int cpu = 0; cpu < nr; cpu++) {
+            total_handshake_cnt += values[cpu];
+        }
+        memset(values, 0, vsize);
+        if (bpf_map_update_elem(global_handshake_pkt_counter_map_fd, &key, values, 0)) {
+            LOG_E( "bpf_map_update_elem");
+            goto cleanup;
+        }
 
         struct bpf_map_info info = {};
         __u32 info_len = sizeof(info);
@@ -452,7 +678,7 @@ static void * global_attack_check_worker(void * arg) {
         tm_info = localtime(&rawtime);
 
         __u8 need_to_update = false;
-        __u8 syn_attack = false, ack_attack = false, rst_attack = false, icmp_attack = false, udp_attack = false, gre_attack = false;
+        __u8 syn_attack = false, ack_attack = false, rst_attack = false, icmp_attack = false, udp_attack = false, gre_attack = false, stomp_attack = false, handshake_attack = false;
 
         if (total_syn_cnt >= global_fw_config.g_syn_config.syn_threshold) syn_attack = true;
         else syn_attack = false;
@@ -573,20 +799,59 @@ static void * global_attack_check_worker(void * arg) {
             }
         }
 
+        if (total_stomp_cnt >= global_fw_config.g_stomp_config.stomp_threshold) stomp_attack = true;
+        else stomp_attack = false;
+        if (stomp_attack != global_attack_stats_val->stomp_attack) {
+            if (stomp_attack == true) {
+                if (now >= global_attack_stats_val->stomp_protect_expire) {
+                    global_attack_stats_val->stomp_protect_expire = now + global_fw_config.g_stomp_config.stomp_protect_duration;
+                    print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_START, 0);
+                    global_attack_stats_val->stomp_attack = stomp_attack;
+                    need_to_update = true;
+                }
+            } else {
+                if (now >= global_attack_stats_val->stomp_protect_expire) {
+                    print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_END, 0);
+                    global_attack_stats_val->stomp_attack = stomp_attack;
+                    need_to_update = true;
+                }
+            }
+        }
+
+        if (total_handshake_cnt >= global_fw_config.g_handshake_config.handshake_threshold) handshake_attack = true;
+        else handshake_attack = false;
+        if (handshake_attack != global_attack_stats_val->handshake_attack) {
+            if (handshake_attack == true) {
+                if (now >= global_attack_stats_val->handshake_protect_expire) {
+                    global_attack_stats_val->handshake_protect_expire = now + global_fw_config.g_handshake_config.handshake_protect_duration;
+                    print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_START, 0);
+                    global_attack_stats_val->handshake_attack = handshake_attack;
+                    need_to_update = true;
+                }
+            } else {
+                if (now >= global_attack_stats_val->handshake_protect_expire) {
+                    print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_END, 0);
+                    global_attack_stats_val->handshake_attack = handshake_attack;
+                    need_to_update = true;
+                }
+            }
+        }
+        
         if (need_to_update == true) {
             bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
         }
 
-        LOG_T("STATS: SYN:%llu/%llu ACK:%llu/%llu RST:%llu/%llu PSH:%llu FIN:%llu URG:%llu SYN+ACK:%llu FIN+ACK:%llu RST+ACK:%llu ICMP:%llu/%llu UDP:%llu/%llu GRE:%llu/%llu\n",
+        LOG_T("STATS: SYN:%llu/%llu ACK:%llu/%llu RST:%llu/%llu PSH:%llu FIN:%llu URG:%llu SYN+ACK:%llu/%llu FIN+ACK:%llu RST+ACK:%llu PSH+ACK:%llu/%llu ICMP:%llu/%llu UDP:%llu/%llu GRE:%llu/%llu\n",
                 aggregate.syn, total_syn_cnt,
                 aggregate.ack, total_ack_cnt,
                 aggregate.rst, total_rst_cnt,
                 aggregate.psh,
                 aggregate.fin,
                 aggregate.urg,
-				aggregate.syn_ack,
-                aggregate.fin_ack,
+				aggregate.syn_ack, total_handshake_cnt,
                 aggregate.rst_ack,
+                aggregate.fin_ack,
+                aggregate.psh_ack, total_stomp_cnt,
                 aggregate.icmp, total_icmp_cnt,
                 aggregate.udp, total_udp_cnt,
                 aggregate.gre, total_gre_cnt);
@@ -599,9 +864,10 @@ static void * global_attack_check_worker(void * arg) {
         global_passed_stats.psh = aggregate.psh;
         global_passed_stats.fin = aggregate.fin;
         global_passed_stats.urg = aggregate.urg;
-        global_passed_stats.syn_ack = aggregate.syn_ack;
+        global_passed_stats.syn_ack = total_handshake_cnt;
         global_passed_stats.fin_ack = aggregate.fin_ack;
         global_passed_stats.rst_ack = aggregate.rst_ack;
+        global_passed_stats.psh_ack = total_stomp_cnt;
         global_passed_stats.icmp = total_icmp_cnt;
         global_passed_stats.udp = total_udp_cnt;
         global_passed_stats.gre = total_gre_cnt;
@@ -725,20 +991,23 @@ static int ringbuf_handle_event(void *ctx, void *data, size_t size)
 }
 
 char str_fixed_ip_ring_buf_type[256][128] = {
-    "UNKNOWN", 
-    "FIXED_IP_RING_BUF_SYN", 
-    "FIXED_IP_RING_BUF_ACK", 
-    "FIXED_IP_RING_BUF_RST", 
-    "FIXED_IP_RING_BUF_PSH", 
-    "FIXED_IP_RING_BUF_URG", 
-    "FIXED_IP_RING_BUF_FIN",
-    "FIXED_IP_RING_BUF_SYN_ACK", 
-    "FIXED_IP_RING_BUF_RST_ACK", 
-    "FIXED_IP_RING_BUF_FIN_ACK",
-    "FIXED_IP_RING_BUF_UDP", 
-    "FIXED_IP_RING_BUF_ICMP", 
-    "FIXED_IP_RING_BUF_GRE"
+    "UNKNOWN",
+    "FIXED_IP_RING_BUF_SYN",        /* 1 */
+    "FIXED_IP_RING_BUF_ACK",        /* 2 */
+    "FIXED_IP_RING_BUF_RST",        /* 3 */
+    "FIXED_IP_RING_BUF_PSH",        /* 4 */
+    "FIXED_IP_RING_BUF_URG",        /* 5 */
+    "FIXED_IP_RING_BUF_FIN",        /* 6 */
+    "FIXED_IP_RING_BUF_SYN_ACK",    /* 7 */
+    "FIXED_IP_RING_BUF_RST_ACK",    /* 8 */
+    "FIXED_IP_RING_BUF_FIN_ACK",    /* 9 */
+    "FIXED_IP_RING_BUF_UDP",        /* 10 */
+    "FIXED_IP_RING_BUF_ICMP",       /* 11 */
+    "FIXED_IP_RING_BUF_GRE",        /* 12 */
+    "FIXED_IP_RING_BUF_STOMP",      /* 13 */
+    "FIXED_IP_RING_BUF_HANDSHAKE",  /* 14 */
 };
+
 
 static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
 {
@@ -746,19 +1015,18 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
 
     char src[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &e->srcip, src, sizeof(src));
-
-    if (e->fixed_type >= 0 && e->fixed_type <= FIXED_IP_RING_BUF_GRE) {
+    if (e->fixed_type >= 0 && e->fixed_type <= FIXED_IP_RING_BUF_HANDSHAKE) {
         if (e->duration == 0) {
             LOG_E("Fixed checked duration is 0\n");
             return 0;
         }
 
-        LOG_D("Received fixed ip ringbuf handle event [%d] duration is [%llu]s\n", e->over_fixed, (__u64)e->duration / ONE_SECOND_NS);
+        //LOG_D("Received fixed ip ringbuf handle event [%d] duration is [%llu]s\n", e->over_fixed, (__u64)e->duration / ONE_SECOND_NS);
         
         __u64 expected_pps = 0;
 
         if (e->over_fixed == 0) {
-            LOG_I("[NORMAL] %s %s %llu %llu pps\n", str_fixed_ip_ring_buf_type[e->fixed_type], src, e->pkt_count, (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS)));
+            LOG_D("[NORMAL] %s %s total:%llu -> %llupps\n", str_fixed_ip_ring_buf_type[e->fixed_type], src, e->pkt_count, (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS)));
         }
 
         switch (e->fixed_type) {
@@ -792,6 +1060,7 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
                 }
                 break;
             }
+
             case FIXED_IP_RING_BUF_UDP: {
                 if (e->over_fixed == 0) {
                     expected_pps = (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS));
@@ -822,6 +1091,26 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
                 }
                 break;
             }
+            case FIXED_IP_RING_BUF_STOMP: {
+                if (e->over_fixed == 0) {
+                    expected_pps = (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS));
+                    if (global_max_ip_pkt_stats.normal_stomp < expected_pps) global_max_ip_pkt_stats.normal_stomp = expected_pps;
+                } else {
+                    expected_pps = (__u64)((double)global_fw_config.g_stomp_config.stomp_fixed_check_duration / e->duration * e->pkt_count / ((double)global_fw_config.g_stomp_config.stomp_fixed_check_duration / ONE_SECOND_NS));
+                    if (global_max_ip_pkt_stats.attack_stomp < expected_pps) global_max_ip_pkt_stats.attack_stomp = expected_pps;
+                }
+                break;
+            }
+            case FIXED_IP_RING_BUF_HANDSHAKE: {
+                if (e->over_fixed == 0) {
+                    expected_pps = (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS));
+                    if (global_max_ip_pkt_stats.normal_handshake < expected_pps) global_max_ip_pkt_stats.normal_handshake = expected_pps;
+                } else {
+                    expected_pps = (__u64)((double)global_fw_config.g_syn_config.syn_fixed_check_duration / e->duration * e->pkt_count / ((double)global_fw_config.g_syn_config.syn_fixed_check_duration / ONE_SECOND_NS));
+                    if (global_max_ip_pkt_stats.attack_handshake < expected_pps) global_max_ip_pkt_stats.attack_handshake = expected_pps;
+                }
+                break;
+            }
 
             case FIXED_IP_RING_BUF_PSH:
             case FIXED_IP_RING_BUF_URG:
@@ -829,10 +1118,14 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
             case FIXED_IP_RING_BUF_SYN_ACK:
             case FIXED_IP_RING_BUF_RST_ACK:
             case FIXED_IP_RING_BUF_FIN_ACK:
-            default: {
-                expected_pps = (__u64)((double)global_fw_config.g_syn_config.syn_fixed_check_duration / e->duration * e->pkt_count / ((double)global_fw_config.g_syn_config.syn_fixed_check_duration / ONE_SECOND_NS));
+            {
+                expected_pps = (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS));
                 break;
             }
+            // default: {
+            //     expected_pps = (__u64)((double)global_fw_config.g_syn_config.syn_fixed_check_duration / e->duration * e->pkt_count / ((double)global_fw_config.g_syn_config.syn_fixed_check_duration / ONE_SECOND_NS));
+            //     break;
+            // }
         }
         
         if (e->over_fixed == 1)
@@ -1065,10 +1358,17 @@ static void * send_check_blocklist_worker(void * arg)
 }
 
 int main(int argc, char **argv) {
-    
+    LOG_I("Starting EBPF-Firewall\n");
     int ifindex, err = -1;
-    struct bpf_program *prog_main, *prog_parse_syn, *prog_parse_ack, *prog_parse_rst, *prog_parse_icmp, *prog_parse_udp, *prog_parse_gre;
-    int attach_id = -1, prog_main_fd, prog_parse_syn_fd, prog_parse_ack_fd, prog_parse_rst_fd, prog_parse_icmp_fd, prog_parse_udp_fd, prog_parse_gre_fd;
+
+    struct bpf_program *prog_main, *prog_parse_syn, *prog_parse_ack, *prog_parse_rst,
+                       *prog_parse_icmp, *prog_parse_udp, *prog_parse_gre,
+                       *prog_parse_stomp, *prog_parse_tcp_socket, *prog_parse_handshake;
+
+    int attach_id = -1, prog_main_fd, prog_parse_syn_fd, prog_parse_ack_fd,
+        prog_parse_rst_fd, prog_parse_icmp_fd, prog_parse_udp_fd, prog_parse_gre_fd,
+        prog_parse_stomp_fd, prog_parse_tcp_socket_fd, prog_parse_handshake_fd;
+
     int prog_array_map_fd;
     int tcp_established_map_fd, tcp_connection_map_fd, blocked_ips_map_fd;
     struct perf_buffer *pb = NULL;
@@ -1092,12 +1392,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+#if 0
+    if (apply_map_sizing(obj) < 0) {
+        LOG_E("Failed to apply map sizing from config\n");
+        goto cleanup;
+    }
+#endif
     // Load the BPF object into the kernel.
     err = bpf_object__load(obj);
     if (err) {
         LOG_E( "ERROR: loading BPF object file: %d\n", err);
         goto cleanup;
     }
+
+    log_map_memory_usage(obj);
 
     if (init_unix_socket() < 0) {
         LOG_E( "Failed to init unix socket\n");
@@ -1163,7 +1471,18 @@ int main(int argc, char **argv) {
         LOG_E( "ERROR: could not find all program sections\n");
         goto cleanup;
     }
-    
+
+    prog_parse_stomp = bpf_object__find_program_by_name(obj, "xdp_parse_stomp");    
+    prog_parse_tcp_socket = bpf_object__find_program_by_name(obj, "xdp_parse_tcp_socket");
+    prog_parse_handshake = bpf_object__find_program_by_name(obj, "xdp_parse_handshake");
+
+    if (!prog_main || !prog_parse_syn || !prog_parse_ack || !prog_parse_rst ||
+        !prog_parse_icmp || !prog_parse_udp || !prog_parse_gre ||
+        !prog_parse_stomp || !prog_parse_tcp_socket || !prog_parse_handshake) {
+        LOG_E("ERROR: could not find all program sections\n");
+        goto cleanup;
+    }
+
     // Get file descriptors for the programs.
     prog_main_fd = bpf_program__fd(prog_main);
     prog_parse_syn_fd = bpf_program__fd(prog_parse_syn);
@@ -1172,7 +1491,11 @@ int main(int argc, char **argv) {
     prog_parse_icmp_fd = bpf_program__fd(prog_parse_icmp);
     prog_parse_udp_fd = bpf_program__fd(prog_parse_udp);
     prog_parse_gre_fd = bpf_program__fd(prog_parse_gre);
-    
+    prog_parse_stomp_fd = bpf_program__fd(prog_parse_stomp);
+    prog_parse_tcp_socket_fd = bpf_program__fd(prog_parse_tcp_socket);
+    prog_parse_handshake_fd = bpf_program__fd(prog_parse_handshake);
+
+
     // Find the prog_array map (declared as "prog_array" in our BPF program).
     struct bpf_map *map = bpf_object__find_map_by_name(obj, "prog_array");
     if (!map) {
@@ -1184,7 +1507,8 @@ int main(int argc, char **argv) {
     // Update the prog_array map:
     // Key 0 -> xdp_parse_syn; Key 1 -> xdp_parse_ack.
     // Key 2 -> xdp_parse_rst; Key 3 -> xdp_parse_icmp. Key 4 -> xdp_parse_udp. Key 5 -> xdp_parse_gre.
-    int key0 = 0, key1 = 1, key2 = 2, key3 = 3, key4 = 4, key5 = 5;
+    int key0 = 0, key1 = 1, key2 = 2, key3 = 3, key4 = 4, key5 = 5, key6 = 6, key7 = 7, key8 = 8;
+    
     err = bpf_map_update_elem(prog_array_map_fd, &key0, &prog_parse_syn_fd, 0);
     if (err) {
         LOG_E( "ERROR: updating prog_array key 0 failed: %d\n", err);
@@ -1215,11 +1539,19 @@ int main(int argc, char **argv) {
         LOG_E( "ERROR: updating prog_array key 5 failed: %d\n", err);
         goto cleanup;
     }
-    
-    // Attach the main XDP program to the interface.
-    attach_id = bpf_xdp_attach(ifindex, prog_main_fd, attach_mode, NULL);
-    if (attach_id < 0) {
-        LOG_E( "ERROR: attaching XDP program to %s (ifindex %d) return %d, failed: %d\n", ifname, ifindex, attach_id, err);
+    err = bpf_map_update_elem(prog_array_map_fd, &key6, &prog_parse_stomp_fd, 0);
+    if (err) {
+        LOG_E("ERROR: updating prog_array key 6 (stomp) failed: %d\n", err);
+        goto cleanup;
+    }
+    err = bpf_map_update_elem(prog_array_map_fd, &key7, &prog_parse_tcp_socket_fd, 0);
+    if (err) {
+        LOG_E("ERROR: updating prog_array key 7 (tcp_socket) failed: %d\n", err);
+        goto cleanup;
+    }
+    err = bpf_map_update_elem(prog_array_map_fd, &key8, &prog_parse_handshake_fd, 0);
+    if (err) {
+        LOG_E("ERROR: updating prog_array key 8 (handshake) failed: %d\n", err);
         goto cleanup;
     }
 
@@ -1274,17 +1606,27 @@ int main(int argc, char **argv) {
         LOG_E( "Failed to find blocked_ips eBPF map\n");
         goto cleanup;
     }
+    
+#if 0
+    if (purge_conntrack_for_blocked_ips(blocked_ips_map_fd) < 0) {
+        LOG_E( "Failed to purge conntrack for blocked IPs\n");
+        goto cleanup;
+    }
+#endif
+
+    flush_all_tcp_conntrack();
+
+    // Attach the main XDP program to the interface.
+    attach_id = bpf_xdp_attach(ifindex, prog_main_fd, attach_mode, NULL);
+    if (attach_id < 0) {
+        LOG_E( "ERROR: attaching XDP program to %s (ifindex %d) return %d, failed: %d\n", ifname, ifindex, attach_id, err);
+        goto cleanup;
+    }
 
     if (init_conntrack(tcp_established_map_fd, tcp_connection_map_fd, blocked_ips_map_fd) < 0) {
         LOG_E( "Failed to init conntrack\n");
         goto cleanup;
     }
-
-    /* At startup, preload blacklist/whitelist entries from SQLite DB so that
-     * the eBPF maps reflect the latest block/allow lists before we begin
-     * processing traffic.
-     */
-    load_initial_ip_lists_from_sqlite();
 
     pthread_t global_attack_ch_thr, blocked_ips_duration_thr;
     if (pthread_create(&global_attack_ch_thr, NULL, global_attack_check_worker, obj) != 0) {
@@ -1309,11 +1651,14 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    // Let's skip this logic right now
+#if 0
     pthread_t send_check_blocklist_thr;
     if (pthread_create(&send_check_blocklist_thr, NULL, send_check_blocklist_worker, NULL) != 0) {
         LOG_E("pthread_create for send_check_blocklist_thr %s\n", strerror(errno));
         goto cleanup;
     }
+#endif
 
     pthread_t license_check_thr;
     if (pthread_create(&license_check_thr, NULL, license_check_worker, NULL) != 0) {
@@ -1598,6 +1943,16 @@ int clear_fw() {
         return -1;
     LOG_D("tcp_established_map is cleared\n");
 
+    int syn_validated_ips_fd;
+    syn_validated_ips_fd = bpf_object__find_map_fd_by_name(obj, "syn_validated_ips");
+    if (syn_validated_ips_fd < 0) {
+        LOG_E( "Failed to find syn_validated_ips\n");
+        return -1;
+    }
+    if (clear_batch_map(syn_validated_ips_fd) < 0)
+        return -1;
+    LOG_D("syn_validated_ips is cleared\n");
+
     int global_syn_pkt_counter_fd, syn_counter_fixed_fd, burst_syn_state_fd, syn_challenge_fd;
     global_syn_pkt_counter_fd = bpf_object__find_map_fd_by_name(obj, "global_syn_pkt_counter");
     if (global_syn_pkt_counter_fd < 0) {
@@ -1774,6 +2129,45 @@ int clear_fw() {
     if (clear_batch_map(burst_gre_state_fd) < 0)
         return -1;
     LOG_D("burst_gre_state is cleared\n");
+
+    int fd;
+    fd = bpf_object__find_map_fd_by_name(obj, "global_stomp_pkt_counter");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("global_stomp_pkt_counter is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "stomp_counter_fixed");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("stomp_counter_fixed is cleared\n");
+
+    //fd = bpf_object__find_map_fd_by_name(obj, "stomp_counter_fixed_metrics");
+    //if (fd >= 0) clear_batch_map(fd);
+    //LOG_D("stomp_counter_fixed_metrics is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "burst_stomp_state");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("burst_stomp_state is cleared\n");
+
+    /* --- SOCKET maps --- */
+    fd = bpf_object__find_map_fd_by_name(obj, "global_socket_pkt_counter");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("global_socket_pkt_counter is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "socket_counter_fixed");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("socket_counter_fixed is cleared\n");
+
+    /* --- Handshake maps --- */
+    fd = bpf_object__find_map_fd_by_name(obj, "global_handshake_pkt_counter");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("global_handshake_pkt_counter is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "handshake_counter_fixed");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("handshake_counter_fixed is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "burst_handshake_state");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("burst_handshake_state is cleared\n");
 
     return 0;
 }
@@ -2624,7 +3018,7 @@ int send_message_to_api_parser(const char *message) {
         return -1;
     }
 
-    LOG_D("%s", message);
+    //LOG_D("%s", message);
     (void)pthread_once(&fifo_sender_once, init_fifo_sender_worker_once);
 
     char *msg_copy = strdup(message);
@@ -2651,88 +3045,6 @@ int send_message_to_api_parser(const char *message) {
     pthread_mutex_unlock(&fifo_q_mutex);
 
     return 0;
-}
-
-/* Load initial blacklist/whitelist entries from SQLite into eBPF maps.
- *
- * This is intended to be called once during startup, after:
- *   - the BPF object has been loaded, and
- *   - the global configuration has been loaded into global_fw_config.
- *
- * It reads from:
- *   - blocked_ips(ip, ...)  -> adds each IP as a permanent block
- *   - white_ips(ip, ...)    -> adds each IP to the allowed list
- */
-static void load_initial_ip_lists_from_sqlite(void)
-{
-    sqlite3 *db = NULL;
-    sqlite3_stmt *stmt = NULL;
-
-    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
-        LOG_E("Failed to open SQLite database '%s': %s\n",
-              SQLITE_DB_NAME, sqlite3_errmsg(db));
-        if (db) {
-            sqlite3_close(db);
-        }
-        return;
-    }
-
-    /* Load blacklist (blocked_ips) -------------------------------------- */
-    const char *block_sql = "SELECT ip FROM blocked_ips";
-    int rc = sqlite3_prepare_v2(db, block_sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        LOG_E("Failed to prepare blocked_ips query: %s\n", sqlite3_errmsg(db));
-    } else {
-        int count = 0;
-        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const unsigned char *ip_txt = sqlite3_column_text(stmt, 0);
-            if (!ip_txt || !*ip_txt) {
-                continue;
-            }
-
-            /* Apply as permanent block (-1 duration) */
-            if (add_block_ip((char *)ip_txt, -1) >= 0) {
-                count++;
-            }
-        }
-        if (rc != SQLITE_DONE) {
-            LOG_E("Error iterating blocked_ips rows: %s\n", sqlite3_errmsg(db));
-        }
-        LOG_I("Loaded %d blacklist IPs from SQLite\n", count);
-    }
-    if (stmt) {
-        sqlite3_finalize(stmt);
-        stmt = NULL;
-    }
-
-    /* Load whitelist (white_ips) ---------------------------------------- */
-    const char *white_sql = "SELECT ip FROM white_ips";
-    rc = sqlite3_prepare_v2(db, white_sql, -1, &stmt, NULL);
-    if (rc != SQLITE_OK) {
-        LOG_E("Failed to prepare white_ips query: %s\n", sqlite3_errmsg(db));
-    } else {
-        int count = 0;
-        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            const unsigned char *ip_txt = sqlite3_column_text(stmt, 0);
-            if (!ip_txt || !*ip_txt) {
-                continue;
-            }
-
-            if (add_allow_ip((char *)ip_txt) >= 0) {
-                count++;
-            }
-        }
-        if (rc != SQLITE_DONE) {
-            LOG_E("Error iterating white_ips rows: %s\n", sqlite3_errmsg(db));
-        }
-        LOG_I("Loaded %d whitelist IPs from SQLite\n", count);
-    }
-    if (stmt) {
-        sqlite3_finalize(stmt);
-        stmt = NULL;
-    }
-
-    sqlite3_close(db);
 }
 
 int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason) {

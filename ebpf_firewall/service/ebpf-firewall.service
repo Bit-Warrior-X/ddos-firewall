@@ -1,19 +1,59 @@
+
 [Unit]
-Description=eBPF Firewall (Userspace)
-After=network.target
+Description=eBPF XDP Anti-DDoS Firewall
+After=network-online.target
+Wants=network-online.target
+
 
 [Service]
+Type=simple
 User=root
 Group=root
 WorkingDirectory=/usr/local/share/ebpf_firewall/
+#ExecStartPre=/usr/local/share/ebpf_firewall/ddos-firewall-system-setup.sh bond0
 ExecStart=/usr/local/share/ebpf_firewall/ebpf_firewall_userspace
 Restart=on-failure
-RestartSec=5
+RestartSec=1
+
 Environment="LD_LIBRARY_PATH=/usr/local/lib"
 Environment="EBPF_FIREWALL_XDP_KO=/usr/local/share/ebpf_firewall/ebpf_firewall_kernel.o"
 Environment="EBPF_FIREWALL_XDP_CONFIG=/usr/local/share/ebpf_firewall/firewall.config"
 Environment="PUBKEY_PATH=/usr/local/share/ebpf_firewall/server_public_key.pem"
 Environment="LICENSE_PATH=/usr/local/share/ebpf_firewall/license.lic"
+
+
+# --- Memory ---
+# BPF maps need locked memory. Without this, map creation fails.
+LimitMEMLOCK=infinity
+
+# --- File descriptors ---
+# BPF maps, ring buffers, conntrack sockets all consume FDs.
+LimitNOFILE=1048576
+
+# --- Scheduling priority ---
+# Run at highest priority so XDP userspace helper threads
+# (conntrack, attack detection, ring buffer polling) aren't preempted.
+Nice=-20
+
+# --- Core dumps ---
+# Enable core dumps for debugging crash-during-attack issues.
+# Disable again once the bug is found.
+LimitCORE=infinity
+
+# --- Process isolation ---
+# The firewall needs full network access but nothing else.
+#ProtectSystem=strict
+#ReadWritePaths=/var /tmp /usr/local/share/ebpf_firewall
+#ProtectHome=yes
+#PrivateTmp=yes
+#NoNewPrivileges=no
+
+# --- Restart behavior ---
+# If the firewall crashes during an attack, restart immediately.
+# The conntrack flush + iptables DROP NEW rule protects during the gap.
+WatchdogSec=30
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Install]
 WantedBy=multi-user.target

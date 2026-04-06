@@ -72,4 +72,4 @@ cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_L4_DIR}/"
 cp -f "${SCRIPT_DIR}/build/ebpf_firewall_kernel.o" "${PAYLOAD_L4_DIR}/"
 cp -af "${SCRIPT_DIR}/geodb/." "${PAYLOAD_L4_DIR}/geodb/"
 
-systemctl start ebpf-firewall
+#systemctl start ebpf-firewall

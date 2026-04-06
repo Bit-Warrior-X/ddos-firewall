@@ -143,6 +143,21 @@ typedef struct {
     char tcp_seg_comment[MAX_COMMENT_LENGTH];
     char geo_comment[MAX_COMMENT_LENGTH];
     char tcp_conn_comment[MAX_COMMENT_LENGTH];
+
+    // Map sizing
+    int map_size_blocked_ips;
+    int map_size_syn;
+    int map_size_ack;
+    int map_size_rst;
+    int map_size_icmp;
+    int map_size_udp;
+    int map_size_gre;
+    int map_size_psh;
+    int map_size_socket;
+    int map_size_handshake;
+    int map_size_tcp_established;
+    int map_size_geo_cache;
+    
 } FirewallConfig;
 
 void free_config(FirewallConfig *config) {
