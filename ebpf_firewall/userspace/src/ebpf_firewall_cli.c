@@ -157,7 +157,7 @@ typedef struct {
     int map_size_handshake;
     int map_size_tcp_established;
     int map_size_geo_cache;
-    
+
 } FirewallConfig;
 
 void free_config(FirewallConfig *config) {
@@ -168,6 +168,7 @@ void free_config(FirewallConfig *config) {
     if (config->geo_db_location_path) free(config->geo_db_location_path);
     if (config->geo_countries) free(config->geo_countries);
 }
+
 
 int parse_config(const char *filename, FirewallConfig *config) {
     FILE *file = fopen(filename, "r");

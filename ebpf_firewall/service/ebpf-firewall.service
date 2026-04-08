@@ -51,7 +51,11 @@ LimitCORE=infinity
 # --- Restart behavior ---
 # If the firewall crashes during an attack, restart immediately.
 # The conntrack flush + iptables DROP NEW rule protects during the gap.
-WatchdogSec=30
+#
+# Do NOT set WatchdogSec until the daemon calls sd_notify(0, "WATCHDOG=1") on a
+# timer (e.g. every WatchdogSec/2). Without it, systemd kills the process on each
+# timeout and you get repeated core dumps in /var/crash (often exactly
+# StartLimitBurst times per StartLimitIntervalSec).
 StartLimitIntervalSec=60
 StartLimitBurst=5
 

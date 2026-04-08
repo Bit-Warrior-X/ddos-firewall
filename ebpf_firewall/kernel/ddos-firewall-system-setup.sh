@@ -127,6 +127,7 @@ else
 
     # Build new rules
     run iptables -F INPUT
+    run iptables -P INPUT ACCEPT
     run iptables -A INPUT -i lo -j ACCEPT
 
     # SSH — always allow (prevent lockout)
@@ -143,11 +144,11 @@ else
     run iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
 
     # Drop all new TCP — this is the restart gap protection
-    run iptables -A INPUT -p tcp -m conntrack --ctstate NEW -j DROP
-    log_ok "NEW TCP connections blocked (restart gap protection)"
+    #run iptables -A INPUT -p tcp -m conntrack --ctstate NEW -j DROP
+    #log_ok "NEW TCP connections blocked (restart gap protection)"
 
     # Default policy
-    run iptables -P INPUT DROP
+    #run iptables -P INPUT DROP
 
     # Persist
     if command -v netfilter-persistent &>/dev/null; then

@@ -15,6 +15,7 @@
 #include <openssl/err.h>
 #include <base64.h>
 #include <fcntl.h>
+#include <unistd.h>
 #include <sqlite3.h>
 #include <stdarg.h>
 #include <sys/socket.h>
@@ -321,6 +322,131 @@ static void * fifo_sender_worker(void *arg)
     return NULL;
 }
 
+/*
+ * Block events from the BPF ring buffer used to call append_block_ip_to_sqlite() on the
+ * poll thread. Opening SQLite and doing one INSERT per event synchronously stalls the whole
+ * daemon (and anything sharing that thread) under SYN flood. Queue rows and flush in a
+ * dedicated worker with batched transactions + WAL.
+ */
+#define SQLITE_BLOCK_Q_CAP 16384
+typedef struct {
+    char ip[INET_ADDRSTRLEN];
+    int block_duration;
+    char reason[512];
+} sqlite_block_job_t;
+
+static sqlite_block_job_t sqlite_block_q[SQLITE_BLOCK_Q_CAP];
+static int sqlite_block_q_head;
+static int sqlite_block_q_tail;
+static int sqlite_block_q_size;
+static int sqlite_block_q_dropped;
+static pthread_mutex_t sqlite_block_q_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t sqlite_block_q_cv = PTHREAD_COND_INITIALIZER;
+static pthread_once_t sqlite_worker_once = PTHREAD_ONCE_INIT;
+static pthread_t sqlite_worker_thr;
+static int sqlite_worker_thr_valid;
+
+static void *sqlite_block_worker_main(void *arg)
+{
+    (void)arg;
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    const char *sql =
+        "INSERT INTO blocked_ips (ip, type, duration, reason, created) "
+        "VALUES (?, 'Auto', ?, ?, ?);";
+
+    while (!stmt) {
+        if (exiting)
+            return NULL;
+        if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
+            LOG_E("sqlite worker: cannot open '%s', retrying\n", SQLITE_DB_NAME);
+            sleep(1);
+            continue;
+        }
+        sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL);
+        sqlite3_busy_timeout(db, 5000);
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+            LOG_E("sqlite worker: prepare failed: %s\n", sqlite3_errmsg(db));
+            sqlite3_close(db);
+            db = NULL;
+            sleep(1);
+            continue;
+        }
+    }
+
+    for (;;) {
+        pthread_mutex_lock(&sqlite_block_q_mutex);
+        while (sqlite_block_q_size == 0 && !exiting)
+            pthread_cond_wait(&sqlite_block_q_cv, &sqlite_block_q_mutex);
+
+        if (sqlite_block_q_size == 0 && exiting) {
+            pthread_mutex_unlock(&sqlite_block_q_mutex);
+            break;
+        }
+
+        sqlite_block_job_t batch[512];
+        int n = 0;
+        while (sqlite_block_q_size > 0 && n < 512) {
+            batch[n++] = sqlite_block_q[sqlite_block_q_head];
+            sqlite_block_q_head = (sqlite_block_q_head + 1) % SQLITE_BLOCK_Q_CAP;
+            sqlite_block_q_size--;
+        }
+        pthread_mutex_unlock(&sqlite_block_q_mutex);
+
+        if (n == 0)
+            continue;
+
+        if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
+            LOG_E("sqlite worker: BEGIN failed: %s\n", sqlite3_errmsg(db));
+            continue;
+        }
+
+        for (int i = 0; i < n; i++) {
+            char duration_str[1024];
+            if (batch[i].block_duration == 0)
+                snprintf(duration_str, sizeof(duration_str), "%lld",
+                         global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS);
+            else
+                snprintf(duration_str, sizeof(duration_str), "%d", batch[i].block_duration);
+
+            char created[32];
+            time_t now = time(NULL);
+            struct tm gmt;
+            gmtime_r(&now, &gmt);
+            strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
+
+            sqlite3_bind_text(stmt, 1, batch[i].ip, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 2, duration_str, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 3, batch[i].reason, -1, SQLITE_STATIC);
+            sqlite3_bind_text(stmt, 4, created, -1, SQLITE_STATIC);
+
+            if (sqlite3_step(stmt) != SQLITE_DONE)
+                LOG_E("sqlite worker: insert: %s\n", sqlite3_errmsg(db));
+            sqlite3_reset(stmt);
+            sqlite3_clear_bindings(stmt);
+        }
+
+        if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK) {
+            LOG_E("sqlite worker: COMMIT failed: %s\n", sqlite3_errmsg(db));
+            sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+        }
+    }
+
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return NULL;
+}
+
+static void sqlite_worker_start_once(void)
+{
+    if (pthread_create(&sqlite_worker_thr, NULL, sqlite_block_worker_main, NULL) != 0) {
+        LOG_E("pthread_create sqlite_block_worker: %s\n", strerror(errno));
+        sqlite_worker_thr_valid = 0;
+        return;
+    }
+    sqlite_worker_thr_valid = 1;
+}
+
 static void init_fifo_sender_worker_once(void)
 {
     int sndbuf_bytes = 4 * 1024 * 1024;
@@ -371,7 +497,7 @@ static void * global_traffic_stats_check_worker(void * arg) {
 
     int index = 0;
     while (!exiting) {
-        sleep(60);
+        sleep(1);
 	    struct bpf_map_info info = {};
 	    __u32 info_len = sizeof(info);
 
@@ -1684,6 +1810,10 @@ int main(int argc, char **argv) {
     }
     
 cleanup:
+    pthread_cond_broadcast(&sqlite_block_q_cv);
+    if (sqlite_worker_thr_valid)
+        pthread_join(sqlite_worker_thr, NULL);
+
     if (ringbuf) ring_buffer__free(ringbuf);
     if (fixed_ip_ringbuf) ring_buffer__free(fixed_ip_ringbuf);
     if (obj) bpf_object__close(obj);
@@ -1723,6 +1853,10 @@ int reload_fw() {
     }
     if (load_config(obj) < 0) {
         LOG_E( "reload config failed\n");
+        return -1;
+    }
+    if (reconcile_blocked_ips_tracked_state(obj) < 0) {
+        LOG_E( "reload: failed to sync blocked IP conntrack/BPF maps\n");
         return -1;
     }
     LOG_I("Config reloaded successfully\n");
@@ -2536,6 +2670,14 @@ int add_block_ip(char *ip, int seconds) {
         return err;
     }
 
+    int tcp_established_map_fd =
+        bpf_object__find_map_fd_by_name(obj, "tcp_established_map");
+    int tcp_connection_map_fd =
+        bpf_object__find_map_fd_by_name(obj, "tcp_connection_map");
+    if (tcp_established_map_fd >= 0 && tcp_connection_map_fd >= 0)
+        clear_tracked_tcp_state_for_blocked_ip(tcp_established_map_fd,
+                                               tcp_connection_map_fd, key);
+
     return is_new_entry ? 0 : 1;
 }
 
@@ -3047,31 +3189,30 @@ int send_message_to_api_parser(const char *message) {
     return 0;
 }
 
-int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason) {
+static int append_block_ip_to_sqlite_sync(const char *ip_str, int block_duration, const char *reason)
+{
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
 
-    /* Open database */
     if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
         LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
         return -1;
     }
 
-    /* Current UTC time string */
     char created[32];
-    time_t now = time(NULL);           // seconds since epoch (UTC base)
+    time_t now = time(NULL);
     struct tm gmt;
-    gmtime_r(&now, &gmt);               // convert to UTC struct tm
+    gmtime_r(&now, &gmt);
     strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
 
     char duration_str[1024];
-    if (block_duration == 0) //use default l4 config block duration variable.
-        snprintf(duration_str, 1024, "%lld", global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS);
+    if (block_duration == 0)
+        snprintf(duration_str, sizeof(duration_str), "%lld",
+                 global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS);
     else
-        snprintf(duration_str, 1024, "%d", block_duration);
+        snprintf(duration_str, sizeof(duration_str), "%d", block_duration);
 
-    /* Prepare INSERT statement */
     const char *sql =
         "INSERT INTO blocked_ips (ip, type, duration, reason, created) "
         "VALUES (?, 'Auto', ?, ?, ?);";
@@ -3082,13 +3223,11 @@ int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char
         return -1;
     }
 
-    /* Bind parameters */
     sqlite3_bind_text(stmt, 1, ip_str, -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 2, duration_str , -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt, 3, reason, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 2, duration_str, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, reason ? reason : "", -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, created, -1, SQLITE_STATIC);
 
-    /* Execute */
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         LOG_E("Failed to insert data: %s\n", sqlite3_errmsg(db));
         sqlite3_finalize(stmt);
@@ -3098,6 +3237,41 @@ int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char
 
     sqlite3_finalize(stmt);
     sqlite3_close(db);
+    return 0;
+}
+
+int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason)
+{
+    if (!ip_str)
+        return -1;
+
+    pthread_once(&sqlite_worker_once, sqlite_worker_start_once);
+    if (!sqlite_worker_thr_valid)
+        return append_block_ip_to_sqlite_sync(ip_str, block_duration, reason);
+
+    pthread_mutex_lock(&sqlite_block_q_mutex);
+    if (sqlite_block_q_size >= SQLITE_BLOCK_Q_CAP) {
+        sqlite_block_q_dropped++;
+        if ((sqlite_block_q_dropped % 100) == 1)
+            LOG_W("SQLite block queue full, dropping rows (dropped=%d)\n", sqlite_block_q_dropped);
+        pthread_mutex_unlock(&sqlite_block_q_mutex);
+        return -1;
+    }
+
+    sqlite_block_job_t *slot = &sqlite_block_q[sqlite_block_q_tail];
+    strncpy(slot->ip, ip_str, sizeof(slot->ip) - 1);
+    slot->ip[sizeof(slot->ip) - 1] = '\0';
+    slot->block_duration = block_duration;
+    if (reason) {
+        strncpy(slot->reason, reason, sizeof(slot->reason) - 1);
+        slot->reason[sizeof(slot->reason) - 1] = '\0';
+    } else {
+        slot->reason[0] = '\0';
+    }
+    sqlite_block_q_tail = (sqlite_block_q_tail + 1) % SQLITE_BLOCK_Q_CAP;
+    sqlite_block_q_size++;
+    pthread_cond_signal(&sqlite_block_q_cv);
+    pthread_mutex_unlock(&sqlite_block_q_mutex);
     return 0;
 }
 

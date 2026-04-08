@@ -124,6 +124,85 @@
     return 0;
 }
 
+/* tcp_established_map key: low 32 bits = IP, upper = port (see make_established_key). */
+static void established_map_remove_all_for_ip(int est_fd, __u32 ip_net_order)
+{
+    if (est_fd < 0)
+        return;
+
+    for (;;) {
+        __u64 key, next_key;
+        int deleted = 0;
+
+        if (bpf_map_get_next_key(est_fd, NULL, &next_key) != 0)
+            break;
+
+        do {
+            key = next_key;
+            if ((__u32)key == ip_net_order) {
+                bpf_map_delete_elem(est_fd, &key);
+                deleted = 1;
+                break;
+            }
+        } while (bpf_map_get_next_key(est_fd, &key, &next_key) == 0);
+
+        if (!deleted)
+            break;
+    }
+}
+
+void clear_tracked_tcp_state_for_blocked_ip(int tcp_established_fd,
+                                            int tcp_connection_map_fd,
+                                            __u32 ip_net_order)
+{
+    established_map_remove_all_for_ip(tcp_established_fd, ip_net_order);
+
+    if (tcp_connection_map_fd >= 0)
+        bpf_map_delete_elem(tcp_connection_map_fd, &ip_net_order);
+
+    flush_conntrack_for_ip(ip_net_order);
+}
+
+int reconcile_blocked_ips_tracked_state(struct bpf_object *obj)
+{
+    int est_fd, conn_fd, blocked_fd;
+
+    est_fd = bpf_object__find_map_fd_by_name(obj, "tcp_established_map");
+    conn_fd = bpf_object__find_map_fd_by_name(obj, "tcp_connection_map");
+    blocked_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
+    if (est_fd < 0 || conn_fd < 0 || blocked_fd < 0) {
+        LOG_E("reconcile_blocked_ips: missing BPF map fd\n");
+        return -1;
+    }
+
+    struct bpf_map_info info = {};
+    __u32 len = sizeof(info);
+    if (bpf_obj_get_info_by_fd(blocked_fd, &info, &len)) {
+        LOG_E("reconcile_blocked_ips: bpf_obj_get_info_by_fd: %s\n", strerror(errno));
+        return -1;
+    }
+
+    void *key  = calloc(1, info.key_size);
+    void *next = calloc(1, info.key_size);
+    if (!key || !next) {
+        free(key);
+        free(next);
+        return -1;
+    }
+
+    if (bpf_map_get_next_key(blocked_fd, NULL, next) == 0) {
+        do {
+            __u32 ip = *(__u32 *)next;
+            clear_tracked_tcp_state_for_blocked_ip(est_fd, conn_fd, ip);
+            memcpy(key, next, info.key_size);
+        } while (bpf_map_get_next_key(blocked_fd, key, next) == 0);
+    }
+
+    free(key);
+    free(next);
+    return 0;
+}
+
 /*
  * Iterate blocked_ips BPF map and flush conntrack for each blocked IP.
  * Call this AFTER loading blocked IPs from SQLite but BEFORE init_conntrack().
@@ -199,6 +278,8 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
              __u64 now = (__u64)ts.tv_sec * 1000000000ULL + (__u64)ts.tv_nsec;
              __u64 expire = now + global_fw_config.g_config.black_ip_duration;
              bpf_map_update_elem(block_ips_map_fd, &sip, &expire, BPF_ANY);
+             clear_tracked_tcp_state_for_blocked_ip(established_map_fd,
+                                                    connection_map_fd, sip);
          }
      }
  }

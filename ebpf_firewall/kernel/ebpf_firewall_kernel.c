@@ -484,7 +484,6 @@ int xdp_parse_syn(struct xdp_md *ctx) {
 
     /* ---- If SYN protection is disabled, pass everything ---- */
     if (config->valid == 0) {
-        if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; }
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
@@ -495,10 +494,17 @@ int xdp_parse_syn(struct xdp_md *ctx) {
      * This protects existing clients opening additional connections during an attack.
      */
     if (is_tcp_established(src_ip, tcp->source)) {
-        if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; }
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
+
+    /*
+     * Count every SYN from sources not in the established fast-path toward global PPS.
+     * This must run before any XDP_DROP (challenge, burst, fixed), otherwise the
+     * userspace worker never sees flood volume and syn_attack stays off while the
+     * dataplane is dropping or while attack mode flaps off under challenge load.
+     */
+    __sync_fetch_and_add(pkt_cnt, 1);
 
     /* ---- Metrics (always run for visibility) ---- */
     struct flood_stats *fixed_stats = bpf_map_lookup_elem(&syn_counter_fixed_metrics, &src_ip);
@@ -516,19 +522,17 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         bpf_map_update_elem(&syn_counter_fixed_metrics, &src_ip, &ns, BPF_ANY);
     }
 
-    /* ---- If NOT in attack mode, pass the SYN normally ----
-     * No challenge, no rate limiting. Just count and pass.
-     * This is the critical fix: during normal traffic, SYNs flow without penalty.
+    /* ---- Below global threshold: no burst / SYN challenge (low latency) ----
+     * Still enforce per-IP fixed-window limiting (syn_fixed_threshold) so
+     * single-source or sub-threshold floods cannot fill listen queues.
      */
     volatile struct global_attack_stats *g_atk = &global_fw_config.g_attack_stats;
     if (g_atk->syn_attack == 0) {
-        if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; }
-        __sync_fetch_and_add(pkt_cnt, 1);
-        return XDP_PASS;
+        goto fixed_window_check;
     }
 
     /* ======================================================================
-     * ATTACK MODE — everything below only runs when syn_attack == 1
+     * ATTACK MODE — burst + SYN challenge + fixed window when syn_attack == 1
      * ====================================================================== */
 
     /* ---- FAST PATH 2: IP recently passed the SYN challenge ----
@@ -662,8 +666,6 @@ fixed_window_check:
         return XDP_DROP;
     }
 
-    if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; }
-    __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
 
@@ -700,7 +702,6 @@ int FUNC_NAME(struct xdp_md *ctx) {                                             
     __u64 *pkt_cnt = bpf_map_lookup_elem(&GLOBAL_PKT_MAP, &key);                             \
     if (!pkt_cnt) return XDP_PASS;                                                            \
     if (config->CONFIG_VALID == 0) {                                                          \
-        if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; } \
         __sync_fetch_and_add(pkt_cnt, 1);                                                    \
         return XDP_PASS;                                                                      \
     }                                                                                         \
@@ -709,7 +710,6 @@ int FUNC_NAME(struct xdp_md *ctx) {                                             
         struct tcphdr *tcp2 = (void *)ip + ihl2;                                              \
         if ((void*)(tcp2 + 1) <= data_end) {                                                  \
             if (is_tcp_established(src_ip, tcp2->source)) {                                   \
-                if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; } \
                 __sync_fetch_and_add(pkt_cnt, 1);                                            \
                 return XDP_PASS;                                                              \
             }                                                                                 \
@@ -731,7 +731,6 @@ int FUNC_NAME(struct xdp_md *ctx) {                                             
     }                                                                                         \
     volatile struct global_attack_stats *g_atk = &global_fw_config.g_attack_stats;            \
     if (g_atk->ATTACK_FLAG == 0) {                                                            \
-        if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; } \
         __sync_fetch_and_add(pkt_cnt, 1);                                                    \
         return XDP_PASS;                                                                      \
     }                                                                                         \
@@ -780,7 +779,6 @@ int FUNC_NAME(struct xdp_md *ctx) {                                             
         bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fe, sizeof(fe), 0);                   \
         return XDP_DROP;                                                                      \
     }                                                                                         \
-    if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; } \
     __sync_fetch_and_add(pkt_cnt, 1);                                                        \
     return XDP_PASS;                                                                          \
 }
@@ -982,7 +980,6 @@ int xdp_parse_tcp_socket(struct xdp_md *ctx) {
         bpf_map_update_elem(&socket_counter_fixed, &src_ip, &ns, BPF_ANY);
     }
 
-    if (!is_geo_allowed(src_ip)) { traffic_stats->blocked_traffic += packet_size; return XDP_DROP; }
     __sync_fetch_and_add(pkt_cnt, 1);
     return XDP_PASS;
 }
