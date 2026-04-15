@@ -10,7 +10,8 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/usr/local/share/ebpf_firewall/
-#ExecStartPre=/usr/local/share/ebpf_firewall/ddos-firewall-system-setup.sh bond0
+# Optional: mlx5/bond IRQ+RPS spread (stops irqbalance). Omit --skip-iptables if you do not want iptables touched.
+#ExecStartPre=/usr/local/share/ebpf_firewall/ddos-firewall-system-setup.sh bond0 --skip-iptables --spread-nic-processing --high-pps-softnet
 ExecStart=/usr/local/share/ebpf_firewall/ebpf_firewall_userspace
 Restart=on-failure
 RestartSec=1
@@ -31,9 +32,9 @@ LimitMEMLOCK=infinity
 LimitNOFILE=1048576
 
 # --- Scheduling priority ---
-# Run at highest priority so XDP userspace helper threads
-# (conntrack, attack detection, ring buffer polling) aren't preempted.
-Nice=-20
+# Do NOT use Nice=-20: it starves sshd, nginx, and other services during a flood,
+# so you cannot connect to administer the host. Default (0) keeps admin traffic viable.
+Nice=0
 
 # --- Core dumps ---
 # Enable core dumps for debugging crash-during-attack issues.

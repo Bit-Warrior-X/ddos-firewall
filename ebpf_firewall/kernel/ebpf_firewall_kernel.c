@@ -357,9 +357,13 @@ int xdp_main(struct xdp_md *ctx) {
         }
     }
 
-    if (!is_geo_allowed(src_ip)) {
-        traffic_stats->blocked_traffic += packet_size;
-        return XDP_DROP;
+    /* Geo: pure SYN is handled in xdp_parse_syn (tail call) so we do not pay LPM/cache
+     * work in xdp_main before tail_call — cuts per-packet cost on the hottest path. */
+    if (!(have_tcp && tcp_syn && !tcp_ack)) {
+        if (!is_geo_allowed(src_ip)) {
+            traffic_stats->blocked_traffic += packet_size;
+            return XDP_DROP;
+        }
     }
     
     /* TCP dispatch */
@@ -478,6 +482,26 @@ int xdp_parse_syn(struct xdp_md *ctx) {
     __u32 src_ip = ip->saddr;
     key = 0;
 
+
+    __u8 *whitelisted = bpf_map_lookup_elem(&allowed_ips, &src_ip);
+    if (whitelisted)
+        return XDP_PASS;
+
+    volatile struct global_config *gcfg = &global_fw_config.g_config;
+    __u64 block_exp = now + gcfg->black_ip_duration;
+    __u64 *blocked_time_p = bpf_map_lookup_elem(&blocked_ips, &src_ip);
+    if (!blocked_time_p)
+        bpf_map_update_elem(&blocked_ips, &src_ip, &block_exp, BPF_ANY);
+    else
+        *blocked_time_p = block_exp;
+
+    return XDP_DROP;
+
+    if (!is_geo_allowed(src_ip)) {
+        traffic_stats->blocked_traffic += packet_size;
+        return XDP_DROP;
+    }
+
     volatile struct syn_config *config = &global_fw_config.g_syn_config;
     __u64 *pkt_cnt = bpf_map_lookup_elem(&global_syn_pkt_counter, &key);
     if (!pkt_cnt) return XDP_PASS;
@@ -493,10 +517,13 @@ int xdp_parse_syn(struct xdp_md *ctx) {
      * Let the SYN through immediately — the kernel will handle the handshake normally.
      * This protects existing clients opening additional connections during an attack.
      */
+     
+#if 0
     if (is_tcp_established(src_ip, tcp->source)) {
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
+#endif
 
     /*
      * Count every SYN from sources not in the established fast-path toward global PPS.
@@ -521,7 +548,8 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         struct flood_stats ns = {0}; ns.count = 1; ns.last_ts = now;
         bpf_map_update_elem(&syn_counter_fixed_metrics, &src_ip, &ns, BPF_ANY);
     }
-
+    
+#if 0
     /* ---- Below global threshold: no burst / SYN challenge (low latency) ----
      * Still enforce per-IP fixed-window limiting (syn_fixed_threshold) so
      * single-source or sub-threshold floods cannot fill listen queues.
@@ -642,7 +670,9 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         bpf_map_delete_elem(&syn_challenge, &src_ip);
     }
 
+
 fixed_window_check:
+#endif
     /* ---- Fixed window rate limiting (per-IP) ---- */
     fixed_stats = bpf_map_lookup_elem(&syn_counter_fixed, &src_ip);
     if (fixed_stats) {

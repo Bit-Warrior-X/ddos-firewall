@@ -3,7 +3,24 @@
 # Production system hardening for XDP/eBPF anti-DDoS firewall
 #
 # Usage:
-#   ./ddos-firewall-system-setup.sh [interface] [--skip-iptables] [--skip-nic] [--dry-run]
+#   ./ddos-firewall-system-setup.sh [interface] [--skip-iptables] [--skip-nic] [--dry-run] \
+#       [--spread-nic-processing] [--keep-irqbalance] [--irq-affinity-numa-local] [--high-pps-softnet]
+#
+# What this script already does (high-PPS oriented):
+#   • Bond slaves: max RX/TX rings, GRO/LRO off (XDP-friendly), rxhash on, ntuple on (best-effort),
+#     RX coalesce rx-usecs=0 / rx-frames=32, ethtool -X equal <queue-count> for RSS spread.
+#   • --spread-nic-processing: stop irqbalance; pin each mlx5 MSI-X IRQ to CPUs (PCI BDF match,
+#     mlx5_comp* order); optional RPS/XPS on slaves (NUMA-local CPU mask).
+#   • Sysctl: large netdev_max_backlog, netdev_budget / budget_usecs, conntrack sizing, TCP/rmem, etc.
+#
+# 10M+ pps needs more than tuning: XDP program cost, PCIe, upstream scrubbing, and often hardware
+# drops (rx_discards_phy) if host cannot drain. This script improves IRQ/RSS/softnet headroom only.
+#
+# For Mellanox mlx5 + bond under heavy PPS: use --spread-nic-processing (stops irqbalance,
+# pins IRQs by PCI BDF, enables RPS/XPS). irqbalance often mis-handles 60+ MSI-X lines.
+# IRQ affinity uses all online CPUs except those in /sys/.../cpu/isolated unless you pass
+# --irq-affinity-numa-local (NUMA node of the NIC(s) only).
+# --high-pps-softnet: raise net.core.netdev_budget* for more work per NAPI poll (trade: latency).
 #
 # Safe for: bond/team interfaces, VLAN sub-interfaces, single NICs
 # Idempotent: can be run multiple times without side effects
@@ -17,6 +34,10 @@ IFACE="${1:-bond0}"
 SKIP_IPTABLES=0
 SKIP_NIC=0
 DRY_RUN=0
+SPREAD_NIC=0
+KEEP_IRQBALANCE=0
+IRQ_AFFINITY_NUMA_LOCAL=0
+HIGH_PPS_SOFTNET=0
 SSH_PORT=22
 SYSCTL_CONF="/etc/sysctl.d/99-ddos-firewall.conf"
 MODPROBE_CONF="/etc/modprobe.d/nf_conntrack.conf"
@@ -28,6 +49,10 @@ for arg in "$@"; do
         --skip-iptables) SKIP_IPTABLES=1 ;;
         --skip-nic)      SKIP_NIC=1 ;;
         --dry-run)       DRY_RUN=1 ;;
+        --spread-nic-processing) SPREAD_NIC=1 ;;
+        --keep-irqbalance) KEEP_IRQBALANCE=1 ;;
+        --irq-affinity-numa-local) IRQ_AFFINITY_NUMA_LOCAL=1 ;;
+        --high-pps-softnet) HIGH_PPS_SOFTNET=1 ;;
         --ssh-port=*)    SSH_PORT="${arg#*=}" ;;
         *)               echo "Unknown option: $arg"; exit 1 ;;
     esac
@@ -59,6 +84,121 @@ sysctl_set() {
     fi
     sysctl -w "$key=$val" >/dev/null 2>&1 && return 0
     return 1
+}
+
+# Expand kernel cpulist (e.g. 0-7,16-23) to space-separated CPU numbers
+expand_cpulist() {
+    local IFS=','
+    local -a parts
+    read -r -a parts <<< "$1"
+    local p a b
+    for p in "${parts[@]}"; do
+        if [[ "$p" == *-* ]]; then
+            a=${p%-*}; b=${p#*-}
+            seq "$a" "$b" 2>/dev/null || true
+        else
+            [ -n "$p" ] && echo "$p"
+        fi
+    done
+}
+
+# PCI BDF for netdev (mlx5 IRQ lines use pci:0000:12:00.0, not iface name)
+nic_pci_bdf() {
+    local nic="$1"
+    local dev
+    dev=$(readlink -f "/sys/class/net/$nic/device" 2>/dev/null || true)
+    [ -n "$dev" ] || return 1
+    basename "$dev"
+}
+
+# IRQ numbers whose /proc/interrupts line mentions this PCI BDF
+irqs_for_pci() {
+    local pci="$1"
+    [ -n "$pci" ] || return 0
+    awk -v pci="$pci" '
+        NR == 1 { next }
+        $0 ~ pci {
+            gsub(/:/, "", $1)
+            if ($1 ~ /^[0-9]+$/) print $1
+        }
+    ' /proc/interrupts 2>/dev/null | sort -un
+}
+
+# Same IRQs as irqs_for_pci, but order mlx5_compN by N (then async, then other MSI-X lines).
+# IRQ number order alone does not match queue index; spreading in comp order maps queues to CPUs predictably.
+irqs_for_pci_sorted() {
+    local pci="$1"
+    [ -n "$pci" ] || return 0
+    awk -v pci="$pci" '
+        NR == 1 { next }
+        $0 ~ pci {
+            gsub(/:/, "", $1)
+            if ($1 !~ /^[0-9]+$/) next
+            irq = $1
+            key = 2000000 + irq
+            if (match($0, /mlx5_comp[0-9]+/)) {
+                line = substr($0, RSTART, RLENGTH)
+                sub(/^mlx5_comp/, "", line)
+                key = line + 0
+            } else if (match($0, /mlx5_async[0-9]+/)) {
+                line = substr($0, RSTART, RLENGTH)
+                sub(/^mlx5_async/, "", line)
+                key = 1000000 + line + 0
+            }
+            print key, irq
+        }
+    ' /proc/interrupts 2>/dev/null | sort -n -k1,1 -k2,2n | awk '{ print $2 }' | awk '!seen[$0]++'
+}
+
+# Online CPUs minus kernel isolated list (isolcpus / tuned); preferred targets for IRQ affinity
+cpus_online_exclude_isolated() {
+    local -A iso=()
+    local c online
+    online=$(cat /sys/devices/system/cpu/online 2>/dev/null || true)
+    [ -z "$online" ] && online="0-$(($(nproc) - 1))"
+    for c in $(expand_cpulist "$(cat /sys/devices/system/cpu/isolated 2>/dev/null || true)"); do
+        iso[$c]=1
+    done
+    for c in $(expand_cpulist "$online"); do
+        [ -z "${iso[$c]:-}" ] && echo "$c"
+    done | sort -un
+}
+
+# CPUs on the NUMA node local to the NIC; fallback all CPUs
+cpus_for_nic_numa() {
+    local nic="$1"
+    local nn f
+    nn=$(cat "/sys/class/net/$nic/device/numa_node" 2>/dev/null || echo -1)
+    if [ "$nn" -ge 0 ] && [ -f "/sys/devices/system/node/node${nn}/cpulist" ]; then
+        f=$(cat "/sys/devices/system/node/node${nn}/cpulist")
+        expand_cpulist "$f"
+    else
+        seq 0 $(($(nproc) - 1))
+    fi
+}
+
+# RX queue count from sysfs (matches what ethtool -X equal N expects for that netdev)
+nic_rx_queue_count() {
+    local nic="$1"
+    echo $(ls -d "/sys/class/net/$nic/queues/rx-"* 2>/dev/null | wc -l)
+}
+
+# Build rps_cpus / xps_cpus mask: comma-separated 32-bit little-endian groups (CPUs 0-31 first)
+cpus_to_mask() {
+    local -a buckets=(0 0 0 0 0 0 0 0)
+    local c w b max_w=0
+    for c in "$@"; do
+        w=$((c / 32))
+        b=$((c % 32))
+        buckets[w]=$(( ${buckets[w]} | (1 << b) ))
+        [ "$w" -gt "$max_w" ] && max_w=$w
+    done
+    local i s=""
+    for i in $(seq 0 "$max_w"); do
+        [ -n "$s" ] && s+=","
+        s+=$(printf '%x' "${buckets[i]}")
+    done
+    echo "$s"
 }
 
 # =====================================================================
@@ -94,6 +234,12 @@ elif ip link show "$IFACE" 2>/dev/null | grep -q "vlan"; then
     echo "Interface: $IFACE (vlan)"
 else
     echo "Interface: $IFACE (physical)"
+fi
+
+# Slaves for bond/team-style configs (IRQ/RPS always target hardware netdevs)
+PHYSICAL_NIC_LIST="$IFACE"
+if [ "$IFACE_TYPE" = "bond" ] && [ -n "${BOND_SLAVES:-}" ]; then
+    PHYSICAL_NIC_LIST="$BOND_SLAVES"
 fi
 
 echo "Mode: $([ $DRY_RUN -eq 1 ] && echo 'DRY RUN' || echo 'LIVE')"
@@ -167,18 +313,14 @@ fi
 echo ""
 echo "[2/6] Tuning NIC..."
 
+TUNED_NIC_LIST="$PHYSICAL_NIC_LIST"
 if [ "$SKIP_NIC" -eq 1 ]; then
     log_skip "NIC tuning (--skip-nic)"
 elif ! command -v ethtool &>/dev/null; then
     log_warn "ethtool not found — install with: apt install ethtool"
 else
-    # For bond interfaces, tune the slave NICs (the bond itself doesn't have ring buffers)
-    if [ "$IFACE_TYPE" = "bond" ] && [ -n "$BOND_SLAVES" ]; then
-        NIC_LIST="$BOND_SLAVES"
-        log_ok "Tuning bond slaves: $BOND_SLAVES"
-    else
-        NIC_LIST="$IFACE"
-    fi
+    NIC_LIST="$PHYSICAL_NIC_LIST"
+    [ "$IFACE_TYPE" = "bond" ] && [ -n "${BOND_SLAVES:-}" ] && log_ok "Tuning bond slaves: $BOND_SLAVES"
 
     for NIC in $NIC_LIST; do
         echo "  --- $NIC ---"
@@ -218,56 +360,164 @@ else
         # TSO/GSO are TX-side — safe to leave on (XDP_TX benefits from them)
         # rx-vlan-offload: leave on unless causing issues
 
-        # Enable RX flow hashing for multi-queue distribution
+        # --- Interrupt coalescing (lower latency / faster RX refill; more IRQ load) ---
+        # mlx5: rx-usecs 0 + small rx-frames reduces batching vs defaults like 8µs/128 frames.
+        # Turn off adaptive RX if driver allows (can batch too aggressively for steady high PPS + XDP)
+        run ethtool -C "$NIC" adaptive-rx off 2>/dev/null || true
+        if run ethtool -C "$NIC" rx-usecs 0 rx-frames 32 2>/dev/null; then
+            log_ok "RX coalesce: adaptive-rx off (best effort), rx-usecs=0 rx-frames=32"
+        elif run ethtool -C "$NIC" rx-usecs 0 2>/dev/null; then
+            log_ok "RX coalesce: rx-usecs=0 (rx-frames not set on this driver)"
+        else
+            log_warn "Could not set RX coalesce on $NIC (driver may use fixed or adaptive-only)"
+        fi
+
+        # --- n-tuple / flow director (hardware steering hooks; many mlx5 parts show [fixed] off) ---
+        if run ethtool -K "$NIC" ntuple on 2>/dev/null; then
+            log_ok "ntuple filters: on"
+        else
+            log_warn "ntuple not enabled on $NIC (often off [fixed] on mlx5 — use rxhash + -X below)"
+        fi
+
+        # Enable RX flow hashing for multi-queue distribution (RSS input side)
         run ethtool -K "$NIC" rxhash on 2>/dev/null || true
 
         log_ok "GRO/LRO off, rxhash on"
 
-        # Show current queue count
-        QUEUES=$(ls -d /sys/class/net/"$NIC"/queues/rx-* 2>/dev/null | wc -l)
+        # --- RSS indirection: spread flows evenly across all RX queues ---
+        QUEUES=$(nic_rx_queue_count "$NIC")
+        if [ "${QUEUES:-0}" -ge 2 ] 2>/dev/null; then
+            if run ethtool -X "$NIC" equal "$QUEUES" 2>/dev/null; then
+                log_ok "RSS indirection: equal $QUEUES queues (ethtool -X)"
+            else
+                log_warn "ethtool -X equal $QUEUES failed on $NIC (firmware/driver limit or needs ethtool -L first)"
+            fi
+        else
+            log_warn "Unexpected RX queue count ($QUEUES) for $NIC — skip ethtool -X"
+        fi
+
         log_ok "RX queues: $QUEUES"
     done
 fi
 
 
 # =====================================================================
-# 3. IRQ AFFINITY
+# 3. IRQ AFFINITY (+ optional RPS/XPS)
 # =====================================================================
 echo ""
 echo "[3/6] Configuring IRQ affinity..."
 
+_IRQB_ACTIVE=0
 if systemctl is-active --quiet irqbalance 2>/dev/null; then
-    log_ok "irqbalance is running (handles affinity automatically)"
-    log_ok "For maximum XDP performance, consider stopping irqbalance"
-    log_ok "and pinning IRQs manually to specific cores"
-else
-    NCPUS=$(nproc)
+    _IRQB_ACTIVE=1
+fi
 
-    # For bond, distribute IRQs from all slave NICs
-    if [ "$IFACE_TYPE" = "bond" ] && [ -n "$BOND_SLAVES" ]; then
-        IRQ_IFACES="$BOND_SLAVES"
-    else
-        IRQ_IFACES="$IFACE"
+if [ "$_IRQB_ACTIVE" -eq 1 ] && [ "$KEEP_IRQBALANCE" -eq 1 ]; then
+    log_ok "irqbalance is running (--keep-irqbalance: leaving IRQ affinity unchanged)"
+elif [ "$_IRQB_ACTIVE" -eq 1 ] && [ "$SPREAD_NIC" -eq 0 ]; then
+    log_warn "irqbalance is active — under high PPS, mlx5 MSI-X often piles onto a few CPUs"
+    log_warn "Fix: run again with --spread-nic-processing (stops irqbalance, pins IRQs by PCI BDF)"
+else
+    if [ "$_IRQB_ACTIVE" -eq 1 ] && [ "$SPREAD_NIC" -eq 1 ]; then
+        run systemctl stop irqbalance 2>/dev/null || true
+        log_ok "Stopped irqbalance (stable manual IRQ spread)"
+    fi
+
+    IRQ_IFACES="$PHYSICAL_NIC_LIST"
+
+    declare -a SPREAD_CPUS=()
+    if [ "$SPREAD_NIC" -eq 1 ] && [ "$IRQ_AFFINITY_NUMA_LOCAL" -eq 0 ]; then
+        mapfile -t SPREAD_CPUS < <(cpus_online_exclude_isolated)
+        if [ "${#SPREAD_CPUS[@]}" -eq 0 ]; then
+            log_warn "No online non-isolated CPUs for IRQ spread — falling back to NUMA-local pool"
+        fi
+    fi
+    if [ "${#SPREAD_CPUS[@]}" -eq 0 ]; then
+        mapfile -t SPREAD_CPUS < <(
+            {
+                for _nic in $IRQ_IFACES; do
+                    cpus_for_nic_numa "$_nic"
+                done
+            } | sort -un
+        )
+    fi
+    if [ "${#SPREAD_CPUS[@]}" -eq 0 ]; then
+        mapfile -t SPREAD_CPUS < <(seq 0 $(($(nproc) - 1)))
+    fi
+
+    _irq_pool_note="NUMA-local pool"
+    if [ "$SPREAD_NIC" -eq 1 ] && [ "$IRQ_AFFINITY_NUMA_LOCAL" -eq 0 ]; then
+        _irq_pool_note="online CPUs excluding isolated"
     fi
 
     TOTAL_IRQS=0
-    CPU_IDX=0
+    declare -A SEEN_IRQ=()
+    _nic_idx=0
     for NIC in $IRQ_IFACES; do
-        IRQ_LIST=$(grep "$NIC" /proc/interrupts 2>/dev/null | awk '{print $1}' | tr -d ':' || true)
+        PCI=$(nic_pci_bdf "$NIC" || true)
+        IRQ_LIST=$(irqs_for_pci_sorted "$PCI")
+        if [ -z "$IRQ_LIST" ]; then
+            IRQ_LIST=$(irqs_for_pci "$PCI")
+        fi
+        if [ -z "$IRQ_LIST" ]; then
+            log_warn "No IRQ lines matched PCI ${PCI:-?} for $NIC — trying netdev name in /proc/interrupts"
+            IRQ_LIST=$(awk -v n="$NIC" 'NR>1 && $0 ~ n {gsub(/:/,"",$1); print $1}' /proc/interrupts 2>/dev/null | sort -un)
+        fi
+        # Stagger starting CPU per port so two 100G slaves do not align all queues to the same phase
+        _n="${#SPREAD_CPUS[@]}"
+        [ "$_n" -gt 0 ] || _n=1
+        _irq_slot=0
+        _base=$(( (_nic_idx * 17) % _n ))
         for IRQ in $IRQ_LIST; do
-            CPU_MASK=$(printf "%x" $((1 << CPU_IDX)))
-            run sh -c "echo $CPU_MASK > /proc/irq/$IRQ/smp_affinity" 2>/dev/null || true
-            CPU_IDX=$(( (CPU_IDX + 1) % NCPUS ))
+            [ -z "$IRQ" ] && continue
+            [ -n "${SEEN_IRQ[$IRQ]:-}" ] && continue
+            SEEN_IRQ[$IRQ]=1
+            _cpu=${SPREAD_CPUS[$(( (_base + _irq_slot) % _n ))]}
+            _irq_slot=$((_irq_slot + 1))
+            if [ -w "/proc/irq/$IRQ/smp_affinity_list" ]; then
+                run sh -c "echo ${_cpu} > /proc/irq/$IRQ/smp_affinity_list" 2>/dev/null || true
+            elif [ -w "/proc/irq/$IRQ/smp_affinity" ]; then
+                # Legacy kernels: only safe for low CPU ids
+                if [ "${_cpu}" -lt 32 ]; then
+                    run sh -c "printf '%x\n' $((1 << _cpu)) > /proc/irq/$IRQ/smp_affinity" 2>/dev/null || true
+                fi
+            fi
             TOTAL_IRQS=$((TOTAL_IRQS + 1))
         done
+        _nic_idx=$((_nic_idx + 1))
     done
 
     if [ "$TOTAL_IRQS" -gt 0 ]; then
-        log_ok "Distributed $TOTAL_IRQS IRQs across $NCPUS CPUs"
+        log_ok "Pinned $TOTAL_IRQS NIC IRQs across ${#SPREAD_CPUS[@]} CPUs (PCI BDF, mlx5_comp order, per-port CPU phase, $_irq_pool_note)"
     else
-        log_warn "No IRQs found for $IFACE — may be using MSI-X naming"
-        log_warn "Check: grep -i '$IFACE\|msi' /proc/interrupts"
+        log_warn "No NIC IRQs pinned — verify mlx5 and /proc/interrupts"
     fi
+fi
+
+# RPS / XPS: spreads softnet work after XDP_PASS (does not replace line-rate NIC drops)
+if [ "$SKIP_NIC" -eq 0 ] && [ "$SPREAD_NIC" -eq 1 ] && [ -n "${TUNED_NIC_LIST:-}" ]; then
+    echo ""
+    echo "  RPS / XPS (same NUMA as each slave)..."
+    sysctl_set net.core.rps_sock_flow_entries 131072 || true
+    for NIC in $TUNED_NIC_LIST; do
+        mapfile -t _ncpus < <(cpus_for_nic_numa "$NIC" | sort -un)
+        [ "${#_ncpus[@]}" -eq 0 ] && continue
+        _mask=$(cpus_to_mask "${_ncpus[@]}")
+        [ -z "$_mask" ] && continue
+        for _rx in /sys/class/net/"$NIC"/queues/rx-*/rps_cpus; do
+            [ -f "$_rx" ] || continue
+            run sh -c "echo '$_mask' > \"$_rx\"" 2>/dev/null || true
+        done
+        for _rx in /sys/class/net/"$NIC"/queues/rx-*/rps_flow_cnt; do
+            [ -f "$_rx" ] || continue
+            run sh -c "echo 4096 > \"$_rx\"" 2>/dev/null || true
+        done
+        for _tx in /sys/class/net/"$NIC"/queues/tx-*/xps_cpus; do
+            [ -f "$_tx" ] || continue
+            run sh -c "echo '$_mask' > \"$_tx\"" 2>/dev/null || true
+        done
+        log_ok "RPS/XPS for $NIC (mask=$_mask, ${#_ncpus[@]} CPUs in NUMA pool)"
+    done
 fi
 
 
@@ -346,6 +596,9 @@ net.ipv4.tcp_keepalive_intvl = 15
 net.ipv4.tcp_keepalive_probes = 5
 net.core.somaxconn = 65536
 net.core.netdev_max_backlog = 250000
+net.core.netdev_budget = 1000
+net.core.netdev_budget_usecs = 8000
+net.core.rps_sock_flow_entries = 131072
 net.ipv4.tcp_max_orphans = 262144
 net.ipv4.tcp_slow_start_after_idle = 0
 net.core.rmem_max = 16777216
@@ -385,6 +638,34 @@ done < "$SYSCTL_CONF"
 
 log_ok "Applied $APPLIED sysctl parameters"
 [ "$FAILED" -gt 0 ] && log_warn "$FAILED parameters failed (may need reboot or module load)"
+
+# Ensure softnet/RPS globals even when 99-ddos-firewall.conf predates these keys
+if [ "$HIGH_PPS_SOFTNET" -eq 1 ]; then
+    echo ""
+    echo "  High-PPS softnet (--high-pps-softnet): more NAPI work per poll (watch p99 latency)."
+    sysctl_set net.core.netdev_budget 5000
+    sysctl_set net.core.netdev_budget_usecs 20000
+    sysctl_set net.core.netdev_max_backlog 500000
+    log_ok "netdev_budget=5000 netdev_budget_usecs=20000 netdev_max_backlog=500000"
+else
+    sysctl_set net.core.netdev_budget 1000
+    sysctl_set net.core.netdev_budget_usecs 8000
+fi
+sysctl_set net.core.rps_sock_flow_entries 131072
+
+if [ "$HIGH_PPS_SOFTNET" -eq 1 ]; then
+    # Persist overrides into sysctl.d so they survive partial reloads
+    if [ -f "$SYSCTL_CONF" ] && ! grep -q 'net.core.netdev_budget = 5000' "$SYSCTL_CONF" 2>/dev/null; then
+        {
+            echo ""
+            echo "# High-PPS softnet (ddos-firewall-system-setup.sh --high-pps-softnet)"
+            echo "net.core.netdev_budget = 5000"
+            echo "net.core.netdev_budget_usecs = 20000"
+            echo "net.core.netdev_max_backlog = 500000"
+        } >> "$SYSCTL_CONF"
+        log_ok "Appended high-PPS netdev_* keys to $SYSCTL_CONF"
+    fi
+fi
 
 
 # =====================================================================
@@ -475,4 +756,9 @@ echo "  systemd service should have:"
 echo "    LimitMEMLOCK=infinity"
 echo "    LimitNOFILE=1048576"
 echo "    Nice=-20"
+echo ""
+echo "  Beyond this script (10M+ pps goals):"
+echo "    • Light native XDP on slaves; avoid trace_printk / locks on hot path."
+echo "    • Upstream scrubbing / hardware ACLs — rx_discards_phy means NIC overload, not fixable by sysctl alone."
+echo "    • PCIe gen/lanes, mlx5 firmware, kernel 6.x; consider --high-pps-softnet and measure latency."
 echo ""

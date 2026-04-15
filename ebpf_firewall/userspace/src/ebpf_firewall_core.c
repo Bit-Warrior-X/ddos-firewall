@@ -7,7 +7,7 @@
 #include <ebpf_firewall_geo.h>
 #include <ebpf_firewall_core.h>
 #include <ebpf_firewall_utils.h>
-
+#include <unistd.h>
 #include <arpa/inet.h> 
 #include <netinet/in.h> 
 #include <openssl/conf.h>
@@ -525,7 +525,12 @@ static void * global_traffic_stats_check_worker(void * arg) {
 
 	    traffic_stats_config_sum_percpu(raw, stride, nr, &aggregate);
 
-        aggregate.allowed_traffic = aggregate.total_traffic - aggregate.blocked_traffic;
+        /* Derived allowed = total - blocked; clamp if counters disagree (e.g. reset race, future BPF paths). */
+        if (aggregate.blocked_traffic <= aggregate.total_traffic)
+            aggregate.allowed_traffic = aggregate.total_traffic - aggregate.blocked_traffic;
+        else
+            aggregate.allowed_traffic = 0;
+
         LOG_T("TRAFFIC: TOTAL:%llu ALLOWED:%llu BLOCKED:%llu SYN:%llu ACK:%llu RST:%llu TCP:%llu UDP:%llu ICMP:%llu GRE:%llu OTHER:%llu\n",
             aggregate.total_traffic, aggregate.allowed_traffic, aggregate.blocked_traffic,
             aggregate.syn, aggregate.ack, aggregate.rst,
@@ -1005,6 +1010,100 @@ cleanup:
     if (values) free (values);
     return NULL;
 }
+
+
+
+
+static void * global_attack_syn_check_worker(void * arg) {
+
+    int nr = bpf_percpu_nr_cpus();
+    size_t vsize = sizeof(__u64) * (size_t)nr;
+    __u64 *values = calloc((size_t)nr, sizeof(__u64));
+
+    if (!values)
+        goto cleanup; 
+
+    struct bpf_object *obj = (struct bpf_object*)arg;
+
+    int global_syn_pkt_counter_map_fd;
+
+    int bss_map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
+    if (bss_map_fd < 0) {
+        LOG_E("ERROR: finding .bss map fd: %d\n", bss_map_fd);
+        goto cleanup;
+    }
+    
+    global_syn_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_syn_pkt_counter");
+    if (global_syn_pkt_counter_map_fd < 0) {
+        LOG_E( "Failed to find global_syn_pkt_counter eBPF map\n");
+        goto cleanup;
+    }
+
+    while (!exiting) {
+        __u32 key = 0;
+        time_t now = time(NULL);     /* current epoch seconds */
+        
+        struct global_attack_stats * global_attack_stats_val =&global_fw_config.g_attack_stats;
+        
+        __u64 total_syn_cnt = 0;
+        if (bpf_map_lookup_elem(global_syn_pkt_counter_map_fd, &key, values)) {
+            LOG_E( "bpf_map_lookup_elem");
+            goto cleanup;
+        }
+        for (int cpu = 0; cpu < nr; cpu++) {
+            total_syn_cnt += values[cpu];
+        }
+        memset(values, 0, vsize);
+        if (bpf_map_update_elem(global_syn_pkt_counter_map_fd, &key, values, 0)) {
+            LOG_E( "bpf_map_update_elem");
+            goto cleanup;
+        }
+        time_t rawtime;
+        struct tm *tm_info;
+        time(&rawtime);
+        tm_info = localtime(&rawtime);
+
+        __u8 need_to_update = false;
+        __u8 syn_attack = false;
+
+        if (total_syn_cnt >= 10) syn_attack = true;
+        else syn_attack = false;
+
+        if (syn_attack != global_attack_stats_val->syn_attack) {
+            if (syn_attack == true) {
+                if (now >= global_attack_stats_val->syn_protect_expire) {
+                    global_attack_stats_val->syn_protect_expire = now + global_fw_config.g_syn_config.syn_protect_duration;
+                    //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
+                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START, 0);
+                    global_attack_stats_val->syn_attack = syn_attack;
+                    need_to_update = true;
+                }
+            } else {
+                if (now >= global_attack_stats_val->syn_protect_expire) {
+                    //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
+                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END, 0);
+                    global_attack_stats_val->syn_attack = syn_attack;
+                    need_to_update = true;
+                }
+            }
+        }
+        
+        if (need_to_update == true) {
+            bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
+        }
+
+        //LOG_T("STATS: SYN:%llu/%llu\n",
+        //        aggregate.syn, total_syn_cnt,
+        //        total_syn_cnt);
+
+        usleep (1000);
+    }
+
+cleanup:
+    if (values) free (values);
+    return NULL;
+}
+
 
 static void *blocked_ips_duration_check_worker(void *arg) {
     struct bpf_object *obj = (struct bpf_object*)arg;
@@ -1757,6 +1856,12 @@ int main(int argc, char **argv) {
     pthread_t global_attack_ch_thr, blocked_ips_duration_thr;
     if (pthread_create(&global_attack_ch_thr, NULL, global_attack_check_worker, obj) != 0) {
         LOG_E("pthread_create for global_attack_ch_thr %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    pthread_t global_syn_attack_ch_thr;
+    if (pthread_create(&global_syn_attack_ch_thr, NULL, global_attack_syn_check_worker, obj) != 0) {
+        LOG_E("pthread_create for global_attack_syn_check_thr %s\n", strerror(errno));
         goto cleanup;
     }
 
