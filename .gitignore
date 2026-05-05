@@ -2,7 +2,7 @@
 /ebpf_firewall/build/*
 api_parser/firewall_control.db
 api_parser/__pycache__/
-setup/payload/*
+setup/payload/athens/nginx/
 license/license.b64
 license/license.lic
 license/license.b64
@@ -50,8 +50,6 @@ autom4te.cache/
 # Compiled output
 *.out
 *.app
-
-api_parser/config.py
 
 **/__pycache__/
 *.pyc
