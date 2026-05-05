@@ -41,7 +41,15 @@ mkdir -p "${PAYLOAD_DIR}"
 
 # Essential runtime files
 cp "${SCRIPT_DIR}/app.py" "${PAYLOAD_DIR}/"
-cp "${SCRIPT_DIR}/config.py" "${PAYLOAD_DIR}/"
+if [[ -f "${SCRIPT_DIR}/config.py" ]]; then
+  cp "${SCRIPT_DIR}/config.py" "${PAYLOAD_DIR}/"
+elif [[ -f "${SCRIPT_DIR}/config.example.py" ]]; then
+  echo "Note: config.py not found; staging config.example.py as config.py (set real config on deploy)."
+  cp "${SCRIPT_DIR}/config.example.py" "${PAYLOAD_DIR}/config.py"
+else
+  echo "error: missing ${SCRIPT_DIR}/config.py and config.example.py" >&2
+  exit 1
+fi
 
 if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
     cp "${SCRIPT_DIR}/requirements.txt" "${PAYLOAD_DIR}/"
