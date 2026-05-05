@@ -2,10 +2,7 @@
 /ebpf_firewall/build/*
 api_parser/firewall_control.db
 api_parser/__pycache__/
-setup/*
-setup/setup.sh
-setup/payload/l7/openresty.tar.gz
-setup/test.sh
+setup/payload/*
 license/license.b64
 license/license.lic
 license/license.b64

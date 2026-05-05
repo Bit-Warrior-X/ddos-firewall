@@ -1,0 +1,222 @@
+# Tag workflow (push tag v*): builds angelos, sparta, athens → one .tar.gz → SCP to deployment server.
+#
+# PR / branch pushes: same build + Actions artifact only (nothing uploaded to your server).
+#
+# Secrets (repository → Settings → Secrets → Actions):
+#   DEPLOY_HOST             — server hostname or IP
+#   DEPLOY_USER             — SSH user (must be allowed to write under the uploads dir)
+#   DEPLOY_SSH_PRIVATE_KEY  — PEM private key for that user
+#
+# Tarball path on server: /opt/dorian/uploads/dorian-ddos-firewall-<version>-payload.tar.gz
+
+name: Build payload
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENRESTY_VER: "1.27.1.2"
+  DORIAN_UPLOAD_DIR: /opt/dorian/uploads
+
+jobs:
+  angelos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python venv and build
+        run: |
+          set -euo pipefail
+          python3 -m venv "${GITHUB_WORKSPACE}/.ci-venv-angelos"
+          # shellcheck disable=SC1091
+          source "${GITHUB_WORKSPACE}/.ci-venv-angelos/bin/activate"
+          export DDOS_FW_CI_PAYLOAD_ONLY=1
+          bash api_parser/build.sh
+
+      - name: Pack angelos payload
+        run: tar czf angelos.tar.gz -C setup/payload angelos
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: angelos-tarball
+          path: angelos.tar.gz
+
+  sparta:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang llvm \
+            "linux-headers-$(uname -r)" \
+            libbpf-dev libxdp-dev \
+            libnetfilter-conntrack-dev libsqlite3-dev libssl-dev \
+            libmicrohttpd-dev
+
+      - name: Build sparta payload
+        env:
+          DDOS_FW_CI_PAYLOAD_ONLY: "1"
+        run: bash ebpf_firewall/script.sh
+
+      - name: Pack sparta payload
+        run: tar czf sparta.tar.gz -C setup/payload sparta
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sparta-tarball
+          path: sparta.tar.gz
+
+  athens:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl ca-certificates git \
+            libpcre3-dev libssl-dev zlib1g-dev \
+            flex bison libcurl4-openssl-dev libsodium-dev perl
+
+      - name: Fetch OpenResty source
+        working-directory: openresty-modules
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://openresty.org/download/openresty-${OPENRESTY_VER}.tar.gz" -o /tmp/openresty.tgz
+          tar xzf /tmp/openresty.tgz -C "${GITHUB_WORKSPACE}/openresty-modules"
+
+      - name: Prepare uthash and libmaxminddb
+        working-directory: openresty-modules
+        run: |
+          set -euo pipefail
+          mkdir -p .ci-deps
+          git clone --depth 1 https://github.com/troydhanson/uthash.git .ci-deps/uthash
+          mkdir -p .ci-deps/uthash/include
+          cp .ci-deps/uthash/src/*.h .ci-deps/uthash/include/
+          MM_PREFIX="${GITHUB_WORKSPACE}/openresty-modules/.ci-deps/libmaxminddb"
+          cd libmaxminddb
+          ./configure --prefix="${MM_PREFIX}" --with-pic
+          make -j"$(nproc)"
+          make install
+
+      - name: Build athens payload
+        env:
+          DDOS_FW_CI_PAYLOAD_ONLY: "1"
+          LIB_UTHASH: ${{ github.workspace }}/openresty-modules/.ci-deps/uthash
+          LIB_MAXMINDDB: ${{ github.workspace }}/openresty-modules/.ci-deps/libmaxminddb
+          ATHENS_PREFIX: ${{ github.workspace }}/openresty-modules/.ci-athens-install
+        run: bash openresty-modules/script.sh
+
+      - name: Pack athens payload
+        run: tar czf athens.tar.gz -C setup/payload athens
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: athens-tarball
+          path: athens.tar.gz
+
+  assemble:
+    runs-on: ubuntu-latest
+    needs: [angelos, sparta, athens]
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: angelos-tarball
+          path: merge
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: sparta-tarball
+          path: merge
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: athens-tarball
+          path: merge
+
+      - name: Product version
+        id: version
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            v="${GITHUB_REF#refs/tags/v}"
+          else
+            v="$(tr -d ' \n\r\t' < VERSION)"
+          fi
+          echo "version=${v}" >> "${GITHUB_OUTPUT}"
+          echo "Using product version: ${v}"
+
+      - name: Merge payloads and metadata
+        id: pack
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p setup/payload
+          tar xzf merge/angelos.tar.gz -C setup/payload
+          tar xzf merge/sparta.tar.gz -C setup/payload
+          tar xzf merge/athens.tar.gz -C setup/payload
+          echo "${VERSION}" > setup/payload/VERSION
+          {
+            echo "version=${VERSION}"
+            echo "sha=${GITHUB_SHA}"
+            echo "ref=${GITHUB_REF}"
+            echo "run=${GITHUB_RUN_ID}"
+            date -uIso=seconds
+          } > setup/payload/BUILD_INFO
+          name="dorian-ddos-firewall-${VERSION}-payload.tar.gz"
+          tar czf "${name}" -C setup/payload angelos sparta athens VERSION BUILD_INFO
+          echo "tarball=${name}" >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: full-payload
+          path: ${{ steps.pack.outputs.tarball }}
+
+  upload-to-server:
+    runs-on: ubuntu-latest
+    needs: [assemble]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: full-payload
+          path: dist
+
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+
+      - name: Add SSH known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Upload tarball to server
+        env:
+          TARBALL: ${{ needs.assemble.outputs.tarball }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          set -euo pipefail
+          ssh "${USER}@${HOST}" "mkdir -p '${DORIAN_UPLOAD_DIR}'"
+          scp "dist/${TARBALL}" "${USER}@${HOST}:${DORIAN_UPLOAD_DIR}/"
+          echo "Uploaded ${TARBALL} to ${HOST}:${DORIAN_UPLOAD_DIR}/"

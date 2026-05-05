@@ -11,6 +11,8 @@ INSTALL_DIR="/usr/local/share/dorian/angelos"
 VENV_DIR="${INSTALL_DIR}/venv"
 SYSTEMD_SERVICE_DIR="/etc/systemd/system"
 
+cd "${SCRIPT_DIR}"
+
 echo "Building api_parser with Cython..."
 
 # Clean previous builds
@@ -19,7 +21,11 @@ find . -name "*.so" -delete
 find . -name "*.c" -delete
 
 # Install build dependencies (user-local to avoid root permission issues)
-python3 -m pip install --user --upgrade setuptools wheel Cython
+if [[ -n "${VIRTUAL_ENV:-}" ]]; then
+  python3 -m pip install --upgrade setuptools wheel Cython
+else
+  python3 -m pip install --user --upgrade setuptools wheel Cython
+fi
 
 # Build
 python3 setup.py build_ext --inplace
@@ -71,6 +77,11 @@ echo "Payload staging complete:"
 echo "  Python files: $(find "${PAYLOAD_DIR}" -name "*.py" -type f | wc -l)"
 echo "  .so files: $(find "${PAYLOAD_DIR}" -name "*.so" -type f | wc -l)"
 echo "  Target: ${PAYLOAD_DIR}"
+
+if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
+  echo "DDOS_FW_CI_PAYLOAD_ONLY=1: skipping local install, venv, and systemd."
+  exit 0
+fi
 
 # Install to runtime directory as well
 echo ""
