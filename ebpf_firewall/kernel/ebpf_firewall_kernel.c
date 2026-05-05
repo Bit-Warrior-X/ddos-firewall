@@ -418,13 +418,6 @@ struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, MAP_SIZE_LARGE);
     __type(key, __u32);
-    __type(value, struct flood_stats);
-} syn_counter_fixed_metrics SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
-    __uint(max_entries, MAP_SIZE_LARGE);
-    __type(key, __u32);
     __type(value, struct burst_state);
 } burst_syn_state SEC(".maps");
 
@@ -487,15 +480,17 @@ int xdp_parse_syn(struct xdp_md *ctx) {
     if (whitelisted)
         return XDP_PASS;
 
-    volatile struct global_config *gcfg = &global_fw_config.g_config;
-    __u64 block_exp = now + gcfg->black_ip_duration;
-    __u64 *blocked_time_p = bpf_map_lookup_elem(&blocked_ips, &src_ip);
-    if (!blocked_time_p)
-        bpf_map_update_elem(&blocked_ips, &src_ip, &block_exp, BPF_ANY);
-    else
-        *blocked_time_p = block_exp;
-
-    return XDP_DROP;
+    __u64 *blocked_exp = bpf_map_lookup_elem(&blocked_ips, &src_ip);
+    if (blocked_exp) {
+        if (now < *blocked_exp) {
+            traffic_stats->blocked_traffic += packet_size;
+            return XDP_DROP;
+        }
+        struct event evt = {0};
+        evt.time = now; evt.srcip = src_ip; evt.reason = EVENT_IP_BLOCK_END;
+        bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
+        bpf_map_delete_elem(&blocked_ips, &src_ip);
+    }
 
     if (!is_geo_allowed(src_ip)) {
         traffic_stats->blocked_traffic += packet_size;
@@ -518,12 +513,12 @@ int xdp_parse_syn(struct xdp_md *ctx) {
      * This protects existing clients opening additional connections during an attack.
      */
      
-#if 0
+
     if (is_tcp_established(src_ip, tcp->source)) {
         __sync_fetch_and_add(pkt_cnt, 1);
         return XDP_PASS;
     }
-#endif
+
 
     /*
      * Count every SYN from sources not in the established fast-path toward global PPS.
@@ -533,23 +528,6 @@ int xdp_parse_syn(struct xdp_md *ctx) {
      */
     __sync_fetch_and_add(pkt_cnt, 1);
 
-    /* ---- Metrics (always run for visibility) ---- */
-    struct flood_stats *fixed_stats = bpf_map_lookup_elem(&syn_counter_fixed_metrics, &src_ip);
-    if (fixed_stats) {
-        __u64 td = now - fixed_stats->last_ts;
-        if (td > config->syn_fixed_check_duration) {
-            struct fixed_ip_event fe = {0};
-            fe.srcip = src_ip; fe.fixed_type = FIXED_IP_RING_BUF_SYN;
-            fe.duration = td; fe.pkt_count = fixed_stats->count; fe.over_fixed = 0;
-            bpf_ringbuf_output(&fixed_ip_ring_buf_events, &fe, sizeof(fe), 0);
-            fixed_stats->count = 1; fixed_stats->last_ts = now;
-        } else { fixed_stats->count += 1; }
-    } else {
-        struct flood_stats ns = {0}; ns.count = 1; ns.last_ts = now;
-        bpf_map_update_elem(&syn_counter_fixed_metrics, &src_ip, &ns, BPF_ANY);
-    }
-    
-#if 0
     /* ---- Below global threshold: no burst / SYN challenge (low latency) ----
      * Still enforce per-IP fixed-window limiting (syn_fixed_threshold) so
      * single-source or sub-threshold floods cannot fill listen queues.
@@ -671,10 +649,10 @@ int xdp_parse_syn(struct xdp_md *ctx) {
     }
 
 
-fixed_window_check:
-#endif
+fixed_window_check: {
     /* ---- Fixed window rate limiting (per-IP) ---- */
-    fixed_stats = bpf_map_lookup_elem(&syn_counter_fixed, &src_ip);
+
+    struct flood_stats *fixed_stats = bpf_map_lookup_elem(&syn_counter_fixed, &src_ip);
     if (fixed_stats) {
         __u64 td = now - fixed_stats->last_ts;
         if (td > config->syn_fixed_check_duration) {
@@ -697,6 +675,7 @@ fixed_window_check:
     }
 
     return XDP_PASS;
+}
 }
 
 

@@ -1,0 +1,57 @@
+# config.py
+"""Configuration constants for the API parser."""
+import os
+from pathlib import Path
+
+# Base paths
+BASE_EBPF_FIREWALL_DIR = Path("/usr/local/share/dorian/ebpf_firewall")
+BASE_LICENSE_DIR = Path("/usr/local/share/dorian/license")
+
+# File paths
+FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
+UNIX_DGRAM_PATH = "/tmp/firewall_to_api_parser.sock"
+FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
+INIT_FILE = str(BASE_LICENSE_DIR / "initialize")
+MACHINE_FILE = str(BASE_LICENSE_DIR / "machine_id")
+LICENSE_PATH = str(BASE_LICENSE_DIR / "license.lic")
+PUBKEY_PATH = str(BASE_LICENSE_DIR / "server_public_key.pem")
+TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
+
+# Server configuration
+SERVER_IP = "0.0.0.0"
+SERVER_PORT = 5000
+
+# API URLs (base with no trailing slash to avoid double slashes)
+#API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
+API_BASE_URL = "http://93.95.116.174:8080/api".rstrip("/")
+
+# L4-related APIs
+REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
+
+# Block/white list sync APIs used by both startup and firewall_main route.
+# Backend endpoints: /api/get_blocklist_ips and /api/get_whitelist_ips
+BLOCKLIST_API_URL = f"{API_BASE_URL}/get_blocklist_ips"
+WHITELIST_API_URL = f"{API_BASE_URL}/get_whitelist_ips"
+CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
+
+# Temporary blacklist: notify backend when a new item is added to Redis (api_parser monitors Redis)
+TEMPORARY_BLACKLIST_NOTIFY_URL = f"{API_BASE_URL}/temporary_blacklist_added"
+
+# Deployment / licensing APIs
+DEPLOYMENT_BASE_URL = "http://93.95.116.174:9090/api".rstrip("/")
+BACKEND_DEPLOY_URL = f"{DEPLOYMENT_BASE_URL}/deploy_done"
+BACKEND_DEPLOY_COMPLETE_URL = f"{DEPLOYMENT_BASE_URL}/deploy_complete"
+
+# Redis configuration
+REDIS_SOCK = "/tmp/redis.sock"
+REDIS_DB = 0
+RULE_IDS_KEY = "acl_rule_ids"
+
+# Defaults
+DEFAULT_BLOCK_DURATION = 3600
+DEFAULT_ACL_RULE_ACTION = 1
+DEFAULT_ACL_RULE_PRIORITY = 100
+
+# GeoIP City/Country DB for L4->L7 temp blacklist enrichment (override if your .mmdb lives elsewhere)
+GEOIP_MMDB_PATH = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
+

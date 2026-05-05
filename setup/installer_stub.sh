@@ -11,15 +11,15 @@ NC='\033[0m' # No Color
 
 # Configuration
 LIB_DIR="/usr/local/lib"
-L4_APP_NAME="ebpf_firewall"
+L4_APP_NAME="sparta"
 
 INSTALL_L4_DIR="/usr/local/share/ebpf_firewall"
 INSTALL_API_PARSER_DIR="/usr/local/share/api_parser"
 
-L4_SERVICE_NAME="ebpf_firewall.service"
+L4_SERVICE_NAME="sparta.service"
 L7_SERVICE_NAME="l7_firewall.service"
-L4_PROM_SERVICE_NAME="ebpf_firewall_prometheus.service"
-API_PARSER_SERVICE_NAME="api_parser.service"
+L4_PROM_SERVICE_NAME="sparta-prometheus.service"
+API_PARSER_SERVICE_NAME="angelos.service"
 REDIS_SERVER_SERVICE_NAME="redis-server.service"
 
 
@@ -78,21 +78,25 @@ extract_files() {
 # Set permissions (as you requested)
 set_permissions() {
     print_status "Setting permissions..."
+    L4_PERM_DIR="${EXTRACTED_DIR}/sparta"
+    if [[ ! -d "${L4_PERM_DIR}" && -d "${EXTRACTED_DIR}/l4" ]]; then
+        L4_PERM_DIR="${EXTRACTED_DIR}/l4"
+    fi
 
     # Only change if files exist
     [[ -d "${EXTRACTED_DIR}/lib" ]] && chmod 777 "${EXTRACTED_DIR}/lib/"* || true
-    [[ -d "${EXTRACTED_DIR}/l4/helper" ]] && chmod 777 "${EXTRACTED_DIR}/l4/helper/"* || true
-    [[ -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_cli" ]] && chmod 777 "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_cli"
-    [[ -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_prom" ]] && chmod 777 "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_prom"
-    [[ -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_userspace" ]] && chmod 777 "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_userspace"
+    [[ -d "${L4_PERM_DIR}/helper" ]] && chmod 777 "${L4_PERM_DIR}/helper/"* || true
+    [[ -f "${L4_PERM_DIR}/bin/ebpf_firewall_cli" ]] && chmod 777 "${L4_PERM_DIR}/bin/ebpf_firewall_cli"
+    [[ -f "${L4_PERM_DIR}/bin/ebpf_firewall_prom" ]] && chmod 777 "${L4_PERM_DIR}/bin/ebpf_firewall_prom"
+    [[ -f "${L4_PERM_DIR}/bin/ebpf_firewall_userspace" ]] && chmod 777 "${L4_PERM_DIR}/bin/ebpf_firewall_userspace"
     [[ -f "${EXTRACTED_DIR}/machine_id" ]] && chmod 777 "${EXTRACTED_DIR}/machine_id"
     [[ -f "${EXTRACTED_DIR}/uninstall.sh" ]] && chmod 777 "${EXTRACTED_DIR}/uninstall.sh"
 
     # Reasonable perms for other files (if present)
-    [[ -f "${EXTRACTED_DIR}/l4/firewall.config" ]] && chmod 644 "${EXTRACTED_DIR}/l4/firewall.config"
-    [[ -f "${EXTRACTED_DIR}/l4/ebpf_firewall_kernel.o" ]] && chmod 644 "${EXTRACTED_DIR}/l4/ebpf_firewall_kernel.o"
-    [[ -f "${EXTRACTED_DIR}/l4/firewall_control.db" ]] && chmod 644 "${EXTRACTED_DIR}/l4/firewall_control.db"
-    [[ -d "${EXTRACTED_DIR}/l4/geodb" ]] && chmod -R 644 "${EXTRACTED_DIR}/l4/geodb" || true
+    [[ -f "${L4_PERM_DIR}/firewall.config" ]] && chmod 644 "${L4_PERM_DIR}/firewall.config"
+    [[ -f "${L4_PERM_DIR}/ebpf_firewall_kernel.o" ]] && chmod 644 "${L4_PERM_DIR}/ebpf_firewall_kernel.o"
+    [[ -f "${L4_PERM_DIR}/firewall_control.db" ]] && chmod 644 "${L4_PERM_DIR}/firewall_control.db"
+    [[ -d "${L4_PERM_DIR}/geodb" ]] && chmod -R 644 "${L4_PERM_DIR}/geodb" || true
 }
 
 # Create installation directory
@@ -112,22 +116,31 @@ install_files() {
     echo "Installing Redis server..."
     apt install redis-server -y
 
+    L4_PAYLOAD_DIR="${EXTRACTED_DIR}/sparta"
+    if [[ ! -d "${L4_PAYLOAD_DIR}" && -d "${EXTRACTED_DIR}/l4" ]]; then
+        L4_PAYLOAD_DIR="${EXTRACTED_DIR}/l4"
+    fi
+    API_PAYLOAD_DIR="${EXTRACTED_DIR}/angelos"
+    if [[ ! -d "${API_PAYLOAD_DIR}" && -d "${EXTRACTED_DIR}/api_parser" ]]; then
+        API_PAYLOAD_DIR="${EXTRACTED_DIR}/api_parser"
+    fi
+
     # Install L4 user binaries and data
-    if [[ -d "${EXTRACTED_DIR}/l4" ]]; then
-        print_status "Installing L4 ebpf_firewall..."
-        cp -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_cli" "${INSTALL_L4_DIR}/" 2>/dev/null || true
-        cp -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_prom" "${INSTALL_L4_DIR}/" 2>/dev/null || true
-        cp -f "${EXTRACTED_DIR}/l4/bin/ebpf_firewall_userspace" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+    if [[ -d "${L4_PAYLOAD_DIR}" ]]; then
+        print_status "Installing L4 sparta..."
+        cp -f "${L4_PAYLOAD_DIR}/bin/ebpf_firewall_cli" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${L4_PAYLOAD_DIR}/bin/ebpf_firewall_prom" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${L4_PAYLOAD_DIR}/bin/ebpf_firewall_userspace" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/machine_id" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/uninstall.sh" "/tmp/" 2>/dev/null || true
 
-        cp -f "${EXTRACTED_DIR}/l4/ebpf_firewall_kernel.o" "${INSTALL_L4_DIR}/" 2>/dev/null || true
-        cp -f "${EXTRACTED_DIR}/l4/firewall.config" "${INSTALL_L4_DIR}/" 2>/dev/null || true
-        cp -f "${EXTRACTED_DIR}/l4/firewall_control.db" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${L4_PAYLOAD_DIR}/ebpf_firewall_kernel.o" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${L4_PAYLOAD_DIR}/firewall.config" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        cp -f "${L4_PAYLOAD_DIR}/firewall_control.db" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         cp -f "${EXTRACTED_DIR}/initialize" "${INSTALL_L4_DIR}/" 2>/dev/null || true
 
-        if [[ -d "${EXTRACTED_DIR}/l4/geodb" ]]; then
-            cp -a "${EXTRACTED_DIR}/l4/geodb" "${INSTALL_L4_DIR}/" 2>/dev/null || true
+        if [[ -d "${L4_PAYLOAD_DIR}/geodb" ]]; then
+            cp -a "${L4_PAYLOAD_DIR}/geodb" "${INSTALL_L4_DIR}/" 2>/dev/null || true
         fi
     else
         print_warning "l4 directory not present in payload; skipping L4 install"
@@ -142,10 +155,10 @@ install_files() {
     fi
     
     # Install API parser: move extracted api_parser content into the install dir.
-    if [[ -d "${EXTRACTED_DIR}/api_parser" ]]; then
-        print_status "Installing API parser (copying files)..."
+    if [[ -d "${API_PAYLOAD_DIR}" ]]; then
+        print_status "Installing angelos (copying files)..."
         # copy entire directory tree
-        cp -a "${EXTRACTED_DIR}/api_parser/." "${INSTALL_API_PARSER_DIR}/"
+        cp -a "${API_PAYLOAD_DIR}/." "${INSTALL_API_PARSER_DIR}/"
     else
         # maybe payload provided api_parser.tar.gz instead of a directory
         if [[ -f "${EXTRACTED_DIR}/api_parser.tar.gz" ]]; then
@@ -302,11 +315,20 @@ install_service() {
 
     # Copy service files
     # L4 services (if present in payload under l4/service/)
-    if [[ -f "${EXTRACTED_DIR}/l4/service/${L4_SERVICE_NAME}" ]]; then
-        cp -f "${EXTRACTED_DIR}/l4/service/${L4_SERVICE_NAME}" "/etc/systemd/system/${L4_SERVICE_NAME}"
+    L4_SERVICE_PAYLOAD_DIR="${EXTRACTED_DIR}/sparta/service"
+    if [[ ! -d "${L4_SERVICE_PAYLOAD_DIR}" && -d "${EXTRACTED_DIR}/l4/service" ]]; then
+        L4_SERVICE_PAYLOAD_DIR="${EXTRACTED_DIR}/l4/service"
+    fi
+    API_SERVICE_PAYLOAD_DIR="${EXTRACTED_DIR}/angelos"
+    if [[ ! -d "${API_SERVICE_PAYLOAD_DIR}" && -d "${EXTRACTED_DIR}/api_parser" ]]; then
+        API_SERVICE_PAYLOAD_DIR="${EXTRACTED_DIR}/api_parser"
+    fi
+
+    if [[ -f "${L4_SERVICE_PAYLOAD_DIR}/${L4_SERVICE_NAME}" ]]; then
+        cp -f "${L4_SERVICE_PAYLOAD_DIR}/${L4_SERVICE_NAME}" "/etc/systemd/system/${L4_SERVICE_NAME}"
         chmod 644 "/etc/systemd/system/${L4_SERVICE_NAME}"
     else
-        print_warning "${L4_SERVICE_NAME} not found in payload (l4/service/)"
+        print_warning "${L4_SERVICE_NAME} not found in payload"
     fi
 
     if [[ -f "${EXTRACTED_DIR}/l7/${L7_SERVICE_NAME}" ]]; then
@@ -316,16 +338,16 @@ install_service() {
         print_warning "${L7_SERVICE_NAME} not found in payload (l7/)"
     fi
 
-    if [[ -f "${EXTRACTED_DIR}/l4/service/${L4_PROM_SERVICE_NAME}" ]]; then
-        cp -f "${EXTRACTED_DIR}/l4/service/${L4_PROM_SERVICE_NAME}" "/etc/systemd/system/${L4_PROM_SERVICE_NAME}"
+    if [[ -f "${L4_SERVICE_PAYLOAD_DIR}/${L4_PROM_SERVICE_NAME}" ]]; then
+        cp -f "${L4_SERVICE_PAYLOAD_DIR}/${L4_PROM_SERVICE_NAME}" "/etc/systemd/system/${L4_PROM_SERVICE_NAME}"
         chmod 644 "/etc/systemd/system/${L4_PROM_SERVICE_NAME}"
     else
-        print_warning "${L4_PROM_SERVICE_NAME} not found in payload (l4/service/)"
+        print_warning "${L4_PROM_SERVICE_NAME} not found in payload"
     fi
 
-    # api_parser service (may be at EXTRACTED_DIR/api_parser/${API_PARSER_SERVICE_NAME})
-    if [[ -f "${EXTRACTED_DIR}/api_parser/${API_PARSER_SERVICE_NAME}" ]]; then
-        cp -f "${EXTRACTED_DIR}/api_parser/${API_PARSER_SERVICE_NAME}" "/etc/systemd/system/${API_PARSER_SERVICE_NAME}"
+    # angelos service
+    if [[ -f "${API_SERVICE_PAYLOAD_DIR}/${API_PARSER_SERVICE_NAME}" ]]; then
+        cp -f "${API_SERVICE_PAYLOAD_DIR}/${API_PARSER_SERVICE_NAME}" "/etc/systemd/system/${API_PARSER_SERVICE_NAME}"
         chmod 644 "/etc/systemd/system/${API_PARSER_SERVICE_NAME}"
     elif [[ -f "${EXTRACTED_DIR}/${API_PARSER_SERVICE_NAME}" ]]; then
         cp -f "${EXTRACTED_DIR}/${API_PARSER_SERVICE_NAME}" "/etc/systemd/system/${API_PARSER_SERVICE_NAME}"

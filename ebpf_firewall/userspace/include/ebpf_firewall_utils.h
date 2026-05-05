@@ -4,4 +4,6 @@
 int get_machine_id(char * machine_id);
 int get_license_status();
 
+const char *ebpf_sqlite_db_path(void);
+
 #endif

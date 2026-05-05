@@ -62,7 +62,7 @@ def _lookup_geo(ip: str) -> Tuple[str, str]:
 
     if _geoip_reader is None:
         try:
-            db_path = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
+            db_path = config.GEOIP_MMDB_PATH
             _geoip_reader = maxminddb.open_database(db_path)
             print(f"[API_PARSER] MaxMind DB reader initialized with DB: {db_path}")
         except Exception as e:

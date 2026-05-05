@@ -43,7 +43,7 @@ endif
 # Paths
 BUILD_DIR    := build
 KERNEL_SRC   := kernel/ebpf_firewall_kernel.c
-KERNEL_OBJ   := $(BUILD_DIR)/ebpf_firewall_kernel.o
+KERNEL_OBJ   := $(BUILD_DIR)/sparta_kernel.o
 
 USR_SRCS     := userspace/src/ebpf_firewall_unix.c \
                 userspace/src/ebpf_firewall_log.c  \
@@ -59,8 +59,8 @@ USR_CLI      := userspace/src/ebpf_firewall_cli.c
 USR_PROM     := userspace/src/ebpf_fireall_exporter.c
 
 USR_PROMBIN  := $(BUILD_DIR)/ebpf_firewall_prom
-USR_BIN      := $(BUILD_DIR)/ebpf_firewall_userspace
-USR_CLIBIN   := $(BUILD_DIR)/ebpf_firewall_cli
+USR_BIN      := $(BUILD_DIR)/sparta_user
+USR_CLIBIN   := $(BUILD_DIR)/sparta_cli
 USR_INC_DIR  := userspace/include
 
 USR_INCLUDES = -I$(USR_INC_DIR) -I. $(MODE_FLAGS)
@@ -68,7 +68,7 @@ ifneq ("$(wildcard $(LIBBPF_INCLUDE)/bpf/libbpf.h)","")
 USR_INCLUDES += -I$(LIBBPF_INCLUDE)
 endif
 
-INSTALL_DIR := /usr/local/share/ebpf_firewall
+INSTALL_DIR := /usr/local/share/dorian/sparta
 
 # Libraries
 USR_LIBS     := -lbpf -lxdp -lnetfilter_conntrack -lpthread -lcrypto -lsqlite3
@@ -118,7 +118,7 @@ $(USR_PROMBIN): $(USR_PROM) | $(BUILD_DIR)
 	$(GCC) -o $@ $^ $(USR_PROMLIBS)
 
 run: all
-	@cd $(BUILD_DIR) && ./ebpf_firewall_userspace
+	@cd $(BUILD_DIR) && ./sparta_user
 
 clean:
 	@rm -rf $(BUILD_DIR)

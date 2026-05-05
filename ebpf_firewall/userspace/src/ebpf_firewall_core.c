@@ -358,8 +358,9 @@ static void *sqlite_block_worker_main(void *arg)
     while (!stmt) {
         if (exiting)
             return NULL;
-        if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
-            LOG_E("sqlite worker: cannot open '%s', retrying\n", SQLITE_DB_NAME);
+        const char *dbpath = ebpf_sqlite_db_path();
+        if (sqlite3_open(dbpath, &db) != SQLITE_OK) {
+            LOG_E("sqlite worker: cannot open '%s', retrying\n", dbpath);
             sleep(1);
             continue;
         }
@@ -2593,8 +2594,9 @@ static char* query_blocked_ips_json(const char *filter_type,
     int bind_type = 0, bind_ip = 0, bind_dt = 0;
 
     /* Open DB */
-    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
-        LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
+    const char *dbpath = ebpf_sqlite_db_path();
+    if (sqlite3_open(dbpath, &db) != SQLITE_OK) {
+        LOG_E("Cannot open database '%s': %s\n", dbpath, sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
         return NULL;
     }
@@ -3299,8 +3301,9 @@ static int append_block_ip_to_sqlite_sync(const char *ip_str, int block_duration
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
 
-    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
-        LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
+    const char *dbpath = ebpf_sqlite_db_path();
+    if (sqlite3_open(dbpath, &db) != SQLITE_OK) {
+        LOG_E("Cannot open database '%s': %s\n", dbpath, sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
         return -1;
     }
@@ -3384,8 +3387,9 @@ int append_allow_ip_to_sqlite(const char *ip_str, const char *reason) {
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
 
-    if (sqlite3_open(SQLITE_DB_NAME, &db) != SQLITE_OK) {
-        LOG_E("Cannot open database '%s': %s\n", SQLITE_DB_NAME, sqlite3_errmsg(db));
+    const char *dbpath = ebpf_sqlite_db_path();
+    if (sqlite3_open(dbpath, &db) != SQLITE_OK) {
+        LOG_E("Cannot open database '%s': %s\n", dbpath, sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
         return -1;
     }

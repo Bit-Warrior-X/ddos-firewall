@@ -3,6 +3,7 @@
 #include <ebpf_firewall_log.h>
 #include <ebpf_firewall_geo.h>
 #include <ebpf_firewall_core.h>
+#include <ebpf_firewall_utils.h>
 
 #include <stdio.h>
 #include <sqlite3.h>
@@ -343,7 +344,7 @@ static int load_block_white_list(struct bpf_object *obj) {
     };
 
     // Open database connection
-    rc = sqlite3_open(SQLITE_DB_NAME, &db);
+    rc = sqlite3_open(ebpf_sqlite_db_path(), &db);
     
     if (rc != SQLITE_OK) {
         LOG_E("Cannot open database: %s\n", sqlite3_errmsg(db));

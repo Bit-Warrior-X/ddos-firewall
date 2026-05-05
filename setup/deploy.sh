@@ -20,7 +20,7 @@ Description:
   2) Runs setup.sh on the remote server
   2.5) Provisions /usr/local/share/ebpf_firewall/token securely
   2.7) If --restore-config: Restores saved configuration from /tmp/config/
-  3) Starts the api_parser service
+  3) Starts the angelos service
 
 Options:
   --token=VALUE       Required. Token to write on the remote host.
@@ -160,12 +160,12 @@ if [[ "$RESTORE_CONFIG" == "true" ]]; then
   echo "Configuration restored from /tmp/config/ on remote server"
 fi
 
-# --- Step 3: Start the api_parser service ---
-echo "Step 3: Starting api_parser service..."
+# --- Step 3: Start the angelos service ---
+echo "Step 3: Starting angelos service..."
 sshpass -p "$REMOTE_PASSWORD" ssh -o StrictHostKeyChecking=no -t "$REMOTE_SERVER" "
   export DEBIAN_FRONTEND=noninteractive
   export NEEDRESTART_MODE=a
-  systemctl restart api_parser.service && systemctl status api_parser.service
+  systemctl restart angelos.service && systemctl status angelos.service
 "
 
 # --- Step 4: Start the l7 service ---

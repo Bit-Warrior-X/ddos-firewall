@@ -25,6 +25,13 @@
 #include <ebpf_firewall_log.h>
 #include <ebpf_firewall_utils.h>
 
+const char *ebpf_sqlite_db_path(void)
+{
+    const char *p = getenv(SQLITE_DB_NAME);
+    if (p && p[0])
+        return p;
+    return SQLITE_DB_PATH_DEFAULT;
+}
 
 static void trim(char *s) {
     size_t n = strlen(s);

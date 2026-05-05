@@ -9,9 +9,9 @@ extensions = [
     Extension("core.database", ["core/database.py"]),
     Extension("core.api_client", ["core/api_client.py"]),
     Extension("core.firewall", ["core/firewall.py"]),
-    Extension("core.nginx", ["core/nginx.py"]),
     Extension("core.redis_client", ["core/redis_client.py"]),
     Extension("core.fifo_worker", ["core/fifo_worker.py"]),
+    Extension("core.temporary_blacklist_monitor", ["core/temporary_blacklist_monitor.py"]),
     Extension("core.initializer", ["core/initializer.py"]),
     Extension("core.app_factory", ["core/app_factory.py"]),
     Extension("utils.auth", ["utils/auth.py"]),
@@ -19,9 +19,6 @@ extensions = [
     Extension("routes.l4_routes", ["routes/l4_routes.py"]),
     Extension("routes.l7_routes", ["routes/l7_routes.py"]),
     Extension("routes.common_routes", ["routes/common_routes.py"]),
-    Extension("core.nginx_ops", ["core/nginx_ops.py"]),
-    Extension("core.nginx_parser", ["core/nginx_parser.py"]),
-    Extension("utils.nginx_utils", ["utils/nginx_utils.py"]),
 ]
 
 setup(

@@ -1,0 +1,21 @@
+[Unit]
+Description=Angelos (Gunicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/usr/local/share/dorian/angelos
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart= /usr/local/share/dorian/angelos/venv/bin/python app.py
+
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+KillSignal=SIGINT
+Type=simple
+
+[Install]
+WantedBy=multi-user.target

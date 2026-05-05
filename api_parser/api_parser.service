@@ -1,29 +1,15 @@
-#/home/usr/local/share/api_parser/venv/bin/python -m pip install --upgrade pip wheel setuptools
-#/home/usr/local/share/api_parser/venv/bin/python -m pip install requests flask gunicorn
-
-# /etc/systemd/system/api_parser.service
 [Unit]
-Description=api_parser (Gunicorn)
+Description=Angelos (Gunicorn)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=root
 Group=root
-WorkingDirectory=/usr/local/share/api_parser
+WorkingDirectory=/usr/local/share/dorian/angelos
 Environment=PYTHONUNBUFFERED=1
 
-# Create the FIFO if missing
-#ExecStartPre=/usr/bin/test -p /tmp/firewall_to_api_parser.fifo || /usr/bin/mkfifo -m 666 /tmp/firewall_to_api_parser.fifo
-
-# Use the venv's python to run gunicorn as a module
-#ExecStart=/usr/local/share/api_parser/venv/bin/python -m gunicorn \
-#          -w 2 -k gthread --threads 4 \
-#          -b 0.0.0.0:5000 \
-#          --timeout 60 --graceful-timeout 15 \
-#          app:app
-
-ExecStart= /usr/local/share/api_parser/venv/bin/python app.py
+ExecStart= /usr/local/share/dorian/angelos/venv/bin/python app.py
 
 Restart=on-failure
 RestartSec=10

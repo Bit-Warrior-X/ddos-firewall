@@ -3,11 +3,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PAYLOAD_L4_DIR="${ROOT_DIR}/setup/payload/l4"
+PAYLOAD_SPARTA_DIR="${ROOT_DIR}/setup/payload/sparta"
 KERNEL_RELEASE="$(uname -r)"
 LIBBPF_KERNEL_INCLUDE="/usr/src/linux-headers-${KERNEL_RELEASE}/tools/bpf/resolve_btfids/libbpf/include"
 
-systemctl stop ebpf-firewall.service >/dev/null 2>&1 || true
+SPARTA_SERVICE="sparta.service"
+SPARTA_PROM_SERVICE="sparta-prometheus.service"
+
+systemctl stop "${SPARTA_SERVICE}" >/dev/null 2>&1 || true
 
 cd "${SCRIPT_DIR}"
 
@@ -59,17 +62,28 @@ else
   echo "Skipping install: sudo is unavailable or not configured."
 fi
 
-mkdir -p "${PAYLOAD_L4_DIR}/bin" "${PAYLOAD_L4_DIR}/geodb"
+mkdir -p "${PAYLOAD_SPARTA_DIR}/bin" "${PAYLOAD_SPARTA_DIR}/geodb" "${PAYLOAD_SPARTA_DIR}/service"
 
-cp -f "${SCRIPT_DIR}/build/ebpf_firewall_cli" "${PAYLOAD_L4_DIR}/bin/"
-if [[ -f "${SCRIPT_DIR}/build/ebpf_firewall_prom" ]]; then
-  cp -f "${SCRIPT_DIR}/build/ebpf_firewall_prom" "${PAYLOAD_L4_DIR}/bin/"
+cp -f "${SCRIPT_DIR}/build/sparta_cli" "${PAYLOAD_SPARTA_DIR}/bin/"
+if [[ -f "${SCRIPT_DIR}/build/sparta_prom" ]]; then
+  cp -f "${SCRIPT_DIR}/build/sparta_prom" "${PAYLOAD_SPARTA_DIR}/bin/"
 else
   echo "Prometheus exporter binary not built; skipping copy."
 fi
-cp -f "${SCRIPT_DIR}/build/ebpf_firewall_userspace" "${PAYLOAD_L4_DIR}/bin/"
-cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_L4_DIR}/"
-cp -f "${SCRIPT_DIR}/build/ebpf_firewall_kernel.o" "${PAYLOAD_L4_DIR}/"
-cp -af "${SCRIPT_DIR}/geodb/." "${PAYLOAD_L4_DIR}/geodb/"
+cp -f "${SCRIPT_DIR}/build/sparta_user" "${PAYLOAD_SPARTA_DIR}/bin/"
+cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_SPARTA_DIR}/"
+cp -f "${SCRIPT_DIR}/build/sparta_kernel.o" "${PAYLOAD_SPARTA_DIR}/"
+cp -f "${SCRIPT_DIR}/service/ebpf-firewall.service" "${PAYLOAD_SPARTA_DIR}/service/${SPARTA_SERVICE}"
+cp -f "${SCRIPT_DIR}/service/ebpf-firewall-prometheus.service" "${PAYLOAD_SPARTA_DIR}/service/${SPARTA_PROM_SERVICE}"
+cp -af "${SCRIPT_DIR}/geodb/." "${PAYLOAD_SPARTA_DIR}/geodb/"
 
-#systemctl start ebpf-firewall
+
+cp -f "${SCRIPT_DIR}/service/ebpf-firewall.service" "/etc/systemd/system/${SPARTA_SERVICE}"
+cp -f "${SCRIPT_DIR}/service/ebpf-firewall-prometheus.service" "/etc/systemd/system/${SPARTA_PROM_SERVICE}"
+
+systemctl daemon-reload
+systemctl enable "${SPARTA_SERVICE}"
+systemctl enable "${SPARTA_PROM_SERVICE}"
+#systemctl start "${SPARTA_PROM_SERVICE}"
+
+systemctl start "${SPARTA_SERVICE}"
