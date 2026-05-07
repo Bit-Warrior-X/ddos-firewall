@@ -127,12 +127,13 @@ jobs:
           cmake --install .ci-deps/libmaxminddb-build-shared
 
       - name: Build athens payload
+        working-directory: openresty-modules
         env:
           DDOS_FW_CI_PAYLOAD_ONLY: "1"
           LIB_UTHASH: ${{ github.workspace }}/openresty-modules/.ci-deps/uthash
           LIB_MAXMINDDB: ${{ github.workspace }}/openresty-modules/.ci-deps/libmaxminddb
           ATHENS_PREFIX: ${{ github.workspace }}/openresty-modules/.ci-athens-install
-        run: bash openresty-modules/script.sh
+        run: bash ./script.sh
 
       - name: Pack athens payload
         run: tar czf athens.tar.gz -C setup/payload athens
