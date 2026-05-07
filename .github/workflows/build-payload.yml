@@ -199,7 +199,7 @@ jobs:
             echo "sha=${GITHUB_SHA}"
             echo "ref=${GITHUB_REF}"
             echo "run=${GITHUB_RUN_ID}"
-            date -uIso=seconds
+            date -u --iso-8601=seconds
           } > setup/payload/BUILD_INFO
           name="dorian-ddos-firewall-${VERSION}-payload.tar.gz"
           tar czf "${name}" -C setup/payload angelos sparta athens VERSION BUILD_INFO
