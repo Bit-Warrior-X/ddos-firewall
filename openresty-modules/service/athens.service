@@ -1,0 +1,24 @@
+[Unit]
+Description=Athens OpenResty (Nginx)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/usr/local/share/dorian/athens/nginx
+
+Environment="PUBKEY_PATH=/usr/local/share/dorian/license/server_public_key.pem"
+Environment="LICENSE_PATH=/usr/local/share/dorian/license/license.lic"
+
+ExecStartPre=/usr/local/share/dorian/athens/nginx/sbin/nginx -t -q
+ExecStart=/usr/local/share/dorian/athens/nginx/sbin/nginx -g "daemon off;"
+ExecReload=/usr/local/share/dorian/athens/nginx/sbin/nginx -s reload
+ExecStop=/usr/local/share/dorian/athens/nginx/sbin/nginx -s quit
+
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

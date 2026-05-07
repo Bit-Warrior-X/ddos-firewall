@@ -40,8 +40,9 @@ ebpf_firewall_userspace
 *.so.tmp
 
 # Nginx/OpenResty build files
-nginx-*/
-openresty-*/
+# Keep this scoped to source/build bundles, do not ignore openresty-modules/.
+openresty-modules/nginx-*/
+openresty-modules/openresty-*/
 Makefile
 config.status
 config.log
