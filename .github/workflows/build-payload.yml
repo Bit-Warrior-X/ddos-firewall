@@ -88,7 +88,8 @@ jobs:
           sudo apt-get install -y \
             build-essential curl ca-certificates git \
             libpcre3-dev libssl-dev zlib1g-dev \
-            flex bison libcurl4-openssl-dev libsodium-dev perl
+            flex bison libcurl4-openssl-dev libsodium-dev perl \
+            cmake
 
       - name: Fetch OpenResty source
         working-directory: openresty-modules
@@ -108,10 +109,22 @@ jobs:
             cp .ci-deps/uthash/src/*.h .ci-deps/uthash/include/
           fi
           MM_PREFIX="${GITHUB_WORKSPACE}/openresty-modules/.ci-deps/libmaxminddb"
-          cd libmaxminddb
-          ./configure --prefix="${MM_PREFIX}" --with-pic
-          make -j"$(nproc)"
-          make install
+          # Build/install static library for ngx_acl static link path.
+          cmake -S libmaxminddb -B .ci-deps/libmaxminddb-build-static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${MM_PREFIX}" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DBUILD_TESTING=OFF
+          cmake --build .ci-deps/libmaxminddb-build-static -j"$(nproc)"
+          cmake --install .ci-deps/libmaxminddb-build-static
+          # Build/install shared library too for Lua FFI runtime usage.
+          cmake -S libmaxminddb -B .ci-deps/libmaxminddb-build-shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${MM_PREFIX}" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTING=OFF
+          cmake --build .ci-deps/libmaxminddb-build-shared -j"$(nproc)"
+          cmake --install .ci-deps/libmaxminddb-build-shared
 
       - name: Build athens payload
         env:
