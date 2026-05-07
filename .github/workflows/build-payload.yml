@@ -228,15 +228,16 @@ jobs:
       - name: Add SSH known hosts
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+          ssh-keyscan -p "${{ secrets.DEPLOY_SSH_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
 
       - name: Upload tarball to server
         env:
           TARBALL: ${{ needs.assemble.outputs.tarball }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT }}
         run: |
           set -euo pipefail
-          ssh "${USER}@${HOST}" "mkdir -p '${DORIAN_UPLOAD_DIR}'"
-          scp "dist/${TARBALL}" "${USER}@${HOST}:${DORIAN_UPLOAD_DIR}/"
+          ssh -p "${PORT}" "${USER}@${HOST}" "mkdir -p '${DORIAN_UPLOAD_DIR}'"
+          scp -P "${PORT}" "dist/${TARBALL}" "${USER}@${HOST}:${DORIAN_UPLOAD_DIR}/"
           echo "Uploaded ${TARBALL} to ${HOST}:${DORIAN_UPLOAD_DIR}/"
