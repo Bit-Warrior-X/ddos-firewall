@@ -103,8 +103,10 @@ jobs:
           set -euo pipefail
           mkdir -p .ci-deps
           git clone --depth 1 https://github.com/troydhanson/uthash.git .ci-deps/uthash
-          mkdir -p .ci-deps/uthash/include
-          cp .ci-deps/uthash/src/*.h .ci-deps/uthash/include/
+          if [[ ! -d .ci-deps/uthash/include ]]; then
+            mkdir -p .ci-deps/uthash/include
+            cp .ci-deps/uthash/src/*.h .ci-deps/uthash/include/
+          fi
           MM_PREFIX="${GITHUB_WORKSPACE}/openresty-modules/.ci-deps/libmaxminddb"
           cd libmaxminddb
           ./configure --prefix="${MM_PREFIX}" --with-pic
