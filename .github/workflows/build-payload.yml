@@ -98,7 +98,7 @@ jobs:
           curl -fsSL "https://openresty.org/download/openresty-${OPENRESTY_VER}.tar.gz" -o /tmp/openresty.tgz
           tar xzf /tmp/openresty.tgz -C "${GITHUB_WORKSPACE}/openresty-modules"
 
-      - name: Prepare uthash and libmaxminddb
+      - name: Prepare uthash, cJSON and libmaxminddb
         working-directory: openresty-modules
         run: |
           set -euo pipefail
@@ -107,6 +107,10 @@ jobs:
           if [[ ! -d .ci-deps/uthash/include ]]; then
             mkdir -p .ci-deps/uthash/include
             cp .ci-deps/uthash/src/*.h .ci-deps/uthash/include/
+          fi
+          if [[ ! -f ngx_acl/inc/cjson/cJSON.h ]]; then
+            rm -rf ngx_acl/inc/cjson
+            git clone --depth 1 --branch v1.7.15 https://github.com/DaveGamble/cJSON.git ngx_acl/inc/cjson
           fi
           MM_PREFIX="${GITHUB_WORKSPACE}/openresty-modules/.ci-deps/libmaxminddb"
           # Build/install static library for ngx_acl static link path.
