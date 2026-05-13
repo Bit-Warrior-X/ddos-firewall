@@ -465,6 +465,85 @@ static void trim_whitespace(char *str) {
     *(end + 1) = '\0';
 }
 
+/*
+ * Pick the interface used for the IPv4 default route (lowest metric if several).
+ * Returns 0 on success.
+ */
+static int read_default_route_iface(char *out, size_t outsz)
+{
+    FILE *rf = fopen("/proc/net/route", "r");
+    char line[512];
+    char iface[IFNAMSIZ];
+    unsigned int dest;
+    int metric;
+    int best_metric = 0;
+    int have_best = 0;
+    char best[IFNAMSIZ] = {0};
+
+    if (!rf)
+        return -1;
+    if (!fgets(line, sizeof(line), rf)) {
+        fclose(rf);
+        return -1;
+    }
+    while (fgets(line, sizeof(line), rf)) {
+        if (sscanf(line, "%15s %x %*x %*x %*d %*d %d %*x",
+                   iface, &dest, &metric) != 3)
+            continue;
+        if (dest != 0)
+            continue;
+        if (!have_best || metric < best_metric) {
+            best_metric = metric;
+            have_best = 1;
+            strncpy(best, iface, IFNAMSIZ - 1);
+            best[IFNAMSIZ - 1] = '\0';
+        }
+    }
+    fclose(rf);
+    if (!have_best)
+        return -1;
+    strncpy(out, best, outsz);
+    out[outsz - 1] = '\0';
+    return 0;
+}
+
+/*
+ * If the configured iface does not resolve, log why and use the default-route
+ * adapter (or eth0 as last resort).
+ */
+static int ensure_usable_ifname(void)
+{
+    char saved[IFNAMSIZ];
+
+    if (ifname[0] != '\0' && if_nametoindex(ifname) != 0)
+        return 0;
+
+    strncpy(saved, ifname, IFNAMSIZ);
+    saved[IFNAMSIZ - 1] = '\0';
+
+    if (ifname[0] == '\0')
+        LOG_W("Network device name from config is empty; selecting main adapter\n");
+    else
+        LOG_W("Network device '%s' from config is not available (%s); selecting main adapter instead\n",
+              saved, strerror(errno));
+
+    if (read_default_route_iface(ifname, IFNAMSIZ) == 0 && if_nametoindex(ifname) != 0) {
+        LOG_I("Using default-route network adapter: %s\n", ifname);
+        return 0;
+    }
+
+    strncpy(ifname, "eth0", IFNAMSIZ);
+    ifname[IFNAMSIZ - 1] = '\0';
+    if (if_nametoindex(ifname) != 0) {
+        LOG_W("Could not resolve default-route interface; using eth0\n");
+        return 0;
+    }
+
+    LOG_E("No usable network adapter (configured '%s', default route and eth0 unavailable)\n",
+          saved[0] ? saved : "(empty)");
+    return -1;
+}
+
 int load_config(struct bpf_object *obj) {
     char* env_path = getenv(CONFIG_FILE);
     if (!env_path) {
@@ -743,6 +822,9 @@ int load_config(struct bpf_object *obj) {
         }
     }
     fclose(fp);
+
+    if (ensure_usable_ifname() < 0)
+        return -1;
     
     if (global_fw_config.g_syn_config.burst_count_threshold == 0) {
         LOG_E("Burst threshold of SYN is zero. Please reconfig it\n");
