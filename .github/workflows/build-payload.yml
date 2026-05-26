@@ -1,13 +1,15 @@
-# Tag workflow (push tag v*): builds angelos, sparta, athens → one .tar.gz → SCP to deployment server.
+# Builds angelos, sparta, athens per target OS, packs one tarball per matrix row, uploads on tag v*.
 #
-# PR / branch pushes: same build + Actions artifact only (nothing uploaded to your server).
+# Use the tarball whose os_slug matches the target host (see BUILD_INFO inside the archive).
+# Example: Ubuntu 22.04 → dorian-ddos-firewall-<version>-ubuntu-22.04-payload.tar.gz
 #
 # Secrets (repository → Settings → Secrets → Actions):
-#   DEPLOY_HOST             — server hostname or IP
-#   DEPLOY_USER             — SSH user (must be allowed to write under the uploads dir)
-#   DEPLOY_SSH_PRIVATE_KEY  — PEM private key for that user
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_PRIVATE_KEY, DEPLOY_SSH_PORT
+# Optional:
+#   DEPLOY_OS_SLUG — if set (e.g. ubuntu-22.04), only that variant is SCP'd on tag push.
+#                    If unset, every built variant is uploaded.
 #
-# Tarball path on server: /opt/dorian/uploads/dorian-ddos-firewall-<version>-payload.tar.gz
+# Server path: /opt/dorian/uploads/dorian-ddos-firewall-<version>-<os_slug>-payload.tar.gz
 
 name: Build payload
 
@@ -26,12 +28,50 @@ env:
   DORIAN_UPLOAD_DIR: /opt/dorian/uploads
 
 jobs:
-  angelos:
-    runs-on: ubuntu-latest
+  payload:
+    name: payload (${{ matrix.os_slug }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_slug: ubuntu-22.04
+            runner: ubuntu-22.04
+          - os_slug: ubuntu-24.04
+            runner: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tarball: ${{ steps.pack.outputs.tarball }}
+      os_slug: ${{ matrix.os_slug }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python venv and build
+      - name: Builder environment
+        id: builder
+        run: |
+          set -euo pipefail
+          echo "os_slug=${{ matrix.os_slug }}" >> "${GITHUB_OUTPUT}"
+          echo "runner=${{ matrix.runner }}" >> "${GITHUB_OUTPUT}"
+          echo "builder_id=$(. /etc/os-release && echo "${ID}-${VERSION_ID}")" >> "${GITHUB_OUTPUT}"
+          echo "glibc=$(ldd --version | head -1)" >> "${GITHUB_OUTPUT}"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang llvm curl ca-certificates git \
+            "linux-headers-$(uname -r)" \
+            libbpf-dev libxdp-dev \
+            libnetfilter-conntrack-dev libsqlite3-dev libssl-dev \
+            libmicrohttpd-dev \
+            libpcre3-dev zlib1g-dev \
+            flex bison libcurl4-openssl-dev libsodium-dev perl \
+            cmake \
+            python3 python3-venv python3-dev python3-pip
+
+      - name: Build angelos payload
         run: |
           set -euo pipefail
           python3 -m venv "${GITHUB_WORKSPACE}/.ci-venv-angelos"
@@ -40,56 +80,10 @@ jobs:
           export DDOS_FW_CI_PAYLOAD_ONLY=1
           bash api_parser/build.sh
 
-      - name: Pack angelos payload
-        run: tar czf angelos.tar.gz -C setup/payload angelos
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: angelos-tarball
-          path: angelos.tar.gz
-
-  sparta:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential clang llvm \
-            "linux-headers-$(uname -r)" \
-            libbpf-dev libxdp-dev \
-            libnetfilter-conntrack-dev libsqlite3-dev libssl-dev \
-            libmicrohttpd-dev
-
       - name: Build sparta payload
         env:
           DDOS_FW_CI_PAYLOAD_ONLY: "1"
         run: bash ebpf_firewall/script.sh
-
-      - name: Pack sparta payload
-        run: tar czf sparta.tar.gz -C setup/payload sparta
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: sparta-tarball
-          path: sparta.tar.gz
-
-  athens:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential curl ca-certificates git \
-            libpcre3-dev libssl-dev zlib1g-dev \
-            flex bison libcurl4-openssl-dev libsodium-dev perl \
-            cmake
 
       - name: Fetch OpenResty source
         working-directory: openresty-modules
@@ -113,7 +107,6 @@ jobs:
             git clone --depth 1 --branch v1.7.15 https://github.com/DaveGamble/cJSON.git ngx_acl/inc/cjson
           fi
           MM_PREFIX="${GITHUB_WORKSPACE}/openresty-modules/.ci-deps/libmaxminddb"
-          # Build/install static library for ngx_acl static link path.
           cmake -S libmaxminddb -B .ci-deps/libmaxminddb-build-static \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${MM_PREFIX}" \
@@ -121,7 +114,6 @@ jobs:
             -DBUILD_TESTING=OFF
           cmake --build .ci-deps/libmaxminddb-build-static -j"$(nproc)"
           cmake --install .ci-deps/libmaxminddb-build-static
-          # Build/install shared library too for Lua FFI runtime usage.
           cmake -S libmaxminddb -B .ci-deps/libmaxminddb-build-shared \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${MM_PREFIX}" \
@@ -139,37 +131,25 @@ jobs:
           ATHENS_PREFIX: ${{ github.workspace }}/openresty-modules/.ci-athens-install
         run: bash ./script.sh
 
-      - name: Pack athens payload
-        run: tar czf athens.tar.gz -C setup/payload athens
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: athens-tarball
-          path: athens.tar.gz
-
-  assemble:
-    runs-on: ubuntu-latest
-    needs: [angelos, sparta, athens]
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      tarball: ${{ steps.pack.outputs.tarball }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: angelos-tarball
-          path: merge
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: sparta-tarball
-          path: merge
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: athens-tarball
-          path: merge
+      - name: Verify athens glibc linkage
+        run: |
+          set -euo pipefail
+          nginx_bin="${GITHUB_WORKSPACE}/setup/payload/athens/nginx/sbin/nginx"
+          test -x "${nginx_bin}"
+          echo "Host ldd: $(ldd --version | head -1)"
+          echo "nginx dynamic deps:"
+          ldd "${nginx_bin}" | head -20
+          # Fail if binary requires a newer GLIBC than the builder provides.
+          required="$(strings "${nginx_bin}" | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1 || true)"
+          provided="$(ldd --version | awk 'NR==1 {print $NF}')"
+          echo "nginx max GLIBC symbol: ${required:-unknown}, builder glibc: ${provided}"
+          if [[ -n "${required}" ]]; then
+            req_ver="${required#GLIBC_}"
+            if dpkg --compare-versions "${req_ver}" gt "${provided}"; then
+              echo "error: nginx requires GLIBC ${req_ver} but builder only has ${provided}" >&2
+              exit 1
+            fi
+          fi
 
       - name: Product version
         id: version
@@ -183,41 +163,58 @@ jobs:
           echo "version=${v}" >> "${GITHUB_OUTPUT}"
           echo "Using product version: ${v}"
 
-      - name: Merge payloads and metadata
+      - name: Pack full payload
         id: pack
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          OS_SLUG: ${{ matrix.os_slug }}
         run: |
           set -euo pipefail
-          mkdir -p setup/payload
-          tar xzf merge/angelos.tar.gz -C setup/payload
-          tar xzf merge/sparta.tar.gz -C setup/payload
-          tar xzf merge/athens.tar.gz -C setup/payload
           echo "${VERSION}" > setup/payload/VERSION
           {
             echo "version=${VERSION}"
+            echo "os_slug=${OS_SLUG}"
+            echo "builder_id=${{ steps.builder.outputs.builder_id }}"
+            echo "glibc=${{ steps.builder.outputs.glibc }}"
             echo "sha=${GITHUB_SHA}"
             echo "ref=${GITHUB_REF}"
             echo "run=${GITHUB_RUN_ID}"
             date -u --iso-8601=seconds
           } > setup/payload/BUILD_INFO
-          name="dorian-ddos-firewall-${VERSION}-payload.tar.gz"
+          name="dorian-ddos-firewall-${VERSION}-${OS_SLUG}-payload.tar.gz"
           tar czf "${name}" -C setup/payload angelos sparta athens VERSION BUILD_INFO
           echo "tarball=${name}" >> "${GITHUB_OUTPUT}"
+          echo "Packed ${name} ($(du -h "${name}" | awk '{print $1}'))"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: full-payload
+          name: full-payload-${{ matrix.os_slug }}
           path: ${{ steps.pack.outputs.tarball }}
 
   upload-to-server:
+    name: upload payloads
     runs-on: ubuntu-latest
-    needs: [assemble]
+    needs: [payload]
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
+      - name: Resolve deploy OS filter
+        id: filter
+        run: |
+          set -euo pipefail
+          filter="${DEPLOY_OS_SLUG:-}"
+          echo "filter=${filter}" >> "${GITHUB_OUTPUT}"
+          if [[ -n "${filter}" ]]; then
+            echo "DEPLOY_OS_SLUG=${filter} — only this variant will be uploaded"
+          else
+            echo "DEPLOY_OS_SLUG unset — uploading all built variants"
+          fi
+        env:
+          DEPLOY_OS_SLUG: ${{ vars.DEPLOY_OS_SLUG || secrets.DEPLOY_OS_SLUG || '' }}
+
       - uses: actions/download-artifact@v4
         with:
-          name: full-payload
+          pattern: full-payload-*
+          merge-multiple: true
           path: dist
 
       - name: Install SSH key
@@ -227,17 +224,39 @@ jobs:
 
       - name: Add SSH known hosts
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
           ssh-keyscan -p "${{ secrets.DEPLOY_SSH_PORT }}" -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
 
-      - name: Upload tarball to server
+      - name: Upload tarballs to server
         env:
-          TARBALL: ${{ needs.assemble.outputs.tarball }}
+          FILTER: ${{ steps.filter.outputs.filter }}
           HOST: ${{ secrets.DEPLOY_HOST }}
           USER: ${{ secrets.DEPLOY_USER }}
           PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DORIAN_UPLOAD_DIR: ${{ env.DORIAN_UPLOAD_DIR }}
         run: |
           set -euo pipefail
+          shopt -s nullglob
+          mapfile -t files < <(find dist -name 'dorian-ddos-firewall-*-payload.tar.gz' -type f | sort)
+          if (( ${#files[@]} == 0 )); then
+            echo "error: no payload tarballs found under dist/" >&2
+            ls -laR dist || true
+            exit 1
+          fi
           ssh -p "${PORT}" "${USER}@${HOST}" "mkdir -p '${DORIAN_UPLOAD_DIR}'"
-          scp -P "${PORT}" "dist/${TARBALL}" "${USER}@${HOST}:${DORIAN_UPLOAD_DIR}/"
-          echo "Uploaded ${TARBALL} to ${HOST}:${DORIAN_UPLOAD_DIR}/"
+          uploaded=0
+          for f in "${files[@]}"; do
+            base="$(basename "${f}")"
+            if [[ -n "${FILTER}" && "${base}" != *"-${FILTER}-payload.tar.gz" ]]; then
+              echo "Skipping ${base} (DEPLOY_OS_SLUG=${FILTER})"
+              continue
+            fi
+            scp -P "${PORT}" "${f}" "${USER}@${HOST}:${DORIAN_UPLOAD_DIR}/"
+            echo "Uploaded ${base} → ${HOST}:${DORIAN_UPLOAD_DIR}/"
+            uploaded=$((uploaded + 1))
+          done
+          if (( uploaded == 0 )); then
+            echo "error: nothing uploaded (check DEPLOY_OS_SLUG filter)" >&2
+            exit 1
+          fi
