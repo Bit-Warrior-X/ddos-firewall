@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install libxdp headers/libs for building sparta.
 # Ubuntu 24.04+: libxdp-dev from apt.
-# Ubuntu 22.04: no xdp-tools/libxdp packages in apt — build from source into /usr/local.
+# Ubuntu 22.04: no xdp packages in apt — build xdp-tools libxdp into /usr/local.
 set -euo pipefail
 
 XDP_TOOLS_REF="${XDP_TOOLS_REF:-v1.2.2}"
@@ -15,25 +15,38 @@ fi
 
 echo "libxdp-dev not in apt; building libxdp from xdp-tools ${XDP_TOOLS_REF} → ${PREFIX}"
 
-sudo apt-get install -y libelf-dev zlib1g-dev m4 libcap-dev
+# linux-libc-dev: asm/types.h for clang BPF object build (xsk_def_xdp_prog*.o).
+# libpcap-dev: required by xdp-tools configure when using bundled libbpf.
+sudo apt-get install -y \
+  libelf-dev zlib1g-dev m4 libcap-dev \
+  linux-libc-dev libc6-dev \
+  libpcap-dev \
+  "linux-headers-$(uname -r)"
 
 work="$(mktemp -d)"
 cleanup() { rm -rf "${work}"; }
 trap cleanup EXIT
 
-git clone --depth 1 --branch "${XDP_TOOLS_REF}" \
+git -c advice.detachedHead=false clone --depth 1 --branch "${XDP_TOOLS_REF}" \
   https://github.com/xdp-project/xdp-tools.git "${work}/xdp-tools"
 
 cd "${work}/xdp-tools"
-# Jammy libbpf is often too old; use the bundled submodule when configure asks for it.
-git submodule update --init --depth 1 lib/libbpf
-./configure --prefix="${PREFIX}" --libdir="${PREFIX}/lib"
-make -j"$(nproc)"
-sudo make install
+git -c advice.detachedHead=false submodule update --init --depth 1 lib/libbpf
+
+# Jammy system libbpf (0.5) lacks APIs xdp-tools needs — use bundled submodule.
+export FORCE_SUBDIR_LIBBPF=1
+khdr="/usr/src/linux-headers-$(uname -r)/include"
+if [[ -d "${khdr}" ]]; then
+  export KERNEL_HEADERS="${khdr}"
+fi
+
+./configure
+make -j"$(nproc)" libxdp
+sudo make libxdp_install PREFIX="${PREFIX}"
 sudo ldconfig
 
 if ! pkg-config --exists libxdp 2>/dev/null; then
-  echo "warning: pkg-config libxdp not found after install (headers under ${PREFIX}/include)" >&2
+  echo "note: pkg-config libxdp may be missing; headers/libs are under ${PREFIX}" >&2
 fi
 
 echo "Installed libxdp from source into ${PREFIX}"
