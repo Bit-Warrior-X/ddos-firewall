@@ -67,6 +67,7 @@ rm -rf "${PAYLOAD_ATHENS_DIR}"
 mkdir -p "${PAYLOAD_ATHENS_DIR}"
 cp -a "${INSTALL_PREFIX}/." "${PAYLOAD_ATHENS_DIR}/"
 cp "${SERVICE_SRC}" "${PAYLOAD_ATHENS_DIR}/athens.service"
+cp "${SCRIPT_DIR}/athens-luajit.conf" "${PAYLOAD_ATHENS_DIR}/athens-luajit.conf"
 
 rm -rf "${PAYLOAD_ATHENS_DIR}/bin"
 rm -rf "${PAYLOAD_ATHENS_DIR}/pod"
