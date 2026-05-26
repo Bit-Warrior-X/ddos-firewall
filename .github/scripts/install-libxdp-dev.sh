@@ -36,18 +36,22 @@ git -c advice.detachedHead=false submodule update --init --depth 1 lib/libbpf
 # Jammy system libbpf (0.5) lacks APIs xdp-tools needs — use bundled submodule.
 export FORCE_SUBDIR_LIBBPF=1
 
-# Do NOT set KERNEL_HEADERS: it makes clang pull azure kernel uapi headers that lack
-# asm/types.h. xdp-tools ships headers/; only userspace arch includes are needed.
+./configure
+
+# lib/libxdp/Makefile does not apply ARCH_INCLUDES to BPF_CFLAGS (unlike common.mk).
+# linux/types.h → asm/types.h needs the multiarch include dir on Ubuntu.
 mlarch="$(uname -m)-linux-gnu"
-if [[ -d "/usr/include/${mlarch}" ]]; then
-  export ARCH_INCLUDES="-I/usr/include/${mlarch}"
+arch_inc="/usr/include/${mlarch}"
+if [[ -d "${arch_inc}" ]]; then
+  if ! grep -qF "${arch_inc}" config.mk; then
+    echo "BPF_CFLAGS += -I${arch_inc}" >> config.mk
+    echo "Added BPF_CFLAGS -I${arch_inc} to config.mk"
+  fi
+else
+  echo "error: missing ${arch_inc} (install linux-libc-dev)" >&2
+  exit 1
 fi
 
-./configure
-if ! grep -q 'ARCH_INCLUDES.*x86_64-linux-gnu\|ARCH_INCLUDES.*aarch64-linux-gnu' config.mk 2>/dev/null; then
-  echo "warning: ARCH_INCLUDES may be empty in config.mk; BPF build can fail" >&2
-  grep '^ARCH_INCLUDES' config.mk || true
-fi
 make -j"$(nproc)" libxdp
 sudo make libxdp_install PREFIX="${PREFIX}"
 sudo ldconfig
