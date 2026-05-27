@@ -25,27 +25,46 @@ CLANG_FLAGS  := -O2 -g -target $(BPF_ARCH) -Wall -Wextra \
 							   $(if $(MULTIARCH),-I/usr/include/$(MULTIARCH),) \
 							   -D__TARGET_ARCH_$(ARCH)
 
-LIBBPF_INCLUDE ?= $(VMLINUX_SRC)/tools/bpf/resolve_btfids/libbpf/include
+# Kernel tree headers (eBPF object only — not for userspace link).
+LIBBPF_KERNEL_INCLUDE ?= $(VMLINUX_SRC)/tools/bpf/resolve_btfids/libbpf/include
 
-# bpf_xdp_attach / bpf_xdp_detach need libbpf >= 0.7 (Jammy apt is 0.5; xdp-tools installs to /usr/local).
-PKG_CONFIG_PATH ?= /usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
-export PKG_CONFIG_PATH
-LIBBPF_CFLAGS := $(shell pkg-config --cflags libbpf 2>/dev/null)
-LIBBPF_LIBS   := $(shell pkg-config --libs libbpf 2>/dev/null)
-ifeq ($(LIBBPF_LIBS),)
-  ifneq ($(wildcard /usr/local/lib/libbpf.so)$(wildcard /usr/local/lib/libbpf.a),)
-    LIBBPF_CFLAGS := -I/usr/local/include
-    LIBBPF_LIBS   := -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lbpf
+# Userspace needs libbpf >= 0.7 (bpf_xdp_attach, bpf_object__next_map). Jammy apt is 0.5.
+# Prefer /usr/local from xdp-tools; do not use pkg-config when it still points at 0.5.
+LOCAL_LIBBPF_SO := $(firstword $(wildcard /usr/local/lib/libbpf.so*))
+LOCAL_LIBBPF_A  := $(wildcard /usr/local/lib/libbpf.a)
+libbpf_local_ok := $(shell \
+  if [ -n "$(LOCAL_LIBBPF_SO)" ] && nm -D "$(LOCAL_LIBBPF_SO)" 2>/dev/null | grep -q 'bpf_xdp_attach'; then \
+    echo yes; \
+  elif [ -f /usr/local/lib/libbpf.a ] && nm /usr/local/lib/libbpf.a 2>/dev/null | grep -q 'bpf_xdp_attach'; then \
+    echo yes; \
+  else \
+    echo no; \
+  fi)
+
+ifeq ($(libbpf_local_ok),yes)
+  LIBBPF_USR_CFLAGS := -I/usr/local/include
+  ifneq ($(LOCAL_LIBBPF_SO),)
+    LIBBPF_LIBS := -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lbpf
   else
+    LIBBPF_LIBS := -L/usr/local/lib -l:libbpf.a -lelf -lz
+  endif
+  $(info Using libbpf from /usr/local ($(if $(LOCAL_LIBBPF_SO),$(LOCAL_LIBBPF_SO),libbpf.a)))
+else
+  PKG_CONFIG_PATH ?= /usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+  export PKG_CONFIG_PATH
+  LIBBPF_USR_CFLAGS := $(shell pkg-config --cflags libbpf 2>/dev/null)
+  LIBBPF_LIBS := $(shell pkg-config --libs libbpf 2>/dev/null)
+  ifeq ($(LIBBPF_LIBS),)
     LIBBPF_LIBS := -lbpf
   endif
+  $(info Using libbpf from pkg-config: $(LIBBPF_LIBS))
 endif
 
-ifneq ("$(wildcard $(LIBBPF_INCLUDE)/bpf/bpf_helpers.h)","")
-CLANG_FLAGS += -I$(LIBBPF_INCLUDE)
+ifneq ("$(wildcard $(LIBBPF_KERNEL_INCLUDE)/bpf/bpf_helpers.h)","")
+CLANG_FLAGS += -I$(LIBBPF_KERNEL_INCLUDE)
 endif
-ifneq ($(LIBBPF_CFLAGS),)
-CLANG_FLAGS += $(LIBBPF_CFLAGS)
+ifneq ($(LIBBPF_USR_CFLAGS),)
+CLANG_FLAGS += $(LIBBPF_USR_CFLAGS)
 endif
 
 # Build mode (default: production_mode)
@@ -81,18 +100,10 @@ USR_BIN      := $(BUILD_DIR)/sparta_user
 USR_CLIBIN   := $(BUILD_DIR)/sparta_cli
 USR_INC_DIR  := userspace/include
 
-USR_INCLUDES = -I$(USR_INC_DIR) -I. $(MODE_FLAGS)
-ifeq ($(LIBBPF_CFLAGS),)
-  ifneq ("$(wildcard $(LIBBPF_INCLUDE)/bpf/libbpf.h)","")
-    USR_INCLUDES += -I$(LIBBPF_INCLUDE)
-  endif
-else
-  USR_INCLUDES += $(LIBBPF_CFLAGS)
-endif
+USR_INCLUDES = -I$(USR_INC_DIR) -I. $(MODE_FLAGS) $(LIBBPF_USR_CFLAGS)
 
 INSTALL_DIR := /usr/local/share/dorian/sparta
 
-# Libraries (bpf_xdp_* are in libbpf 0.7+, not the distro 0.5 on Ubuntu 22.04)
 USR_LIBS     := $(LIBBPF_LIBS) -lnetfilter_conntrack -lpthread -lcrypto -lsqlite3
 USR_PROMLIBS := -lprom -lpromhttp -lmicrohttpd -pthread
 
@@ -129,6 +140,7 @@ $(KERNEL_OBJ): $(KERNEL_SRC) | $(BUILD_DIR)
 # 3. Compile userspace binary
 $(USR_BIN): $(USR_SRCS) | $(BUILD_DIR)
 	@echo ">> Linking userspace firewall"
+	@echo ">> LIBBPF_LIBS=$(LIBBPF_LIBS)"
 	$(GCC) -o $@ $^ $(USR_INCLUDES) $(USR_LIBS)
 
 $(USR_CLIBIN): $(USR_CLI) | $(BUILD_DIR)
@@ -150,4 +162,3 @@ install: all
 	@sudo mkdir -p $(INSTALL_DIR)
 	@sudo cp -r $(BUILD_DIR)/* $(INSTALL_DIR)/
 	@echo "Installation complete. Files copied to $(INSTALL_DIR)"
-	

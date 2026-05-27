@@ -38,10 +38,25 @@ export FORCE_SUBDIR_LIBBPF=1
 ./configure
 make -j"$(nproc)"
 sudo make install PREFIX="${PREFIX}"
+
+# Install bundled libbpf for sparta (needs bpf_xdp_attach, bpf_object__next_map, etc.).
+sudo make -C lib/libbpf/src install PREFIX="${PREFIX}" || {
+  echo "libbpf install target failed; copying build artifacts"
+  sudo install -d "${PREFIX}/lib" "${PREFIX}/include/bpf"
+  sudo cp -f lib/libbpf/src/libbpf.a "${PREFIX}/lib/"
+  sudo cp -f lib/libbpf/src/*.h "${PREFIX}/include/bpf/" 2>/dev/null || true
+  sudo cp -rf lib/libbpf/src/root/usr/include/bpf "${PREFIX}/include/"
+}
 sudo ldconfig
 
-if ! pkg-config --exists libxdp 2>/dev/null; then
-  echo "note: pkg-config libxdp may be missing; headers/libs are under ${PREFIX}" >&2
+if nm -D "${PREFIX}/lib/libbpf.so" 2>/dev/null | grep -q bpf_xdp_attach; then
+  echo "libbpf.so provides bpf_xdp_attach"
+elif nm "${PREFIX}/lib/libbpf.a" 2>/dev/null | grep -q bpf_xdp_attach; then
+  echo "libbpf.a provides bpf_xdp_attach"
+else
+  echo "error: ${PREFIX}/lib/libbpf missing bpf_xdp_attach" >&2
+  ls -la "${PREFIX}/lib/libbpf"* 2>/dev/null || true
+  exit 1
 fi
 
-echo "Installed libxdp from source into ${PREFIX}"
+echo "Installed libxdp + libbpf from source into ${PREFIX}"
