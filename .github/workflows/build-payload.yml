@@ -87,6 +87,8 @@ jobs:
       - name: Build sparta payload
         env:
           DDOS_FW_CI_PAYLOAD_ONLY: "1"
+          PKG_CONFIG_PATH: /usr/local/lib/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig
+          LDFLAGS: -L/usr/local/lib
         run: bash ebpf_firewall/script.sh
 
       - name: Fetch OpenResty source
