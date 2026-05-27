@@ -33,13 +33,12 @@ LIBBPF_KERNEL_INCLUDE ?= $(VMLINUX_SRC)/tools/bpf/resolve_btfids/libbpf/include
 LOCAL_LIBBPF_SO := $(firstword $(wildcard /usr/local/lib/libbpf.so*))
 LOCAL_LIBBPF_A  := $(wildcard /usr/local/lib/libbpf.a)
 libbpf_local_ok := $(shell \
-  if [ -n "$(LOCAL_LIBBPF_SO)" ] && nm -D "$(LOCAL_LIBBPF_SO)" 2>/dev/null | grep -q 'bpf_xdp_attach'; then \
-    echo yes; \
-  elif [ -f /usr/local/lib/libbpf.a ] && nm /usr/local/lib/libbpf.a 2>/dev/null | grep -q 'bpf_xdp_attach'; then \
-    echo yes; \
-  else \
-    echo no; \
-  fi)
+  for f in /usr/local/lib/libbpf.so /usr/local/lib/libbpf.so.* /usr/local/lib/libbpf.a; do \
+    [ -e "$$f" ] || continue; \
+    if nm -g --defined-only "$$f" 2>/dev/null | grep -qw bpf_xdp_attach; then echo yes; exit 0; fi; \
+    if nm -D "$$f" 2>/dev/null | grep -qw bpf_xdp_attach; then echo yes; exit 0; fi; \
+  done; \
+  echo no)
 
 ifeq ($(libbpf_local_ok),yes)
   LIBBPF_USR_CFLAGS := -I/usr/local/include
