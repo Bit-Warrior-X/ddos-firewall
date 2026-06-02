@@ -57,13 +57,23 @@ cd "${OPENRESTY_SRC_DIR}"
     --with-threads \
     --with-file-aio
 
-make -j$(nproc)
-make install
+make -j"$(nproc)"
 
-mkdir -p "${CONF_DIR}" "${LUA_RESTY_DIR}"
+# CI: configure uses runtime prefix but install into a writable staging tree (no sudo).
+STAGING_DIR=""
+if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
+  STAGING_DIR="$(mktemp -d)"
+  make install DESTDIR="${STAGING_DIR}"
+  INSTALL_ROOT="${STAGING_DIR}${INSTALL_PREFIX}"
+else
+  make install
+  INSTALL_ROOT="${INSTALL_PREFIX}"
+fi
 
-cp "${SCRIPT_DIR}"/config/*.conf "${CONF_DIR}/"
-cp -r "${SCRIPT_DIR}/config/lua/resty/." "${LUA_RESTY_DIR}/"
+mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty"
+
+cp "${SCRIPT_DIR}"/config/*.conf "${INSTALL_ROOT}/nginx/conf/"
+cp -r "${SCRIPT_DIR}/config/lua/resty/." "${INSTALL_ROOT}/nginx/lua/resty/"
 
 if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" != "1" ]] && [[ -f "${SERVICE_SRC}" ]]; then
     cp "${SERVICE_SRC}" "${SERVICE_DST}"
@@ -72,7 +82,7 @@ fi
 
 rm -rf "${PAYLOAD_ATHENS_DIR}"
 mkdir -p "${PAYLOAD_ATHENS_DIR}"
-cp -a "${INSTALL_PREFIX}/." "${PAYLOAD_ATHENS_DIR}/"
+cp -a "${INSTALL_ROOT}/." "${PAYLOAD_ATHENS_DIR}/"
 cp "${SERVICE_SRC}" "${PAYLOAD_ATHENS_DIR}/athens.service"
 cp "${SCRIPT_DIR}/athens-luajit.conf" "${PAYLOAD_ATHENS_DIR}/athens-luajit.conf"
 
@@ -93,4 +103,7 @@ rm -rf "${PAYLOAD_ATHENS_DIR}/LICENSE"
 
 echo "Athens OpenResty build and install completed."
 echo "  prefix: ${INSTALL_PREFIX}"
+if [[ -n "${STAGING_DIR}" ]]; then
+  echo "  staged: ${INSTALL_ROOT}"
+fi
 echo "  nginx:  ${NGINX_DIR}/sbin/nginx"
