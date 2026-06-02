@@ -134,7 +134,6 @@ jobs:
           DDOS_FW_CI_PAYLOAD_ONLY: "1"
           LIB_UTHASH: ${{ github.workspace }}/openresty-modules/.ci-deps/uthash
           LIB_MAXMINDDB: ${{ github.workspace }}/openresty-modules/.ci-deps/libmaxminddb
-          ATHENS_PREFIX: ${{ github.workspace }}/openresty-modules/.ci-athens-install
         run: bash ./script.sh
 
       - name: Verify athens glibc linkage
@@ -142,6 +141,12 @@ jobs:
           set -euo pipefail
           nginx_bin="${GITHUB_WORKSPACE}/setup/payload/athens/nginx/sbin/nginx"
           test -x "${nginx_bin}"
+          if ! "${nginx_bin}" -V 2>&1 | grep -q '/usr/local/share/dorian/athens'; then
+            echo "error: nginx was not built with prefix /usr/local/share/dorian/athens" >&2
+            "${nginx_bin}" -V 2>&1 | head -5
+            exit 1
+          fi
+          echo "nginx prefix OK (/usr/local/share/dorian/athens)"
           echo "Host ldd: $(ldd --version | head -1)"
           echo "nginx dynamic deps:"
           ldd "${nginx_bin}" | head -20

@@ -4,7 +4,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENRESTY_SRC_DIR="${OPENRESTY_SRC_DIR:-${SCRIPT_DIR}/openresty-1.27.1.2}"
 DEFAULT_ATHENS_PREFIX="/usr/local/share/dorian/athens"
-INSTALL_PREFIX="${ATHENS_PREFIX:-${DEFAULT_ATHENS_PREFIX}}"
+# Paths are baked in at ./configure time — always use the runtime prefix for payloads.
+if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
+  INSTALL_PREFIX="${DEFAULT_ATHENS_PREFIX}"
+elif [[ -n "${ATHENS_PREFIX:-}" ]]; then
+  INSTALL_PREFIX="${ATHENS_PREFIX}"
+else
+  INSTALL_PREFIX="${DEFAULT_ATHENS_PREFIX}"
+fi
 NGINX_DIR="${INSTALL_PREFIX}/nginx"
 CONF_DIR="${NGINX_DIR}/conf"
 LUA_RESTY_DIR="${NGINX_DIR}/lua/resty"
@@ -76,7 +83,8 @@ rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/fastcgi_temp"
 rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/proxy_temp"
 rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/scgi_temp"
 rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/uwsgi_temp"
-rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/logs/"
+rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/logs"
+mkdir -p "${PAYLOAD_ATHENS_DIR}/nginx/logs"
 rm -rf "${PAYLOAD_ATHENS_DIR}/nginx/sbin/nginx.old"
 rm -rf "${PAYLOAD_ATHENS_DIR}/site"
 rm -rf "${PAYLOAD_ATHENS_DIR}/COPYRIGHT"
@@ -84,3 +92,5 @@ rm -rf "${PAYLOAD_ATHENS_DIR}/resty.index"
 rm -rf "${PAYLOAD_ATHENS_DIR}/LICENSE"
 
 echo "Athens OpenResty build and install completed."
+echo "  prefix: ${INSTALL_PREFIX}"
+echo "  nginx:  ${NGINX_DIR}/sbin/nginx"
