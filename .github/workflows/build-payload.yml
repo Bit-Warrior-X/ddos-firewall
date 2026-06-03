@@ -139,14 +139,23 @@ jobs:
       - name: Verify athens glibc linkage
         run: |
           set -euo pipefail
-          nginx_bin="${GITHUB_WORKSPACE}/setup/payload/athens/nginx/sbin/nginx"
+          athens_root="${GITHUB_WORKSPACE}/setup/payload/athens"
+          nginx_bin="${athens_root}/nginx/sbin/nginx"
+          luajit_lib="${athens_root}/luajit/lib"
           test -x "${nginx_bin}"
-          if ! "${nginx_bin}" -V 2>&1 | grep -q '/usr/local/share/dorian/athens'; then
-            echo "error: nginx was not built with prefix /usr/local/share/dorian/athens" >&2
-            "${nginx_bin}" -V 2>&1 | head -5
+          test -f "${luajit_lib}/libluajit-5.1.so.2" || test -f "${luajit_lib}/libluajit-5.1.so"
+
+          # Prefix is compile-time; nginx -V needs bundled luajit (runtime path is not on CI host).
+          if ! strings "${nginx_bin}" | grep -q '/usr/local/share/dorian/athens'; then
+            echo "error: nginx binary missing prefix /usr/local/share/dorian/athens" >&2
+            strings "${nginx_bin}" | grep -E 'athens|dorian|runner' | head -10 || true
             exit 1
           fi
           echo "nginx prefix OK (/usr/local/share/dorian/athens)"
+
+          export LD_LIBRARY_PATH="${luajit_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          "${nginx_bin}" -V 2>&1 | head -3
+
           echo "Host ldd: $(ldd --version | head -1)"
           echo "nginx dynamic deps:"
           ldd "${nginx_bin}" | head -20
