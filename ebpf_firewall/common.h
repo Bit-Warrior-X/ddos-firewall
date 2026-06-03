@@ -9,7 +9,7 @@
 #define XDP_CORE_FILE               "EBPF_FIREWALL_XDP_KO"
 #define CONFIG_FILE                 "EBPF_FIREWALL_XDP_CONFIG"
 #define SQLITE_DB_NAME              "SQLITE_DB_NAME"
-#define SQLITE_DB_PATH_DEFAULT      "/usr/local/share/dorian/ebpf_firewall/firewall_control.db"
+#define SQLITE_DB_PATH_DEFAULT      "/usr/local/share/dorian/sparta/firewall_control.db"
 #define SOCK_PATH                   "/tmp/ebpf_fw.sock"
 #define NGINX_UNIX_PATH             "/tmp/unix.sock"
 #define FIFO_PATH                   "/tmp/firewall_to_api_parser.fifo"

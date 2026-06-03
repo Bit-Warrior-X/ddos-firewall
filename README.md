@@ -264,7 +264,7 @@ FIREWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
 
 ### L4 Firewall Configuration
 
-Edit `/usr/local/share/ebpf_firewall/firewall.config`:
+Edit `/usr/local/share/dorian/sparta/firewall.config`:
 
 ```ini
 #------------------GLOBAL-------------------

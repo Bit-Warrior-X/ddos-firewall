@@ -11,7 +11,7 @@
 #include <promhttp.h>
 
 #define LISTEN_PORT 9115
-#define CLI_CMD     "./ebpf_firewall_cli STATS_FW"
+#define CLI_CMD     "/usr/local/share/dorian/sparta/bin/sparta_cli STATS_FW"
 
 // Gauges for each protocol: received & passed
 static prom_gauge_t *g_SYN_recv,    *g_SYN_pass;

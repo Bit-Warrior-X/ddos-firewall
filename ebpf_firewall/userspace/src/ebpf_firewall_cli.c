@@ -15,7 +15,7 @@
 
 #define MAX_LINE_LENGTH 256
 #define MAX_COMMENT_LENGTH 256
-#define CONFIG_PATH "/usr/local/share/ebpf_firewall/firewall.config"
+#define CONFIG_PATH "/usr/local/share/dorian/sparta/firewall.config"
 #define TEMP_FILE_TEMPLATE "/tmp/firewall_config.XXXXXX"
 #define SOCK_PATH "/tmp/ebpf_fw.sock"
 #define BUF_SZ    1024
@@ -47,7 +47,7 @@ static void usage(void) {
 "  CLEAR_ALLOW_IP <ip> : Remove ip from whitelist\n"
 "  CLEAR_ALLOW_IP_ALL : Remove all ips from blacklist\n"
 "  ADD_ALLOW_IP <ip> : Add ip to whitelist.\n"
-"  HEALTH_CHECK : Check the health status of ebpf_firewall\n"
+"  HEALTH_CHECK : Check the health status of sparta\n"
 "  GET_BLOCKLIST <filter_type> <filter_ip> <filter_date> : Get the filtered block list ips\n"
 "  GET_MACHINE_ID : Get machine id\n"
 "  TRAFFIC_TIMESTAMPS : Get all traffic timestamps\n"

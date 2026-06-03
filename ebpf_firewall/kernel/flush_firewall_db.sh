@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-DB="/usr/local/share/ebpf_firewall/firewall_control.db"
+DB="/usr/local/share/dorian/sparta/firewall_control.db"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -62,7 +62,7 @@ case "$MODE" in
         # Also clear the BPF map if the firewall is running
         if pgrep -f ebpf_firewall >/dev/null 2>&1; then
             echo "Firewall is running — clearing BPF blocked_ips map via CLI..."
-            /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
+            /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
         fi
         ;;
 
@@ -74,7 +74,7 @@ case "$MODE" in
 
         if pgrep -f ebpf_firewall >/dev/null 2>&1; then
             echo "Firewall is running — clearing BPF allowed_ips map via CLI..."
-            /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
+            /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
         fi
         ;;
 
@@ -94,8 +94,8 @@ EOF
 
         if pgrep -f ebpf_firewall >/dev/null 2>&1; then
             echo "Firewall is running — clearing BPF maps via CLI..."
-            /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
-            /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
+            /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
+            /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
         fi
         ;;
 
@@ -120,7 +120,7 @@ EOF
                 sqlite3 "$DB" "DELETE FROM blocked_ips; DELETE FROM sqlite_sequence WHERE name='blocked_ips';"
                 echo -e "${GREEN}blocked_ips flushed ($BLOCKED_COUNT entries removed)${NC}"
                 if pgrep -f ebpf_firewall >/dev/null 2>&1; then
-                    /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
+                    /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
                     echo "BPF blocked_ips map cleared"
                 fi
                 ;;
@@ -128,7 +128,7 @@ EOF
                 sqlite3 "$DB" "DELETE FROM white_ips; DELETE FROM sqlite_sequence WHERE name='white_ips';"
                 echo -e "${GREEN}white_ips flushed ($WHITE_COUNT entries removed)${NC}"
                 if pgrep -f ebpf_firewall >/dev/null 2>&1; then
-                    /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
+                    /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
                     echo "BPF allowed_ips map cleared"
                 fi
                 ;;
@@ -136,8 +136,8 @@ EOF
                 sqlite3 "$DB" "DELETE FROM blocked_ips; DELETE FROM white_ips; DELETE FROM sqlite_sequence;"
                 echo -e "${GREEN}Both tables flushed${NC}"
                 if pgrep -f ebpf_firewall >/dev/null 2>&1; then
-                    /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
-                    /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
+                    /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
+                    /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
                     echo "BPF maps cleared"
                 fi
                 ;;
@@ -146,8 +146,8 @@ EOF
                 NEW_SIZE=$(du -h "$DB" | cut -f1)
                 echo -e "${GREEN}Both tables flushed + VACUUM (size: $NEW_SIZE)${NC}"
                 if pgrep -f ebpf_firewall >/dev/null 2>&1; then
-                    /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
-                    /usr/local/share/ebpf_firewall/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
+                    /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_BLOCK_IP_ALL 2>/dev/null || true
+                    /usr/local/share/dorian/sparta/bin/ebpf_firewall_cli CLEAR_ALLOW_IP_ALL 2>/dev/null || true
                     echo "BPF maps cleared"
                 fi
                 ;;
