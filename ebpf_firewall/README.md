@@ -105,7 +105,7 @@ ADD_IP <ip> [seconds] : Add ip to blacklist. Default duration if seconds omitted
 
 Example Cli command Usage :
 ```bash
-root@:# ./ebpf_firewall_cli RELOAD_FW
+root@:# ./sparta_cli RELOAD_FW
 OK! Config reloaded
 ```
 

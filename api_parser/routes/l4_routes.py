@@ -439,7 +439,7 @@ def tcp_seg():
     if 'status' not in data:
         return jsonify({"status": "error", "message": "Missing 'status' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'SET_TCP_SEG', data['status']]
+    command_args = ['sparta_cli', 'SET_TCP_SEG', data['status']]
     result = execute_cli_command(command_args)
     
     if result['status'] == 'error':
@@ -455,7 +455,7 @@ def tcp_geo():
     if 'status' not in data:
         return jsonify({"status": "error", "message": "Missing 'status' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'SET_GEO', data['status']]
+    command_args = ['sparta_cli', 'SET_GEO', data['status']]
     
     if 'geo' in data:
         config_ok, current_config = _read_firewall_config()
@@ -487,7 +487,7 @@ def tcp_connection_limit():
     if 'status' not in data:
         return jsonify({"status": "error", "message": "Missing 'status' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'SET_CONN_LIMIT', data['status']]
+    command_args = ['sparta_cli', 'SET_CONN_LIMIT', data['status']]
     
     if 'limit_cnt' in data:
         command_args.extend([str(data['limit_cnt'])])
@@ -507,7 +507,7 @@ def add_block_ip():
     if 'ip' not in data:
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'ADD_BLOCK_IP', data['ip'], '-1']
+    command_args = ['sparta_cli', 'ADD_BLOCK_IP', data['ip'], '-1']
     
     if 'duration' in data:
         command_args.extend([str(data['duration'])])
@@ -527,7 +527,7 @@ def remove_block_ip():
     if 'ip' not in data:
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'CLEAR_BLOCK_IP', data['ip']]
+    command_args = ['sparta_cli', 'CLEAR_BLOCK_IP', data['ip']]
     result = execute_cli_command(command_args)
     
     if result['status'] == 'error':
@@ -539,7 +539,7 @@ def remove_block_ip():
 @token_required
 def remove_block_ip_all():
     """Remove all IPs from blocklist."""
-    command_args = ['l4_firewall_cli', 'CLEAR_BLOCK_IP_ALL']
+    command_args = ['sparta_cli', 'CLEAR_BLOCK_IP_ALL']
     result = execute_cli_command(command_args)
     
     if result['status'] == 'error':
@@ -555,7 +555,7 @@ def add_white_ip():
     if 'ip' not in data:
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'ADD_ALLOW_IP', data['ip']]
+    command_args = ['sparta_cli', 'ADD_ALLOW_IP', data['ip']]
     result = execute_cli_command(command_args)
     
     if result['status'] == 'error':
@@ -571,7 +571,7 @@ def remove_white_ip():
     if 'ip' not in data:
         return jsonify({"status": "error", "message": "Missing 'ip' parameter"}), 400
     
-    command_args = ['l4_firewall_cli', 'CLEAR_ALLOW_IP', data['ip']]
+    command_args = ['sparta_cli', 'CLEAR_ALLOW_IP', data['ip']]
     result = execute_cli_command(command_args)
     
     if result['status'] == 'error':
@@ -583,7 +583,7 @@ def remove_white_ip():
 @token_required
 def remove_white_ip_all():
     """Remove all IPs from whitelist."""
-    command_args = ['l4_firewall_cli', 'CLEAR_ALLOW_IP_ALL']
+    command_args = ['sparta_cli', 'CLEAR_ALLOW_IP_ALL']
     result = execute_cli_command(command_args)
     
     if result['status'] == 'error':
@@ -823,25 +823,25 @@ def l4_firewall_data():
 
     if tcp_seg_changed:
         results["tcp_seg"] = execute_cli_command(
-            ["l4_firewall_cli", "SET_TCP_SEG", _normalize_status(data["tcpSegCheck"])]
+            ["sparta_cli", "SET_TCP_SEG", _normalize_status(data["tcpSegCheck"])]
         )
     if geo_runtime_changed:
         if _normalize_status(data["geoCheck"]) == "on":     # geo check is on
             if _normalize_status(data["geoCountriesBlockMode"]) == "on": # geo countries block mode is on
                 results["tcp_geo"] = execute_cli_command(
-                    ["l4_firewall_cli", "SET_GEO", "block", geo_value]
+                    ["sparta_cli", "SET_GEO", "block", geo_value]
                 )
             else: # geo countries block mode is off
                 results["tcp_geo"] = execute_cli_command(
-                    ["l4_firewall_cli", "SET_GEO", "allow", geo_value]
+                    ["sparta_cli", "SET_GEO", "allow", geo_value]
                 )
         else: # geo check is off
             results["tcp_geo"] = execute_cli_command(
-                ["l4_firewall_cli", "SET_GEO", "off", ""]
+                ["sparta_cli", "SET_GEO", "off", ""]
             )
     if conn_limit_changed:
         results["tcp_connection_limit"] = execute_cli_command(
-            ["l4_firewall_cli", "SET_CONN_LIMIT", _normalize_status(data["tcpConnectionLimitCheck"]),
+            ["sparta_cli", "SET_CONN_LIMIT", _normalize_status(data["tcpConnectionLimitCheck"]),
              str(int(data["tcpConnectionLimitCnt"]))],
         )
     if restart_required:

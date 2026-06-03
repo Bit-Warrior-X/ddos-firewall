@@ -259,7 +259,7 @@ SERVER_PORT = 5000
 API_BASE_URL = "https://your-backend.com/api/endpoint"
 
 # Database path
-FIREWALL_DB_NAME = "/usr/local/share/ebpf_firewall/firewall_control.db"
+FIREWALL_DB_NAME = "/usr/local/share/dorian/sparta/firewall_control.db"
 ```
 
 ### L4 Firewall Configuration
@@ -774,11 +774,11 @@ python setup.py build_ext --inplace
 **Database errors:**
 ```bash
 # Check database file
-ls -la /usr/local/share/ebpf_firewall/firewall_control.db
+ls -la /usr/local/share/dorian/sparta/firewall_control.db
 
 # Verify database permissions
-sudo chown root:root /usr/local/share/ebpf_firewall/firewall_control.db
-sudo chmod 644 /usr/local/share/ebpf_firewall/firewall_control.db
+sudo chown root:root /usr/local/share/dorian/sparta/firewall_control.db
+sudo chmod 644 /usr/local/share/dorian/sparta/firewall_control.db
 ```
 
 ### L4 Firewall Issues

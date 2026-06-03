@@ -27,9 +27,7 @@ build/
 *.dll
 *.exe
 
-# Binary files
-ebpf_firewall_cli
-ebpf_firewall_userspace
+
 *.bin
 
 # eBPF specific

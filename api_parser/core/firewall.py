@@ -57,7 +57,7 @@ def firewall_control(action: str, interface: str, attach_mode: str = 'native') -
             'message': f"Invalid action. Valid actions: {', '.join(actions.keys())}"
         }
     
-    command_args = ['l4_firewall_cli', actions[action], interface, attach_mode]
+    command_args = ['sparta_cli', actions[action], interface, attach_mode]
     return execute_cli_command(command_args)
 
 def set_protection(
@@ -72,7 +72,7 @@ def set_protection(
     challenge_timeout: Optional[int] = None
 ) -> Dict[str, str]:
     """Set protection parameters for various attack types."""
-    command_args = ['l4_firewall_cli', protection_type, status, 
+    command_args = ['sparta_cli', protection_type, status, 
                    str(threshold), str(burst_pkt), str(burst_counter),
                    str(fixed_threshold), str(fixed_duration)]
     
@@ -84,6 +84,6 @@ def set_protection(
 
 def health_check() -> Dict[str, str]:
     """Perform firewall health check."""
-    command_args = ['l4_firewall_cli', 'HEALTH_CHECK']
+    command_args = ['sparta_cli', 'HEALTH_CHECK']
     return execute_cli_command(command_args)
 
