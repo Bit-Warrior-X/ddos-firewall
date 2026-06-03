@@ -1,5 +1,6 @@
 # core/initializer.py
 """Initialization logic for API parser."""
+import config as app_config
 from utils.auth import get_token
 from core.api_client import APIClient
 from core.database import DatabaseManager
@@ -13,7 +14,7 @@ def _read_firewall_config():
     This mirrors the logic in L4 routes but is kept local here to
     avoid importing the routes module from the initializer.
     """
-    config_path = "/usr/local/share/ebpf_firewall/firewall.config"
+    config_path = app_config.FIREWALL_CONFIG_PATH
     try:
         with open(config_path, "r", encoding="utf-8") as handle:
             lines = handle.readlines()

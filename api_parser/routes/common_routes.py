@@ -24,7 +24,7 @@ def encode_base64(data):
 @token_required
 def get_config():
     """Get firewall config file as base64."""
-    config_path = '/usr/local/share/ebpf_firewall/firewall.config'
+    config_path = config.FIREWALL_CONFIG_PATH
     
     try:
         with open(config_path, 'r') as f:

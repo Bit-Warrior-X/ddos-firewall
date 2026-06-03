@@ -8,11 +8,10 @@ from core.firewall import firewall_control, set_protection, execute_cli_command
 from core.database import DatabaseManager
 from core.api_client import APIClient
 from utils.auth import token_required
+import config
 
 l4_bp = Blueprint('l4', __name__, url_prefix='/API/L4')
 
-FIREWALL_CONFIG_PATH = "/usr/local/share/ebpf_firewall/firewall.config"
-FIREWALL_BASE_DIR = "/usr/local/share/ebpf_firewall"
 _GEO_NAME_TO_ISO_CACHE = {}
 
 def _normalize_status(value):
@@ -33,10 +32,10 @@ def _normalize_bool_int(value):
 
 def _update_firewall_config(updates):
     try:
-        with open(FIREWALL_CONFIG_PATH, "r", encoding="utf-8") as handle:
+        with open(config.FIREWALL_CONFIG_PATH, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
     except FileNotFoundError:
-        return False, f"Config file not found at {FIREWALL_CONFIG_PATH}"
+        return False, f"Config file not found at {config.FIREWALL_CONFIG_PATH}"
     except OSError as exc:
         return False, f"Failed to read config file: {exc}"
 
@@ -65,7 +64,7 @@ def _update_firewall_config(updates):
         with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8") as tmp:
             tmp.writelines(new_lines)
             temp_path = tmp.name
-        os.replace(temp_path, FIREWALL_CONFIG_PATH)
+        os.replace(temp_path, config.FIREWALL_CONFIG_PATH)
     except OSError as exc:
         return False, f"Failed to write config file: {exc}"
 
@@ -76,7 +75,7 @@ def _resolve_geo_path(path_value):
         return None
     if os.path.isabs(path_value):
         return path_value
-    return os.path.join(FIREWALL_BASE_DIR, path_value)
+    return os.path.join(str(config.BASE_EBPF_FIREWALL_DIR), path_value)
 
 def _load_geo_name_map(location_path):
     cached = _GEO_NAME_TO_ISO_CACHE.get(location_path)
@@ -129,10 +128,10 @@ def _normalize_geo(geo_value, location_path):
 
 def _read_firewall_config():
     try:
-        with open(FIREWALL_CONFIG_PATH, "r", encoding="utf-8") as handle:
+        with open(config.FIREWALL_CONFIG_PATH, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
     except FileNotFoundError:
-        return False, f"Config file not found at {FIREWALL_CONFIG_PATH}"
+        return False, f"Config file not found at {config.FIREWALL_CONFIG_PATH}"
     except OSError as exc:
         return False, f"Failed to read config file: {exc}"
 

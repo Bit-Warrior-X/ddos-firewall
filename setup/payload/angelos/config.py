@@ -3,13 +3,14 @@
 import os
 from pathlib import Path
 
-# Base paths
-BASE_EBPF_FIREWALL_DIR = Path("/usr/local/share/dorian/ebpf_firewall")
+# Base paths (Sparta L4 install layout)
+BASE_EBPF_FIREWALL_DIR = Path("/usr/local/share/dorian/sparta")
 BASE_LICENSE_DIR = Path("/usr/local/share/dorian/license")
 
 # File paths
 FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
 UNIX_DGRAM_PATH = "/tmp/firewall_to_api_parser.sock"
+FIREWALL_CONFIG_PATH = str(BASE_EBPF_FIREWALL_DIR / "firewall.config")
 FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
 TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
 
