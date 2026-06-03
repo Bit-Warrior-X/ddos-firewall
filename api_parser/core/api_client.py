@@ -69,40 +69,6 @@ class APIClient:
             return False
         
     @staticmethod
-    def deploy_done(payload: Dict[str, Any]) -> tuple:
-        """Call deploy_done endpoint."""
-        headers = {'Content-Type': 'application/json'}
-        try:
-            response = requests.post(
-                config.BACKEND_DEPLOY_URL,
-                headers=headers,
-                json=payload,
-                timeout=10,
-                verify=False
-            )
-            response.raise_for_status()
-            return True, response.json()
-        except Exception as e:
-            return False, str(e)
-    
-    @staticmethod
-    def deploy_complete(payload: Dict[str, Any]) -> tuple:
-        """Call deploy_complete endpoint."""
-        headers = {'Content-Type': 'application/json'}
-        try:
-            response = requests.post(
-                config.BACKEND_DEPLOY_COMPLETE_URL,
-                headers=headers,
-                json=payload,
-                timeout=10,
-                verify=False
-            )
-            response.raise_for_status()
-            return True, response.json()
-        except Exception as e:
-            return False, str(e)
-
-    @staticmethod
     def notify_temporary_blacklist_added(item: Dict[str, Any]) -> bool:
         """Notify backend that a new temporary blacklist entry was added (with item details and token)."""
         # Include token in payload as requested

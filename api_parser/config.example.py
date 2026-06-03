@@ -11,10 +11,6 @@ BASE_LICENSE_DIR = Path("/usr/local/share/dorian/license")
 FIFO_PATH = "/tmp/firewall_to_api_parser.fifo"
 UNIX_DGRAM_PATH = "/tmp/firewall_to_api_parser.sock"
 FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
-INIT_FILE = str(BASE_LICENSE_DIR / "initialize")
-MACHINE_FILE = str(BASE_LICENSE_DIR / "machine_id")
-LICENSE_PATH = str(BASE_LICENSE_DIR / "license.lic")
-PUBKEY_PATH = str(BASE_LICENSE_DIR / "server_public_key.pem")
 TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
 
 # Server configuration
@@ -33,11 +29,6 @@ WHITELIST_API_URL = f"{API_BASE_URL}/get_whitelist_ips"
 CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
 
 TEMPORARY_BLACKLIST_NOTIFY_URL = f"{API_BASE_URL}/temporary_blacklist_added"
-
-# Deployment / licensing APIs
-DEPLOYMENT_BASE_URL = "http://127.0.0.1:9090/api".rstrip("/")
-BACKEND_DEPLOY_URL = f"{DEPLOYMENT_BASE_URL}/deploy_done"
-BACKEND_DEPLOY_COMPLETE_URL = f"{DEPLOYMENT_BASE_URL}/deploy_complete"
 
 # Redis configuration
 REDIS_SOCK = "/tmp/redis.sock"

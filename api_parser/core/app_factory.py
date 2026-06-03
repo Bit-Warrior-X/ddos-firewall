@@ -6,7 +6,7 @@ from routes.l4_routes import l4_bp
 from routes.l7_routes import l7_bp
 from routes.common_routes import common_bp
 from core.fifo_worker import start_fifo_listener
-from core.initializer import handle_initialize_file, sync_l4_lists_and_start_firewall
+from core.initializer import sync_l4_lists_and_start_firewall
 from core.temporary_blacklist_monitor import start_temporary_blacklist_monitor
 import config
 
@@ -22,7 +22,7 @@ def create_app() -> Flask:
     return app
 
 def initialize_app():
-    """Initialize the application (handle init file, start FIFO listener, start temp blacklist monitor).
+    """Initialize the application (start FIFO listener, start temp blacklist monitor).
 
     Important: When running with the Flask reloader (python app.py with debug=True),
     there are TWO Python processes:
@@ -33,8 +33,6 @@ def initialize_app():
     L4 sync + firewall start, temporary blacklist monitor) in the REAL worker
     process, otherwise each reload would duplicate them.
     """
-    handle_initialize_file()
-
     # Only start background workers in the real Flask worker process
     should_start = os.environ.get("WERKZEUG_RUN_MAIN") == "true" or \
         "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower()
