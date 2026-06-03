@@ -10,7 +10,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/usr/local/share/dorian/sparta/
-ExecStart=/usr/local/share/dorian/sparta/sparta_user
+ExecStart=/usr/local/share/dorian/sparta/bin/sparta_user
 Restart=on-failure
 RestartSec=1
 
