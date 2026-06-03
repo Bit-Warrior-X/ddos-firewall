@@ -135,15 +135,15 @@ def _read_firewall_config():
     except OSError as exc:
         return False, f"Failed to read config file: {exc}"
 
-    config = {}
+    parsed = {}
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        config[key.strip()] = value.strip()
+        parsed[key.strip()] = value.strip()
 
-    return True, config
+    return True, parsed
 
 def _list_interfaces():
     try:
