@@ -409,14 +409,14 @@ def l7_update_temporaryblacklist():
             new_index.add((ip, blocked_at))
 
     # For any old entry that was L4 (trigger_rule == "l4ddos") and is not in new_index,
-    # call l4_firewall_cli CLEAR_BLOCK_IP <ip> to clear the L4 block.
+    # call sparta_cli CLEAR_BLOCK_IP <ip> to clear the L4 block.
     for key, obj in old_entries.items():
         try:
             trig = str(obj.get("trigger_rule", "")).strip().lower()
             ip = str(obj.get("ip", "")).strip()
             blocked_at = str(obj.get("blocked_at", "")).strip()
             if trig == "l4ddos" and ip and blocked_at and (ip, blocked_at) not in new_index:
-                command_args = ["l4_firewall_cli", "CLEAR_BLOCK_IP", ip]
+                command_args = ["sparta_cli", "CLEAR_BLOCK_IP", ip]
                 # Reuse the helper from l4_routes to execute CLI
                 from routes.l4_routes import execute_cli_command  # local import to avoid cycles at module load
                 res = execute_cli_command(command_args)
