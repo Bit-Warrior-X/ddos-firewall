@@ -19,6 +19,9 @@
 #define LICENSE_PATH                "LICENSE_PATH"
 #define LICENSE_CHECK_INTERVAL      60
 
+#define LICENSE_FEATURE_L4          1
+#define LICENSE_FEATURE_L7          2
+
 #define ONE_SECOND_NS               1000000000ULL
 #define BLOCK_DURATION_NS           (3600ULL * 1000000000ULL)  // 1 hour
 

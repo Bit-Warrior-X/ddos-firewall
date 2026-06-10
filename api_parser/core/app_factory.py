@@ -8,6 +8,7 @@ from routes.common_routes import common_bp
 from core.fifo_worker import start_fifo_listener
 from core.initializer import sync_l4_lists_and_start_firewall
 from core.temporary_blacklist_monitor import start_temporary_blacklist_monitor
+from core.license_monitor import start_license_monitor
 import config
 
 def create_app() -> Flask:
@@ -46,6 +47,8 @@ def initialize_app():
     sync_l4_lists_and_start_firewall()
     # Monitor Redis temporaryblacklist:* and notify backend when a new item is added
     start_temporary_blacklist_monitor()
+    # Validate license every LICENSE_CHECK_INTERVAL seconds
+    start_license_monitor()
 
 def cleanup_on_exit():
     """Cleanup resources on application exit."""

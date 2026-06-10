@@ -13,6 +13,11 @@ UNIX_DGRAM_PATH = "/tmp/firewall_to_api_parser.sock"
 FIREWALL_CONFIG_PATH = str(BASE_EBPF_FIREWALL_DIR / "firewall.config")
 FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
 TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
+LICENSE_FILE = str(BASE_LICENSE_DIR / "license.lic")
+PUBKEY_FILE = str(BASE_LICENSE_DIR / "server_public_key.pem")
+LICENSE_CHECK_INTERVAL = 10
+SPARTA_SERVICE = "sparta.service"
+L7_SERVICE = "athens.service"
 
 # Server configuration
 SERVER_IP = "0.0.0.0"
@@ -20,7 +25,8 @@ SERVER_PORT = 5000
 
 # API URLs (base with no trailing slash to avoid double slashes)
 #API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
-API_BASE_URL = "http://93.95.116.174:8080/api".rstrip("/")
+#API_BASE_URL = "http://93.95.116.174:8080/api".rstrip("/")
+API_BASE_URL = "https://panel.dorian.center/api".rstrip("/")
 
 # L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"

@@ -1,8 +1,13 @@
 # setup.py
 """Setup script for compiling Python modules to .so files."""
+import os
+
 from setuptools import setup, Extension
 from Cython.Build import cythonize
 from Cython.Distutils import build_ext
+
+ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
+EBPF_DIR = os.path.join(ROOT_DIR, "..", "ebpf_firewall")
 
 # List of modules to compile to .so
 extensions = [
@@ -12,6 +17,8 @@ extensions = [
     Extension("core.redis_client", ["core/redis_client.py"]),
     Extension("core.fifo_worker", ["core/fifo_worker.py"]),
     Extension("core.temporary_blacklist_monitor", ["core/temporary_blacklist_monitor.py"]),
+    Extension("core.license_check", ["core/license_check.py"]),
+    Extension("core.license_monitor", ["core/license_monitor.py"]),
     Extension("core.initializer", ["core/initializer.py"]),
     Extension("core.app_factory", ["core/app_factory.py"]),
     Extension("utils.auth", ["utils/auth.py"]),
@@ -19,6 +26,23 @@ extensions = [
     Extension("routes.l4_routes", ["routes/l4_routes.py"]),
     Extension("routes.l7_routes", ["routes/l7_routes.py"]),
     Extension("routes.common_routes", ["routes/common_routes.py"]),
+    Extension(
+        "core._license_native",
+        sources=[
+            "native/license_python.c",
+            os.path.join(EBPF_DIR, "userspace/src/ebpf_firewall_utils.c"),
+            "native/license_log_stub.c",
+        ],
+        include_dirs=[
+            os.path.join(EBPF_DIR, "userspace/include"),
+            EBPF_DIR,
+        ],
+        libraries=["crypto"],
+        extra_compile_args=[
+            "-include",
+            os.path.join(EBPF_DIR, "common.h"),
+        ],
+    ),
 ]
 
 setup(

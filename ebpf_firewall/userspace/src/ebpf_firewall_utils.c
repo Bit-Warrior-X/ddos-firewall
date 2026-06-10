@@ -518,116 +518,166 @@ static int parse_iso8601_utc(const char *s, time_t *out) {
 }
 
 
-int get_license_status() {
-    char real_machine_id[256];
-    if (get_machine_id(real_machine_id) < 0) {
-        LOG_E("Failed to get machine id of this device\n");
-        return -1;
-    }
+static int is_supported_license_type(const char *license_type) {
+    return license_type &&
+           (strcmp(license_type, "l4") == 0 ||
+            strcmp(license_type, "l7") == 0 ||
+            strcmp(license_type, "trial") == 0 ||
+            strcmp(license_type, "unified") == 0);
+}
 
-    /* Read license.b64 */
+static void fill_license_info(license_info_t *out, int status, int feature,
+                              const char *license_type, long long days_left) {
+    if (!out) {
+        return;
+    }
+    out->status = status;
+    out->feature = feature;
+    out->days_left = days_left;
+    out->license_type[0] = '\0';
+    if (license_type) {
+        snprintf(out->license_type, sizeof(out->license_type), "%s", license_type);
+    }
+}
+
+/*
+ * Shared license validation.
+ * reject_l7_for_l4_firewall: ebpf/sparta rejects L7-only licenses.
+ * require_supported_type: api_parser requires l4/l7/trial/unified.
+ */
+static int validate_license_common(const char *real_machine_id,
+                                   int reject_l7_for_l4_firewall,
+                                   int require_supported_type,
+                                   license_info_t *out) {
     char* lic_b64 = NULL;
     size_t lic_b64_len = 0;
-    
+    char* lic_json = NULL;
+    unsigned char* lic_json_bin = NULL;
+    char* algo = NULL;
+    char* sig_b64 = NULL;
+    unsigned char* sig = NULL;
+    EVP_PKEY* pub = NULL;
+    char* payload_copy = NULL;
+    char* machine_id = NULL;
+    char* updated_at = NULL;
+    char* license_type = NULL;
+    int ret = -1;
+    int oknum = 0;
+    int duration = 0;
+    int feature = 0;
+    long long days_left = 0;
+
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        out->status = -1;
+    }
+
     char* lic_path = getenv(LICENSE_PATH);
     if (!lic_path) {
-        LOG_E( "ERROR: Failed to read env : %s\n", LICENSE_PATH);
-        return 1;
+        LOG_E("ERROR: Failed to read env : %s\n", LICENSE_PATH);
+        ret = 1;
+        goto cleanup;
     }
 
     FILE* f = fopen(lic_path, "rb");
     if (!f) {
-        /* Under heavy load, fd pressure can make fopen fail transiently. */
         LOG_E("Cannot open license file '%s': %s\n", lic_path, strerror(errno));
         if (errno == EMFILE || errno == ENFILE || errno == ENOMEM || errno == EAGAIN) {
-            return -3;
+            ret = -3;
+        } else {
+            ret = -1;
         }
-        return -1;
+        goto cleanup;
     }
     lic_b64 = slurp_fd(f, &lic_b64_len);
     fclose(f);
-    
-    if (!lic_b64) { LOG_E("Failed to read license file\n"); return -1; }
+
+    if (!lic_b64) {
+        LOG_E("Failed to read license file\n");
+        ret = -1;
+        goto cleanup;
+    }
     trim_inplace(lic_b64);
 
-    /* Base64 decode -> license JSON */
     size_t lic_json_len = 0;
-    unsigned char* lic_json_bin = b64_decode(lic_b64, strlen(lic_b64), &lic_json_len);
-    if (!lic_json_bin) { LOG_E("Base64 decode failed\n"); free(lic_b64); return -1; }
+    lic_json_bin = b64_decode(lic_b64, strlen(lic_b64), &lic_json_len);
+    if (!lic_json_bin) {
+        LOG_E("Base64 decode failed\n");
+        ret = -1;
+        goto cleanup;
+    }
 
-    char* lic_json = (char*)malloc(lic_json_len + 1);
-    if (!lic_json) { free(lic_b64); free(lic_json_bin); return -1; }
+    lic_json = (char*)malloc(lic_json_len + 1);
+    if (!lic_json) {
+        ret = -1;
+        goto cleanup;
+    }
     memcpy(lic_json, lic_json_bin, lic_json_len);
     lic_json[lic_json_len] = '\0';
 
-    /* Extract algorithm */
-    char* algo = extract_algorithm(lic_json);
+    algo = extract_algorithm(lic_json);
     if (!algo || strcmp(algo, "RSA-SHA256") != 0) {
         LOG_E("Unsupported or missing algorithm (got: %s)\n", algo ? algo : "NULL");
-        free(algo); free(lic_b64); free(lic_json_bin); free(lic_json);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    /* Extract raw payload JSON bytes (exactly as signed) */
     const char* payload_start = NULL;
     size_t payload_len = 0;
     if (!extract_payload_raw(lic_json, &payload_start, &payload_len)) {
         LOG_E("Failed to locate payload JSON\n");
-        free(algo); free(lic_b64); free(lic_json_bin); free(lic_json);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    /* Extract signature (Base64 -> bytes) */
-    char* sig_b64 = extract_signature_b64(lic_json);
+    sig_b64 = extract_signature_b64(lic_json);
     if (!sig_b64) {
         LOG_E("Missing signature field\n");
-        free(algo); free(lic_b64); free(lic_json_bin); free(lic_json);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
+
     size_t sig_len = 0;
-    unsigned char* sig = b64_decode(sig_b64, strlen(sig_b64), &sig_len);
+    sig = b64_decode(sig_b64, strlen(sig_b64), &sig_len);
     if (!sig) {
         LOG_E("Signature Base64 decode failed\n");
-        free(sig_b64); free(algo); free(lic_b64); free(lic_json_bin); free(lic_json);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    /* Load server public key and verify */
     char* pubkey_path = getenv(PUBKEY_PATH);
     if (!pubkey_path) {
-        LOG_E( "ERROR: Failed to read env : %s\n", PUBKEY_PATH);
-        return -1;
+        LOG_E("ERROR: Failed to read env : %s\n", PUBKEY_PATH);
+        ret = -1;
+        goto cleanup;
     }
 
-    EVP_PKEY* pub = load_public_key(pubkey_path);
+    pub = load_public_key(pubkey_path);
     if (!pub) {
         LOG_E("Failed to load public key: %s\n", pubkey_path);
-        free(sig); free(sig_b64); free(algo); free(lic_b64); free(lic_json_bin); free(lic_json);
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
     int verified = verify_signature(pub,
                                     (const unsigned char*)payload_start,
                                     payload_len,
                                     sig, sig_len);
-
     if (!verified) {
         LOG_E("Invalid license file\n");
-        return -1;
+        ret = -1;
+        goto cleanup;
     }
 
-    //printf("Signature: %s\n", verified ? "VALID" : "INVALID");
-
-    /* Optional: parse fields inside payload for convenience */
-    char* payload_copy = (char*)malloc(payload_len + 1);
+    payload_copy = (char*)malloc(payload_len + 1);
+    if (!payload_copy) {
+        ret = -1;
+        goto cleanup;
+    }
     memcpy(payload_copy, payload_start, payload_len);
     payload_copy[payload_len] = '\0';
 
-    /* Extract fields (naive scan) */
     char* pos;
-    char* machine_id = NULL; char* updated_at = NULL; char* license_type = NULL;
-    int oknum=0, duration=0, feature=0;
-
     pos = find_key(payload_copy, "\"machine_id\"");
     if (pos) machine_id = get_json_string_after_colon(pos);
 
@@ -643,57 +693,103 @@ int get_license_status() {
     pos = find_key(payload_copy, "\"feature\"");
     if (pos) feature = get_json_int_after_colon(pos, &oknum);
 
-    //printf("Payload (raw JSON): %.*s\n", (int)payload_len, payload_start);
-    //printf("Fields:\n");
     LOG_D("  machine_id   : %s\n", machine_id ? machine_id : "(none)");
     LOG_D("  updated_at   : %s\n", updated_at ? updated_at : "(none)");
     LOG_D("  duration     : %d\n", duration);
     LOG_D("  feature      : %d\n", feature);
     LOG_D("  license_type : %s\n", license_type ? license_type : "(none)");
 
-    int ret = -1;
-    if (machine_id && strncmp(real_machine_id, machine_id, strlen(real_machine_id)) == 0) {
-        if (!license_type) goto cleanup;
-        LOG_I("License : %s mode\n", license_type);
-        
-        time_t created_utc;
-        if (!parse_iso8601_utc(updated_at, &created_utc)) {
-            LOG_E("invalid date_string (expect UTC like 2025-09-25T01:36:01Z)\n");
-            goto cleanup;
-        }
-
-        /* Compute expiry = created + duration_days * 86400 */
-        const long long SECS_PER_DAY = 86400LL;
-        long long created_ll = (long long)created_utc;
-        long long expiry_ll  = created_ll + (long long)duration * SECS_PER_DAY;
-
-        time_t now = time(NULL);
-        long long now_ll = (long long)now;
-
-        if (now_ll >= expiry_ll) {
-            ret = -2;
-            LOG_W("License : Expired, please purchase new license\n");
-            goto cleanup;
-        }
-
-        long long rem_secs = expiry_ll - now_ll;
-        long long days_left = (rem_secs + SECS_PER_DAY - 1) / SECS_PER_DAY;
-
-        if (days_left < 0) days_left = 0; /* just in case */
-        LOG_I("License : %lld days left\n", days_left);
-
-        ret = 0;
+    if (!machine_id || strncmp(real_machine_id, machine_id, strlen(real_machine_id)) != 0) {
+        LOG_E("Machine id is different\n");
+        ret = -1;
         goto cleanup;
     }
 
-    LOG_E("Machine id is different\n");
-    
+    if (!license_type) {
+        ret = -1;
+        goto cleanup;
+    }
+
+    if (require_supported_type && !is_supported_license_type(license_type)) {
+        LOG_E("Unsupported license_type: %s\n", license_type);
+        ret = -1;
+        goto cleanup;
+    }
+
+    LOG_I("License : %s mode\n", license_type);
+
+    if (reject_l7_for_l4_firewall && strcmp(license_type, "l7") == 0) {
+        ret = -2;
+        LOG_E("License : License is not supported for L4 firewall\n");
+        goto cleanup;
+    }
+
+    time_t created_utc;
+    if (!parse_iso8601_utc(updated_at, &created_utc)) {
+        LOG_E("invalid date_string (expect UTC like 2025-09-25T01:36:01Z)\n");
+        ret = -1;
+        goto cleanup;
+    }
+
+    const long long SECS_PER_DAY = 86400LL;
+    long long created_ll = (long long)created_utc;
+    long long expiry_ll  = created_ll + (long long)duration * SECS_PER_DAY;
+    long long now_ll = (long long)time(NULL);
+
+    if (now_ll >= expiry_ll) {
+        ret = -2;
+        LOG_W("License : Expired, please purchase new license\n");
+        goto cleanup;
+    }
+
+    long long rem_secs = expiry_ll - now_ll;
+    days_left = (rem_secs + SECS_PER_DAY - 1) / SECS_PER_DAY;
+    if (days_left < 0) {
+        days_left = 0;
+    }
+    LOG_I("License : %lld days left\n", days_left);
+
+    ret = 0;
+
 cleanup:
-    /* Cleanup */
-    EVP_PKEY_free(pub);
-    free(machine_id); free(updated_at); free(license_type);
+    fill_license_info(out, ret, feature, license_type, days_left);
+    if (pub) EVP_PKEY_free(pub);
+    free(machine_id);
+    free(updated_at);
+    free(license_type);
     free(payload_copy);
-    free(sig); free(sig_b64); free(algo);
-    free(lic_b64); free(lic_json_bin); free(lic_json);
+    free(sig);
+    free(sig_b64);
+    free(algo);
+    free(lic_b64);
+    free(lic_json_bin);
+    free(lic_json);
     return ret;
+}
+
+int get_license_info(license_info_t *out) {
+    char real_machine_id[256];
+
+    if (!out) {
+        return -1;
+    }
+
+    if (get_machine_id(real_machine_id) < 0) {
+        LOG_E("Failed to get machine id of this device\n");
+        fill_license_info(out, -1, 0, NULL, 0);
+        return -1;
+    }
+
+    return validate_license_common(real_machine_id, 0, 1, out);
+}
+
+int get_license_status() {
+    char real_machine_id[256];
+
+    if (get_machine_id(real_machine_id) < 0) {
+        LOG_E("Failed to get machine id of this device\n");
+        return -1;
+    }
+
+    return validate_license_common(real_machine_id, 1, 0, NULL);
 }

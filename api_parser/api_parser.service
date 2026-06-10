@@ -8,6 +8,8 @@ User=root
 Group=root
 WorkingDirectory=/usr/local/share/dorian/angelos
 Environment=PYTHONUNBUFFERED=1
+Environment="PUBKEY_PATH=/usr/local/share/dorian/license/server_public_key.pem"
+Environment="LICENSE_PATH=/usr/local/share/dorian/license/license.lic"
 
 ExecStart= /usr/local/share/dorian/angelos/venv/bin/python app.py
 

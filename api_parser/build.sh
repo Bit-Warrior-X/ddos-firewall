@@ -18,7 +18,8 @@ echo "Building api_parser with Cython..."
 # Clean previous builds
 rm -rf build/ dist/ *.egg-info
 find . -name "*.so" -delete
-find . -name "*.c" -delete
+# Keep native/*.c (license extension sources); only remove Cython-generated .c files.
+find . -name "*.c" -not -path "./native/*" -delete
 
 # Install build dependencies (user-local to avoid root permission issues)
 if [[ -n "${VIRTUAL_ENV:-}" ]]; then

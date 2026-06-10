@@ -13,6 +13,11 @@ UNIX_DGRAM_PATH = "/tmp/firewall_to_api_parser.sock"
 FIREWALL_CONFIG_PATH = str(BASE_EBPF_FIREWALL_DIR / "firewall.config")
 FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
 TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
+LICENSE_FILE = str(BASE_LICENSE_DIR / "license.lic")
+PUBKEY_FILE = str(BASE_LICENSE_DIR / "server_public_key.pem")
+LICENSE_CHECK_INTERVAL = 10
+SPARTA_SERVICE = "sparta.service"
+L7_SERVICE = "l7_firewall"
 
 # Server configuration
 SERVER_IP = "0.0.0.0"

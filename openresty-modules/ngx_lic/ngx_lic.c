@@ -636,6 +636,11 @@ ngx_int_t get_license_status() {
     if (machine_id && strncmp(real_machine_id, machine_id, strlen(real_machine_id)) == 0) {
         if (!license_type) goto cleanup;
         fprintf(stdout,"License : %s mode\n", license_type);
+        if (strcmp(license_type, "l4") == 0) {
+            ret = -2;
+            fprintf(stderr,"License : License is not supported for L7 firewall\n");
+            goto cleanup;
+        }
         
         time_t created_utc;
         if (!parse_iso8601_utc(updated_at, &created_utc)) {
