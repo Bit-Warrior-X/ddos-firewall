@@ -1,11 +1,14 @@
 # routes/l7_routes.py
-"""L7 firewall API routes (Redis-backed rule sync; nginx files are not edited via this API)."""
+"""L7 firewall API routes (Redis-backed rule sync and nginx listening-port updates)."""
 import base64
 import binascii
 import json
+import re
 import subprocess
+from pathlib import Path
 from flask import Blueprint, request, jsonify
 
+import config
 from core.redis_client import RedisClient
 from utils.auth import token_required, extract_token
 from utils.validators import validate_url
@@ -327,6 +330,196 @@ def l7_update_upstreamservers():
         "message": "Upstream servers updated in Redis.",
         "serverId": server_id,
         "upstreamsCount": len(redis_upstreams)
+    }), 200
+
+
+def _normalize_listening_protocol(protocol: str) -> str:
+    p = str(protocol or "HTTP").strip().upper()
+    if p in ("HTTPS", "SSL", "TLS"):
+        return "HTTPS"
+    return "HTTP"
+
+
+def _listen_line(port: int, protocol: str) -> str:
+    if protocol == "HTTPS":
+        return f"listen {port} ssl;"
+    return f"listen {port};"
+
+
+def _build_default_ports_conf(ports: list) -> str:
+    lines = [
+        _listen_line(entry["port"], entry["protocol"])
+        for entry in sorted(ports, key=lambda x: (x["port"], x["protocol"]))
+    ]
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _parse_default_ports_conf(content: str) -> list:
+    ports = []
+    for line in (content or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = re.match(r"listen\s+(\d+)(?:\s+ssl)?\s*;", line, re.IGNORECASE)
+        if not match:
+            continue
+        port = int(match.group(1))
+        protocol = "HTTPS" if re.search(r"\bssl\b", line, re.IGNORECASE) else "HTTP"
+        ports.append({"port": port, "protocol": protocol})
+    return sorted(ports, key=lambda x: (x["port"], x["protocol"]))
+
+
+def _read_default_ports_conf() -> tuple:
+    path = Path(config.L7_DEFAULT_PORTS_CONF)
+    try:
+        if not path.is_file():
+            return "", None
+        return path.read_text(encoding="utf-8"), None
+    except Exception as exc:
+        return "", str(exc)
+
+
+def _write_default_ports_conf(content: str) -> tuple:
+    path = Path(config.L7_DEFAULT_PORTS_CONF)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _restart_l7_service() -> tuple:
+    try:
+        result = subprocess.run(
+            ["systemctl", "restart", config.L7_SERVICE],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "Service restart timed out"
+    except Exception as exc:
+        return False, str(exc)
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "").strip()
+        return False, err or f"systemctl restart failed (exit {result.returncode})"
+    return True, None
+
+
+@l7_bp.route('/l7_update_listeningports', methods=['POST'])
+def l7_update_listeningports():
+    """Receive listening ports from backend and update nginx server_default_ports.conf.
+
+    Expected JSON:
+      {
+        "serverId": 1035,
+        "listeningports": [
+          {
+            "id": 1,
+            "serverId": 1035,
+            "port": 443,
+            "protocol": "HTTPS",
+            "description": "Public HTTPS entry",
+            "status": "ENABLE"
+          }
+        ]
+      }
+
+    Only entries with status ENABLE are applied. If the resulting listen directives
+    differ from the current server_default_ports.conf, the file is rewritten and
+    athens is restarted.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    listeningports_in = data.get("listeningports")
+    if listeningports_in is None:
+        listeningports_in = []
+    if not isinstance(listeningports_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'listeningports' (must be array)."}), 400
+
+    enabled_ports = []
+    for entry in listeningports_in:
+        if not isinstance(entry, dict):
+            continue
+        status = str(entry.get("status") or "ENABLE").strip().upper()
+        if status != "ENABLE":
+            continue
+        try:
+            port = int(entry.get("port"))
+        except (TypeError, ValueError):
+            continue
+        if port < 1 or port > 65535:
+            continue
+        protocol = _normalize_listening_protocol(entry.get("protocol"))
+        port_entry = {"port": port, "protocol": protocol}
+        if port_entry not in enabled_ports:
+            enabled_ports.append(port_entry)
+
+    if not enabled_ports:
+        return jsonify({
+            "status": "error",
+            "message": "No valid enabled listening ports provided."
+        }), 400
+
+    new_conf = _build_default_ports_conf(enabled_ports)
+    current_conf, read_err = _read_default_ports_conf()
+    if read_err:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to read current listening ports configuration.",
+            "details": read_err
+        }), 500
+
+    current_ports = _parse_default_ports_conf(current_conf)
+    changed = current_ports != enabled_ports
+
+    if not changed:
+        return jsonify({
+            "status": "success",
+            "message": "Listening ports unchanged; no restart required.",
+            "serverId": server_id,
+            "listeningportsCount": len(enabled_ports),
+            "changed": False
+        }), 200
+
+    ok, write_err = _write_default_ports_conf(new_conf)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write listening ports configuration.",
+            "details": write_err or "Unknown error"
+        }), 500
+
+    restarted, restart_err = _restart_l7_service()
+    if not restarted:
+        return jsonify({
+            "status": "error",
+            "message": "Listening ports configuration updated but service restart failed.",
+            "details": restart_err or "Unknown error",
+            "serverId": server_id,
+            "listeningportsCount": len(enabled_ports),
+            "changed": True
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Listening ports updated and athens service restarted.",
+        "serverId": server_id,
+        "listeningportsCount": len(enabled_ports),
+        "changed": True
     }), 200
 
 
