@@ -33,6 +33,7 @@ cd "${OPENRESTY_SRC_DIR}"
     --lock-path="${INSTALL_PREFIX}/nginx/logs/athens.lock" \
     --add-module=../ngx_acl \
     --add-module=../ngx_lic/ \
+    --add-module=../ngx_slice/ \
     --with-pcre-jit \
     --with-ipv6 \
     --with-http_ssl_module \
@@ -70,7 +71,7 @@ else
   INSTALL_ROOT="${INSTALL_PREFIX}"
 fi
 
-mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty"
+mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty" "${INSTALL_ROOT}/nginx/cache/athens"
 
 cp "${SCRIPT_DIR}"/config/*.conf "${INSTALL_ROOT}/nginx/conf/"
 cp -r "${SCRIPT_DIR}/config/lua/resty/." "${INSTALL_ROOT}/nginx/lua/resty/"

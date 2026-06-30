@@ -413,6 +413,38 @@ class RedisClient:
         except Exception:
             return []
 
+    CACHERULES_KEY = "cacherules"
+
+    @staticmethod
+    def store_cacherules(rules_list: List[Dict]) -> tuple:
+        """Store L7 cache rules in Redis under key 'cacherules'.
+
+        Consumed by resty.cache_manager (OpenResty). Returns (True, None) on success.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                rules_list,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
+            rcli.set(RedisClient.CACHERULES_KEY, value)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_cacherules() -> List[Dict]:
+        """Retrieve L7 cache rules list from Redis."""
+        try:
+            rcli = RedisClient.get_client()
+            val = rcli.get(RedisClient.CACHERULES_KEY)
+            if not val:
+                return []
+            return json.loads(val)
+        except Exception:
+            return []
+
     # -----------------------------
     # Temporary blacklist helpers
     # -----------------------------

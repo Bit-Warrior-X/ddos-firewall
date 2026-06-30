@@ -333,6 +333,147 @@ def l7_update_upstreamservers():
     }), 200
 
 
+def _normalize_cache_mode(mode: str) -> str:
+    m = str(mode or "origin").strip().lower()
+    if m == "force":
+        return "force"
+    return "origin"
+
+
+def _normalize_without_parameter(value) -> str:
+    v = str(value or "no").strip().lower()
+    if v in ("yes", "true", "1"):
+        return "yes"
+    return "no"
+
+
+def _parse_cache_slice_mb(value) -> float:
+    """Parse cache_slice in megabytes (float), e.g. 1.06 = 1.06 MB."""
+    if value is None or value == "":
+        return 0.0
+    try:
+        cache_slice = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if cache_slice < 0:
+        return 0.0
+    return cache_slice
+
+
+@l7_bp.route('/l7_update_cacherules', methods=['POST'])
+def l7_update_cacherules():
+    """Receive cache rules from backend and store in Redis under key 'cacherules'.
+
+    Expected JSON:
+      {
+        "serverId": 1035,
+        "cacherules": [
+          {
+            "id": 1,
+            "serverId": 1035,
+            "rule_name": "cache_1",
+            "rule_type": "file",
+            "caching_time": 3600,
+            "url": "",
+            "file_types": "avi, jpg, mp4, gif",
+            "priority": 1000,
+            "cache_slice": 10.21,
+            "without_parameter": "yes",
+            "cache_mode": "origin",
+            "status": "ENABLE"
+          }
+        ]
+      }
+
+    cache_slice values are megabytes (float), e.g. 10.21 means 10.21 MB per slice.
+    Only entries with status ENABLE are stored. Lower priority value wins when
+    multiple rules match (same convention as ACL rules).
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    rules_in = data.get("cacherules")
+    if rules_in is None:
+        rules_in = []
+    if not isinstance(rules_in, list):
+        return jsonify({"status": "error", "message": "Invalid 'cacherules' (must be array)."}), 400
+
+    redis_rules = []
+    for entry in rules_in:
+        if not isinstance(entry, dict):
+            continue
+
+        status = str(entry.get("status") or "ENABLE").strip().upper()
+        if status != "ENABLE":
+            continue
+
+        rule_name = (entry.get("rule_name") or "").strip()
+        if not rule_name:
+            continue
+
+        rule_type = str(entry.get("rule_type") or "file").strip().lower()
+        if rule_type not in ("url", "file"):
+            continue
+
+        try:
+            caching_time = int(entry.get("caching_time", 0))
+        except (TypeError, ValueError):
+            continue
+        if caching_time <= 0:
+            continue
+
+        url = (entry.get("url") or "").strip()
+        file_types = (entry.get("file_types") or "").strip()
+
+        if rule_type == "url" and not url:
+            continue
+        if rule_type == "file" and not file_types:
+            continue
+
+        try:
+            priority = int(entry.get("priority", 1000))
+        except (TypeError, ValueError):
+            priority = 1000
+
+        cache_slice = _parse_cache_slice_mb(entry.get("cache_slice", 0))
+
+        redis_rules.append({
+            "rule_name": rule_name,
+            "rule_type": rule_type,
+            "caching_time": caching_time,
+            "url": url,
+            "file_types": file_types,
+            "priority": priority,
+            "cache_slice": cache_slice,
+            "without_parameter": _normalize_without_parameter(entry.get("without_parameter")),
+            "cache_mode": _normalize_cache_mode(entry.get("cache_mode")),
+        })
+
+    ok, err = RedisClient.store_cacherules(redis_rules)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write cache rules to Redis.",
+            "details": err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Cache rules updated in Redis.",
+        "serverId": server_id,
+        "cacherulesCount": len(redis_rules)
+    }), 200
+
+
 def _normalize_listening_protocol(protocol: str) -> str:
     p = str(protocol or "HTTP").strip().upper()
     if p in ("HTTPS", "SSL", "TLS"):

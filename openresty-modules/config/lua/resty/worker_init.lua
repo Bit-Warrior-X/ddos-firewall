@@ -1,0 +1,63 @@
+local ngx = ngx
+
+local _M = { _VERSION = "1.0.0" }
+
+local GEO_DB_PATH = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
+
+function _M.run()
+    local ok, acl_manager = pcall(require, "resty.acl_manager")
+    if not ok then
+        ngx.log(ngx.ERR, "failed to require resty.acl_manager: ", tostring(acl_manager))
+        return
+    end
+
+    local ok_init, err_init = acl_manager.init()
+    if not ok_init then
+        ngx.log(ngx.ERR, "acl_manager.init() failed: ", tostring(err_init))
+    end
+
+    local ok_timer, err_timer = ngx.timer.at(0, function(premature)
+        if premature then
+            return
+        end
+        acl_manager.start_redis_subscriber()
+    end)
+    if not ok_timer then
+        ngx.log(ngx.ERR, "failed to start redis subscriber timer: ", tostring(err_timer))
+    end
+
+    ngx.timer.at(0.1, function(premature)
+        if premature then
+            return
+        end
+        local ok_load, err_load = acl_manager.load_all_rules()
+        if not ok_load then
+            ngx.log(ngx.ERR, "initial load_all_rules failed: ", tostring(err_load))
+        else
+            ngx.log(ngx.INFO, "initial load_all_rules success")
+        end
+    end)
+
+    local ok_ur, upstream_redis = pcall(require, "resty.upstream_redis")
+    if ok_ur and upstream_redis and upstream_redis.start_refresh then
+        upstream_redis.start_refresh()
+    end
+
+    local ok_cm, cache_manager = pcall(require, "resty.cache_manager")
+    if ok_cm and cache_manager and cache_manager.start_refresh then
+        cache_manager.start_refresh()
+    end
+
+    local ok_mm, maxminddb = pcall(require, "resty.maxminddb")
+    if ok_mm and maxminddb and maxminddb.init then
+        local ok_geo, err_geo = maxminddb.init(GEO_DB_PATH)
+        if not ok_geo then
+            ngx.log(ngx.WARN, "maxminddb.init failed (temporary blacklist geo will be empty): ", tostring(err_geo))
+        end
+    end
+
+    local stats_worker = require "resty.stats_worker"
+    stats_worker.start()
+end
+
+return _M
