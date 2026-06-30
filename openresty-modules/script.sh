@@ -22,6 +22,14 @@ PAYLOAD_ATHENS_DIR="${SCRIPT_DIR}/../setup/payload/athens"
 export LIB_MAXMINDDB="${LIB_MAXMINDDB:-/usr/local/src/libmaxminddb}"
 export LIB_UTHASH="${LIB_UTHASH:-/usr/local/src/uthash}"
 
+NGINX_BUNDLE_DIR="${OPENRESTY_SRC_DIR}/bundle/nginx-1.27.1"
+if [[ -f "${SCRIPT_DIR}/ngx_purge/ngx_http_file_cache-1.27.1.patch" ]]; then
+  patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
+    < "${SCRIPT_DIR}/ngx_purge/ngx_http_file_cache-1.27.1.patch" || true
+  patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
+    < "${SCRIPT_DIR}/ngx_purge/ngx_http_upstream-1.27.1.patch" || true
+fi
+
 cd "${OPENRESTY_SRC_DIR}"
 
 ./configure \
@@ -34,6 +42,7 @@ cd "${OPENRESTY_SRC_DIR}"
     --add-module=../ngx_acl \
     --add-module=../ngx_lic/ \
     --add-module=../ngx_slice/ \
+    --add-module=../ngx_purge/ \
     --with-pcre-jit \
     --with-ipv6 \
     --with-http_ssl_module \

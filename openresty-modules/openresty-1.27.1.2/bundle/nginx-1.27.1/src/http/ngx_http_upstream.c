@@ -27,6 +27,20 @@ static ngx_int_t ngx_http_upstream_cache_last_modified(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_upstream_cache_etag(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+
+#if (NGX_CACHE_PURGE_MODULE)
+extern ngx_module_t ngx_http_cache_purge_module;
+
+typedef struct {
+    ngx_flag_t                enabled;
+    ngx_str_t                 redis_socket_path;
+    ngx_str_t                 redis_host;
+    ngx_uint_t                redis_port;
+    ngx_uint_t                redis_database;
+    ngx_str_t                 redis_password;
+    ngx_http_handler_pt       redis_store_handler;
+} ngx_cache_purge_main_conf_t;
+#endif
 #endif
 
 static void ngx_http_upstream_init_request(ngx_http_request_t *r);
@@ -947,6 +961,18 @@ ngx_http_upstream_cache(ngx_http_request_t *r, ngx_http_upstream_t *u)
     case NGX_OK:
         u->cache_status = NGX_HTTP_CACHE_HIT;
     }
+
+#if (NGX_CACHE_PURGE_MODULE)
+    if (u->cache_status == NGX_HTTP_CACHE_MISS) {
+        ngx_cache_purge_main_conf_t  *main_conf_p;
+
+        main_conf_p = ngx_http_get_module_main_conf(r,
+                                          ngx_http_cache_purge_module);
+        if (main_conf_p && main_conf_p->redis_store_handler) {
+            main_conf_p->redis_store_handler(r);
+        }
+    }
+#endif
 
     switch (rc) {
 

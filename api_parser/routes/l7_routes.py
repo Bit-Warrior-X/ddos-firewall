@@ -6,6 +6,9 @@ import json
 import re
 import subprocess
 from pathlib import Path
+from urllib.parse import quote, urlparse
+
+import requests
 from flask import Blueprint, request, jsonify
 
 import config
@@ -358,6 +361,202 @@ def _parse_cache_slice_mb(value) -> float:
     if cache_slice < 0:
         return 0.0
     return cache_slice
+
+
+    return cache_slice
+
+
+_CLEAR_CACHE_MATCH_TYPES = frozenset({"prefix_match", "exact_match", "advanced_match"})
+_CLEAR_CACHE_SCHEMES = ("http://", "https://")
+
+
+def _host_for_cache_key(parsed) -> str:
+    host = parsed.hostname or ""
+    if parsed.port and parsed.port not in (80, 443):
+        return f"{host}:{parsed.port}"
+    return host
+
+
+def _validate_clear_cache_request(match_type: str, match_content: str) -> tuple:
+    """Validate l7_clear_url_cache fields. Returns (ok, message_or_normalized_content)."""
+    mt = str(match_type or "").strip().lower()
+    mc = str(match_content or "").strip()
+
+    if mt not in _CLEAR_CACHE_MATCH_TYPES:
+        return False, "match_type must be prefix_match, exact_match, or advanced_match."
+
+    if not mc:
+        return False, "match_content is required."
+
+    lower_mc = mc.lower()
+    if not lower_mc.startswith(_CLEAR_CACHE_SCHEMES):
+        return False, "match_content must start with http:// or https://."
+
+    if mt == "prefix_match" and not mc.endswith("/"):
+        return False, "prefix_match match_content must end with / (e.g. https://www.cdnray.com/)."
+
+    if mt == "advanced_match" and "*" not in mc:
+        return False, "advanced_match match_content must contain wildcard * (e.g. https://www.cdnray.com/images/*.jpg)."
+
+    return True, mc
+
+
+def _strip_url_scheme(url: str) -> str:
+    stripped = url.strip()
+    for prefix in ("https://", "http://"):
+        if stripped.lower().startswith(prefix):
+            return stripped[len(prefix):]
+    return stripped
+
+
+def _build_purge_pattern(match_type: str, match_content: str) -> str:
+    """Convert a public URL match into an Athens/Redis cache-key glob pattern."""
+    mt = match_type.strip().lower()
+    mc = match_content.strip()
+
+    if mt == "advanced_match":
+        return _strip_url_scheme(mc)
+
+    parsed = urlparse(mc)
+    host = _host_for_cache_key(parsed)
+    path = parsed.path or "/"
+    uri = path
+    if parsed.query:
+        uri += "?" + parsed.query
+
+    base = f"{host}{uri}"
+    if mt == "prefix_match":
+        return f"{base}*"
+    # exact_match: append * so slice cache keys (host/pathbytes=...) are included.
+    return f"{base}*"
+
+
+def _call_athens_cache_purge(purge_pattern: str) -> tuple:
+    """Call Athens purge endpoint. Returns (ok, payload, http_status)."""
+    purge_path = "/purge/" + quote(purge_pattern, safe="*/[]")
+    purge_url = f"{config.L7_CACHE_PURGE_BASE}{purge_path}"
+
+    try:
+        resp = requests.get(purge_url, timeout=30)
+    except requests.RequestException as exc:
+        return False, {
+            "status": "error",
+            "message": "Failed to call Athens cache purge endpoint.",
+            "details": str(exc),
+            "purgePattern": purge_pattern,
+            "purgeUrl": purge_url,
+        }, 502
+
+    purge_body = resp.text
+    purge_json = None
+    try:
+        purge_json = resp.json()
+    except ValueError:
+        pass
+
+    purge_response = purge_json if purge_json is not None else purge_body
+    payload = {
+        "purgePattern": purge_pattern,
+        "purgeUrl": purge_url,
+        "purgeStatusCode": resp.status_code,
+        "purgeResponse": purge_response,
+    }
+
+    if resp.status_code >= 400:
+        payload["status"] = "error"
+        payload["message"] = "Athens cache purge request failed."
+        return False, payload, 502
+
+    return True, payload, 200
+
+
+@l7_bp.route('/l7_clear_cache', methods=['POST'])
+def l7_clear_cache():
+    """Purge all cached content via Athens ngx_cache_purge on port 9000.
+
+    Expected JSON:
+      {
+        "serverId": 1035
+      }
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    ok, result, http_status = _call_athens_cache_purge("*")
+    if not ok:
+        result["serverId"] = server_id
+        return jsonify(result), http_status
+
+    return jsonify({
+        "status": "success",
+        "message": "All cache entries purged.",
+        "serverId": server_id,
+        **result,
+    }), 200
+
+
+@l7_bp.route('/l7_clear_url_cache', methods=['POST'])
+def l7_clear_url_cache():
+    """Purge cached content via Athens ngx_cache_purge on port 9000.
+
+    Expected JSON:
+      {
+        "serverId": 1035,
+        "match_type": "prefix_match",
+        "match_content": "https://www.cdnray.com/"
+      }
+
+    match_type:
+      - prefix_match: URL must start with http(s):// and end with /
+      - exact_match: URL must start with http(s)://
+      - advanced_match: URL with * wildcards (e.g. https://www.cdnray.com/images/*.jpg)
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    match_type = data.get("match_type")
+    match_content = data.get("match_content")
+    ok, result = _validate_clear_cache_request(match_type, match_content)
+    if not ok:
+        return jsonify({"status": "error", "message": result}), 400
+
+    match_content = result
+    match_type = str(match_type).strip().lower()
+    purge_pattern = _build_purge_pattern(match_type, match_content)
+
+    ok, result, http_status = _call_athens_cache_purge(purge_pattern)
+    if not ok:
+        result["serverId"] = server_id
+        result["match_type"] = match_type
+        result["match_content"] = match_content
+        return jsonify(result), http_status
+
+    return jsonify({
+        "status": "success",
+        "message": "Cache purge completed.",
+        "serverId": server_id,
+        "match_type": match_type,
+        "match_content": match_content,
+        **result,
+    }), 200
 
 
 @l7_bp.route('/l7_update_cacherules', methods=['POST'])

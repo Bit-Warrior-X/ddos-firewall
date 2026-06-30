@@ -1,0 +1,39 @@
+ bundle/nginx-1.21.4/src/http/ngx_http_file_cache.c | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/bundle/nginx-1.21.4/src/http/ngx_http_file_cache.c b/bundle/nginx-1.21.4/src/http/ngx_http_file_cache.c
+index c40093b..0e0029d 100644
+--- a/bundle/nginx-1.21.4/src/http/ngx_http_file_cache.c
++++ b/bundle/nginx-1.21.4/src/http/ngx_http_file_cache.c
+@@ -65,6 +65,19 @@ static ngx_int_t ngx_http_file_cache_delete_file(ngx_tree_ctx_t *ctx,
+ static void ngx_http_file_cache_set_watermark(ngx_http_file_cache_t *cache);
+ 
+ 
++extern ngx_module_t ngx_http_cache_purge_module;
++
++typedef struct {
++    ngx_flag_t                enabled;
++    ngx_str_t                 redis_socket_path;
++    ngx_str_t                 redis_host;
++    ngx_uint_t                redis_port;
++    ngx_uint_t                redis_database;
++    ngx_str_t                 redis_password;
++    ngx_http_handler_pt       redis_store_handler;
++} ngx_cache_purge_main_conf_t;
++
++
+ ngx_str_t  ngx_http_cache_status[] = {
+     ngx_string("MISS"),
+     ngx_string("BYPASS"),
+@@ -341,6 +354,11 @@ ngx_http_file_cache_open(ngx_http_request_t *r)
+         return NGX_ERROR;
+     }
+ 
++    ngx_cache_purge_main_conf_t * main_conf_p = ngx_http_get_module_main_conf(r, ngx_http_cache_purge_module);
++    if (main_conf_p->redis_store_handler) {
++        main_conf_p->redis_store_handler(r);
++    }
++    
+     if (!test) {
+         goto done;
+     }
