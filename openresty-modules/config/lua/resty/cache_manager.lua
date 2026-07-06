@@ -311,6 +311,7 @@ local function disable_cache()
     ngx.var.cache_enabled = "0"
     ngx.var.cache_rule_name = ""
     ngx.var.cache_slice_size = "0"
+    ngx.var.cache_inactive_ttl = "0"
     ngx.ctx.cache_rule = nil
 end
 
@@ -436,12 +437,22 @@ local function cap_ttl(ttl, rule)
     return ttl
 end
 
+local function set_cache_lifetime(ttl)
+    local seconds = tonumber(ttl) or 0
+    if seconds < 0 then
+        seconds = 0
+    end
+    seconds = math.floor(seconds)
+    ngx.var.cache_inactive_ttl = tostring(seconds)
+    ngx.header["X-Accel-Expires"] = tostring(seconds)
+end
+
 local function set_origin_cache_ttl(rule)
     local cc = ngx.header["Cache-Control"]
 
     -- No Cache-Control: cache using the CDN rule TTL.
     if not cc or cc == "" then
-        ngx.header["X-Accel-Expires"] = tostring(rule.caching_time)
+        set_cache_lifetime(rule.caching_time)
         return
     end
 
@@ -449,32 +460,32 @@ local function set_origin_cache_ttl(rule)
 
     -- Origin mode must respect non-cacheable directives.
     if lower:find("no%-store") or lower:find("private") or lower:find("no%-cache") then
-        ngx.header["X-Accel-Expires"] = "0"
+        set_cache_lifetime(0)
         return
     end
 
     local max_age = lower:match("max%-age=(%d+)")
     if max_age then
         local ttl = tonumber(max_age) or 0
-        ngx.header["X-Accel-Expires"] = ttl > 0 and tostring(cap_ttl(ttl, rule)) or "0"
+        set_cache_lifetime(ttl > 0 and cap_ttl(ttl, rule) or 0)
         return
     end
 
     local s_maxage = lower:match("s%-maxage=(%d+)")
     if s_maxage then
         local ttl = tonumber(s_maxage) or 0
-        ngx.header["X-Accel-Expires"] = ttl > 0 and tostring(cap_ttl(ttl, rule)) or "0"
+        set_cache_lifetime(ttl > 0 and cap_ttl(ttl, rule) or 0)
         return
     end
 
     -- public without max-age/s-maxage: use CDN configured TTL.
     if lower:find("public") then
-        ngx.header["X-Accel-Expires"] = tostring(rule.caching_time)
+        set_cache_lifetime(rule.caching_time)
         return
     end
 
     -- Unrecognized / non-cacheable Cache-Control.
-    ngx.header["X-Accel-Expires"] = "0"
+    set_cache_lifetime(0)
 end
 
 local function set_force_cache_ttl(rule)
@@ -482,7 +493,7 @@ local function set_force_cache_ttl(rule)
     ngx.header["Set-Cookie"] = nil
     ngx.header["Cache-Control"] = nil
     ngx.header["Expires"] = nil
-    ngx.header["X-Accel-Expires"] = tostring(rule.caching_time)
+    set_cache_lifetime(rule.caching_time)
 end
 
 function _M.set_cache_headers()
@@ -492,7 +503,7 @@ function _M.set_cache_headers()
     end
 
     if ngx.status ~= 200 and ngx.status ~= 304 and ngx.status ~= 206 then
-        ngx.header["X-Accel-Expires"] = "0"
+        set_cache_lifetime(0)
         return
     end
 

@@ -457,6 +457,7 @@ ngx_cache_purge_create_main_conf(ngx_conf_t *cf)
     conf->redis_database = NGX_CONF_UNSET_UINT;
     conf->redis_password.data = NULL;
     conf->redis_store_handler = NULL;
+    conf->cache_inactive_ttl_index = NGX_CONF_UNSET_UINT;
     return conf;
 }
 
@@ -578,6 +579,16 @@ ngx_cache_purge_init_main_conf(ngx_conf_t *cf, void *parent)
     ngx_conf_merge_uint_value(conf->redis_port, conf->redis_port, 6379);
     ngx_conf_merge_uint_value(conf->redis_database, conf->redis_database, 0);
 
+    ngx_str_t cache_inactive_ttl_name = ngx_string("cache_inactive_ttl");
+    conf->cache_inactive_ttl_index = ngx_http_get_variable_index(cf,
+                                                 &cache_inactive_ttl_name);
+                                                 
+    if (conf->cache_inactive_ttl_index == NGX_CONF_UNSET_UINT) {
+        ngx_conf_log_error(NGX_LOG_WARN, cf, 0,
+                           "variable \"$cache_inactive_ttl\" is not defined; "
+                           "purge Redis TTL falls back to proxy_cache_path inactive");
+    }
+
     
     if (conf->enabled) {
         conf->redis_store_handler = ngx_cache_purge_indexer_handler;
@@ -612,7 +623,9 @@ ngx_selective_cache_purge_register_cache_entry(ngx_http_request_t *r, ngx_str_t 
 {
 #if NGX_HTTP_CACHE
 
-    ngx_int_t inactive = 600;
+    ngx_int_t                      inactive = 0;
+    ngx_http_variable_value_t       *vv;
+    ngx_cache_purge_main_conf_t   *conf;
 
     ngx_log_debug(NGX_LOG_DEBUG_CORE, r->connection->log, 0, "ngx_selective_cache_purge_register_cache_entry() is called");
 
@@ -621,8 +634,20 @@ ngx_selective_cache_purge_register_cache_entry(ngx_http_request_t *r, ngx_str_t 
         return;
     }
 
-    if (r->cache->file_cache) {
-        inactive = r->cache->file_cache->inactive;
+    conf = ngx_http_get_module_main_conf(r, ngx_http_cache_purge_module);
+    if (conf && conf->cache_inactive_ttl_index != NGX_CONF_UNSET_UINT) {
+        vv = ngx_http_get_indexed_variable(r, conf->cache_inactive_ttl_index);
+        if (vv != NULL && !vv->not_found && vv->len > 0) {
+            inactive = ngx_atoi(vv->data, vv->len);
+        }
+    }
+
+    if (inactive <= 0 && r->cache->file_cache) {
+        inactive = (ngx_int_t) r->cache->file_cache->inactive;
+    }
+
+    if (inactive <= 0) {
+        inactive = 600;
     }
 
     ngx_log_debug(NGX_LOG_DEBUG_CORE, r->connection->log, 0, "inactive is %d", inactive);

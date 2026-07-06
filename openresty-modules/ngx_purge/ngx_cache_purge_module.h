@@ -144,6 +144,7 @@ typedef struct {
     ngx_uint_t                redis_database;
     ngx_str_t                 redis_password;
     ngx_http_handler_pt       redis_store_handler;
+    ngx_uint_t                cache_inactive_ttl_index;
 } ngx_cache_purge_main_conf_t;
 
 char                *ngx_http_proxy_cache_purge_conf(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
