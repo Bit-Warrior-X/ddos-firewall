@@ -24,6 +24,25 @@ export LIB_UTHASH="${LIB_UTHASH:-/usr/local/src/uthash}"
 export LIB_REDIS_ADAPTER="${LIB_REDIS_ADAPTER:-/usr/local}"
 
 NGINX_BUNDLE_DIR="${OPENRESTY_SRC_DIR}/bundle/nginx-1.27.1"
+NGINX_BUILD_DIR="${NGINX_BUNDLE_DIR}"
+
+resolve_nginx_build_dir() {
+  local candidates=(
+    "${OPENRESTY_SRC_DIR}/build/nginx-1.27.1"
+    "${NGINX_BUNDLE_DIR}"
+  )
+
+  for dir in "${candidates[@]}"; do
+    if [[ -f "${dir}/objs/ngx_auto_headers.h" ]]; then
+      NGINX_BUILD_DIR="${dir}"
+      echo "using nginx build dir: ${NGINX_BUILD_DIR}"
+      return 0
+    fi
+  done
+
+  echo "error: ngx_auto_headers.h not found under build/ or bundle/; run openresty ./configure first" >&2
+  exit 1
+}
 
 apply_nginx_patches() {
   if [[ ! -d "${NGINX_BUNDLE_DIR}" ]]; then
@@ -45,10 +64,7 @@ apply_nginx_patches() {
 }
 
 build_redis_nginx_adapter() {
-  if [[ ! -f "${NGINX_BUNDLE_DIR}/objs/ngx_auto_headers.h" ]]; then
-    echo "error: nginx objs not found; run openresty ./configure first" >&2
-    exit 1
-  fi
+  resolve_nginx_build_dir
 
   if [[ -f "${LIB_REDIS_ADAPTER}/lib/libredis_nginx_adapter.a" ]]; then
     echo "redis_nginx_adapter already installed at ${LIB_REDIS_ADAPTER}"
@@ -61,12 +77,14 @@ build_redis_nginx_adapter() {
     git clone --depth 1 https://github.com/wandenberg/redis_nginx_adapter.git "${adapter_src}"
   fi
 
+  mkdir -p "${LIB_REDIS_ADAPTER}/lib" "${LIB_REDIS_ADAPTER}/include"
+
   make -C "${adapter_src}" clean >/dev/null 2>&1 || true
   (
     cd "${adapter_src}"
     ./configure \
       --prefix="${LIB_REDIS_ADAPTER}" \
-      --with-nginx-dir="${NGINX_BUNDLE_DIR}"
+      --with-nginx-dir="${NGINX_BUILD_DIR}"
     make -j"$(nproc)"
     make install
   )
