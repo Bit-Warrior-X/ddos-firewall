@@ -159,12 +159,23 @@ jobs:
           nginx_v="$("${nginx_bin}" -V 2>&1)"
           echo "${nginx_v}" | head -3
 
-          for mod in ngx_http_cache_purge_module ngx_http_slice_module; do
-            if ! echo "${nginx_v}" | grep -q "${mod}"; then
-              echo "error: nginx missing module ${mod}" >&2
-              exit 1
-            fi
-          done
+          # nginx -V lists configure args (e.g. --add-module=../ngx_purge/), not C symbol names.
+          if ! echo "${nginx_v}" | grep -q 'ngx_purge'; then
+            echo "error: nginx missing ngx_purge add-module" >&2
+            exit 1
+          fi
+          if ! echo "${nginx_v}" | grep -q 'ngx_slice'; then
+            echo "error: nginx missing ngx_slice add-module" >&2
+            exit 1
+          fi
+          if ! echo "${nginx_v}" | grep -q 'http_slice_module'; then
+            echo "error: nginx missing --with-http_slice_module" >&2
+            exit 1
+          fi
+          if ! strings "${nginx_bin}" | grep -q 'redis_cache_handler'; then
+            echo "error: nginx binary missing redis_cache_handler (cache purge module)" >&2
+            exit 1
+          fi
           echo "nginx modules OK (cache purge + slice)"
 
           echo "Host ldd: $(ldd --version | head -1)"
