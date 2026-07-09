@@ -1,11 +1,22 @@
 local ngx = ngx
+local geo_lookup = require "resty.geo_lookup"
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
 
 local EXCLUDED_RESPONSE_STATUSES = {
     [444] = true, [499] = true, [408] = true,
     [500] = true, [501] = true, [502] = true, [503] = true, [504] = true,
     [904] = true, [929] = true, [978] = true,
+}
+
+local METHOD_COUNTERS = {
+    GET = "get_count",
+    POST = "post_count",
+    DELETE = "delete_count",
+    PUT = "put_count",
+    HEAD = "head_count",
+    PATCH = "patch_count",
+    OPTIONS = "options_count",
 }
 
 function _M.log_response()
@@ -22,21 +33,9 @@ function _M.log_response()
 
     stats_cache:incr("code" .. status, 1, 0)
 
-    local method = ngx.var.request_method
-    if method == "GET" then
-        stats_cache:incr("get_count", 1, 0)
-    elseif method == "POST" then
-        stats_cache:incr("post_count", 1, 0)
-    elseif method == "DELETE" then
-        stats_cache:incr("delete_count", 1, 0)
-    elseif method == "PUT" then
-        stats_cache:incr("put_count", 1, 0)
-    elseif method == "HEAD" then
-        stats_cache:incr("head_count", 1, 0)
-    elseif method == "PATCH" then
-        stats_cache:incr("patch_count", 1, 0)
-    elseif method == "OPTIONS" then
-        stats_cache:incr("options_count", 1, 0)
+    local method_counter = METHOD_COUNTERS[ngx.var.request_method]
+    if method_counter then
+        stats_cache:incr(method_counter, 1, 0)
     else
         stats_cache:incr("others_count", 1, 0)
     end
@@ -86,22 +85,7 @@ function _M.track_request()
     end
     stats_cache:incr("ua_req_count:" .. ua, 1, 0)
 
-    local country = "-"
-    local isp = "-"
-    do
-        local ok_mm, maxminddb = pcall(require, "resty.maxminddb")
-        if ok_mm and maxminddb and maxminddb.initted and maxminddb.initted() then
-            local c = maxminddb.lookup_iso_code(ip)
-            if c and c ~= "" then
-                country = c
-            end
-            local isp_name = maxminddb.lookup_isp and maxminddb.lookup_isp(ip)
-            if isp_name and isp_name ~= "" then
-                isp = isp_name
-            end
-        end
-    end
-
+    local country, _, isp = geo_lookup.get(ip)
     stats_cache:incr("country_req_count:" .. country, 1, 0)
 
     if #isp > 256 then

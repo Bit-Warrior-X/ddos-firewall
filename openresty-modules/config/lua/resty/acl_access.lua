@@ -1,6 +1,12 @@
 local ngx = ngx
+local handle_acl = require "resty.handle_acl"
+local geo_lookup = require "resty.geo_lookup"
+local temp_blacklist = require "resty.temp_blacklist"
+local redis = require "resty.redis"
+local cjson = require "cjson.safe"
+local upstream_redis = require "resty.upstream_redis"
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
 local DEFAULT_TEMP_BLACKLIST_TTL = 180
@@ -30,28 +36,6 @@ local function stats_interval()
     return (stats_cache and stats_cache:get("STATS_INTERVAL")) or 60
 end
 
-local function lookup_geo(ip)
-    local country = "-"
-    local city = "-"
-    local ok_mm, maxminddb = pcall(require, "resty.maxminddb")
-    if ok_mm and maxminddb and maxminddb.initted and maxminddb.initted() then
-        local c = maxminddb.lookup_iso_code and maxminddb.lookup_iso_code(ip)
-        if c and c ~= "" then
-            country = c
-        else
-            c = maxminddb.lookup_country and select(1, maxminddb.lookup_country(ip))
-            if c and c ~= "" then
-                country = c
-            end
-        end
-        local city_name = maxminddb.lookup_city and select(1, maxminddb.lookup_city(ip))
-        if city_name and city_name ~= "" then
-            city = city_name
-        end
-    end
-    return country, city
-end
-
 local function mark_blocked_ip(stats_cache, interval, country)
     stats_cache:incr("blocked_request_count", 1, 0)
 
@@ -71,62 +55,20 @@ local function check_temporaryblacklist()
     end
 
     local uri = ngx.var.request_uri or ngx.var.uri or ""
-
-    local ok_r, redis = pcall(require, "resty.redis")
-    local ok_j, cjson = pcall(require, "cjson.safe")
-    if not ok_r or not redis or not ok_j or not cjson then
+    if not temp_blacklist.check(ip, uri) then
         return false
     end
 
-    local red = redis:new()
-    red:set_timeout(1000)
-    local ok_conn = red:connect(REDIS_SOCK)
-    if not ok_conn then
-        return false
-    end
-
-    local cursor = "0"
-    local pattern = "temporaryblacklist:" .. ip .. ":*"
-    repeat
-        local res, err = red:scan(cursor, "MATCH", pattern, "COUNT", 20)
-        if not res or err then
-            break
-        end
-        cursor = res[1]
-        local keys = res[2]
-        if keys and #keys > 0 then
-            for _, key in ipairs(keys) do
-                local raw = red:get(key)
-                if raw and raw ~= ngx.null and raw ~= "" then
-                    local item = cjson.decode(raw)
-                    if item and type(item) == "table" then
-                        local url_pat = item.url or ""
-                        if url_pat ~= "" then
-                            local ok_re, matched = pcall(ngx.re.find, uri, url_pat, "jo")
-                            if ok_re and matched then
-                                ngx.var.acl_blocked = 1
-                                ngx.var.acl_rule_id = "temporaryblacklist"
-                                ngx.var.acl_ret = "temporaryblacklist"
-                                red:set_keepalive(10000, 100)
-                                return true
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    until cursor == "0"
-
-    red:set_keepalive(10000, 100)
-    return false
+    ngx.var.acl_blocked = 1
+    ngx.var.acl_rule_id = "temporaryblacklist"
+    ngx.var.acl_ret = "temporaryblacklist"
+    return true
 end
 
 local function add_temporaryblacklist(rule_id, ip, url, trigger_rule)
-    local country, city = lookup_geo(ip)
+    local country, city = geo_lookup.get(ip)
 
-    local ok_r, redis = pcall(require, "resty.redis")
-    local ok_j, cjson = pcall(require, "cjson.safe")
-    if not ok_r or not redis or not ok_j or not cjson or ip == "" then
+    if ip == "" then
         return
     end
 
@@ -150,11 +92,12 @@ local function add_temporaryblacklist(rule_id, ip, url, trigger_rule)
     }
     local json_str = cjson.encode(entry)
     if json_str then
+        temp_blacklist.on_entry_added(entry)
+
         local item_key = "temporaryblacklist:" .. ip .. ":" .. blocked_at
         red:set(item_key, json_str)
         red:expire(item_key, DEFAULT_TEMP_BLACKLIST_TTL)
         red:publish("temporaryblacklist:added", json_str)
-        ngx.log(ngx.INFO, "temporaryblacklist:added published: ", json_str)
     end
     red:set_keepalive(10000, 100)
 end
@@ -162,20 +105,19 @@ end
 function _M.run()
     local stats_cache = ngx.shared.stats_cache
     local interval = stats_interval()
-    local country = select(1, lookup_geo(ngx.var.remote_addr))
 
     ngx.var.acl_blocked = 0
     ngx.var.acl_ret = "0"
     ngx.var.acl_rule_id = "-"
 
     if check_temporaryblacklist() then
+        local country = geo_lookup.country()
         mark_blocked_ip(stats_cache, interval, country)
         return ngx.exit(444)
     end
 
-    local handle_acl = require "resty.handle_acl"
-
     local function mark_block(rule_id, ret, action)
+        local country = geo_lookup.country()
         ngx.var.acl_blocked = 1
         ngx.var.acl_rule_id = RULE_NAMES[rule_id] or tostring(rule_id)
         ngx.var.acl_ret = action
@@ -229,8 +171,7 @@ function _M.run()
         end
     end
 
-    local ok_ur, upstream_redis = pcall(require, "resty.upstream_redis")
-    if ok_ur and upstream_redis and upstream_redis.get_backend then
+    if upstream_redis.get_backend then
         ngx.var.backend = upstream_redis.get_backend()
     else
         ngx.var.backend = "http://127.0.0.1:9000"

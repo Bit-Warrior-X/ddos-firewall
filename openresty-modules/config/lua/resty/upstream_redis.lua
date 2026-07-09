@@ -13,13 +13,17 @@ local timer  = ngx.timer.at
 local worker = ngx.worker
 local shd    = ngx.shared
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
 
 local REDIS_SOCK     = "unix:/tmp/redis.sock"
 local REDIS_KEY      = "upstreamservers"
 local SHM_NAME       = "upstream_servers"
 local REFRESH_SEC    = 5
 local DEFAULT_BACKEND = "http://127.0.0.1:9000"
+
+-- Per-worker L1 cache for the expanded backend list.
+local l1_list
+local l1_version = 0
 
 -- Parse "weight=4 max_fails=3 fail_timeout=30s" from description string
 local function parse_description(desc)
@@ -101,8 +105,11 @@ local function refresh_shm()
         return
     end
     local expanded = expand_by_weight(list)
+    local version = ngx.time()
     dict:set("list", cjson.encode(expanded), 0)
-    dict:set("updated", ngx.time(), 0)
+    dict:set("updated", version, 0)
+    l1_list = expanded
+    l1_version = version
 end
 
 -- Weighted round-robin: increment counter, pick backend from expanded list
@@ -111,14 +118,22 @@ function _M.get_backend()
     if not dict then
         return DEFAULT_BACKEND
     end
-    local raw = dict:get("list")
-    if not raw or raw == "" then
-        return DEFAULT_BACKEND
+
+    local version = dict:get("updated") or 0
+    local list = l1_list
+    if not list or l1_version ~= version then
+        local raw = dict:get("list")
+        if not raw or raw == "" then
+            return DEFAULT_BACKEND
+        end
+        list = cjson.decode(raw)
+        if not list or #list == 0 then
+            return DEFAULT_BACKEND
+        end
+        l1_list = list
+        l1_version = version
     end
-    local list = cjson.decode(raw)
-    if not list or #list == 0 then
-        return DEFAULT_BACKEND
-    end
+
     local idx = dict:incr("round_robin", 1, 0)
     if idx == nil then
         dict:set("round_robin", 1, 0)

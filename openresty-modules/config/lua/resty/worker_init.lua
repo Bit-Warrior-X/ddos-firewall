@@ -2,7 +2,7 @@ local ngx = ngx
 
 local _M = { _VERSION = "1.0.0" }
 
-local GEO_DB_PATH = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
+local GEO_DB_PATH = "/usr/local/share/dorian/athens/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
 
 function _M.run()
     local ok, acl_manager = pcall(require, "resty.acl_manager")
@@ -54,6 +54,16 @@ function _M.run()
         if not ok_geo then
             ngx.log(ngx.WARN, "maxminddb.init failed (temporary blacklist geo will be empty): ", tostring(err_geo))
         end
+    end
+
+    local ok_tb, temp_blacklist = pcall(require, "resty.temp_blacklist")
+    if ok_tb and temp_blacklist and temp_blacklist.start then
+        temp_blacklist.start()
+    end
+
+    local ok_cps, cache_purge_sync = pcall(require, "resty.cache_purge_sync")
+    if ok_cps and cache_purge_sync and cache_purge_sync.start then
+        cache_purge_sync.start()
     end
 
     local stats_worker = require "resty.stats_worker"

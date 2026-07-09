@@ -9,9 +9,14 @@
 
 local redis = require "resty.redis"
 local cjson = require "cjson.safe"
+local handle_slice = require "resty.handle_slice"
 local ngx = ngx
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
+
+-- Per-worker L1 cache for decoded rules (invalidated by shm "updated" timestamp).
+local l1_rules
+local l1_version = 0
 
 local REDIS_SOCK  = "unix:/tmp/redis.sock"
 local REDIS_KEY   = "cacherules"
@@ -31,8 +36,8 @@ local function log_err(msg)
     ngx.log(ngx.ERR, "cache_manager: ", msg)
 end
 
-local function log_info(msg)
-    ngx.log(ngx.INFO, "cache_manager: ", msg)
+local function log_debug(msg)
+    ngx.log(ngx.DEBUG, "cache_manager: ", msg)
 end
 
 local function get_redis(timeout)
@@ -154,68 +159,33 @@ local function refresh_shm()
         return
     end
 
+    local now = ngx.time()
     dict:set("rules", cjson.encode(rules), 0)
-    dict:set("updated", ngx.time(), 0)
-    log_info("loaded " .. tostring(#rules) .. " cache rule(s) into shm")
-end
-
-local function ensure_rule_fields(rule)
-    if type(rule) ~= "table" then
-        return nil
-    end
-
-    rule.cache_mode = tostring(rule.cache_mode or "origin"):lower()
-    if rule.cache_mode ~= "force" then
-        rule.cache_mode = "origin"
-    end
-
-    local wp = rule.without_parameter
-    if wp == true or wp == 1 then
-        rule.without_parameter = true
-    elseif type(wp) == "string" then
-        wp = wp:lower()
-        rule.without_parameter = (wp == "yes" or wp == "true" or wp == "1")
-    else
-        rule.without_parameter = false
-    end
-
-    rule.caching_time = tonumber(rule.caching_time) or 0
-    rule.cache_slice = tonumber(rule.cache_slice) or 0
-
-    if rule.rule_type == "file" then
-        local extensions = {}
-        for ext in tostring(rule.file_types or ""):gmatch("[^,%s]+") do
-            ext = ext:lower():gsub("^%.", "")
-            if ext ~= "" then
-                extensions[ext] = true
-            end
-        end
-        rule.extensions = extensions
-    end
-
-    return rule
+    dict:set("updated", now, 0)
+    l1_rules = rules
+    l1_version = now
+    log_debug("loaded " .. tostring(#rules) .. " cache rule(s) into shm")
 end
 
 local function get_rules()
     local dict = ngx.shared[SHM_NAME]
-    local rules = {}
     local now = ngx.time()
+    local shm_version = dict and (dict:get("updated") or 0) or 0
+
+    if l1_rules and l1_version == shm_version and shm_version > 0 then
+        return l1_rules
+    end
+
+    local rules
     local need_reload = true
 
-    if dict then
-        local updated = dict:get("updated") or 0
-        if now - updated < REFRESH_SEC then
-            need_reload = false
-            local raw = dict:get("rules")
-            if raw and raw ~= "" then
-                local decoded = cjson.decode(raw)
-                if type(decoded) == "table" and #decoded > 0 then
-                    rules = decoded
-                else
-                    need_reload = true
-                end
-            else
-                need_reload = true
+    if dict and now - shm_version < REFRESH_SEC then
+        local raw = dict:get("rules")
+        if raw and raw ~= "" then
+            local decoded = cjson.decode(raw)
+            if type(decoded) == "table" then
+                rules = decoded
+                need_reload = false
             end
         end
     end
@@ -227,17 +197,20 @@ local function get_rules()
             if dict then
                 dict:set("rules", cjson.encode(rules), 0)
                 dict:set("updated", now, 0)
+                shm_version = now
             end
-            log_info("cache rules loaded from redis (" .. #rules .. ")")
+            log_debug("cache rules loaded from redis (" .. #rules .. ")")
         elseif err then
             log_err("redis load failed: " .. tostring(err))
+            rules = l1_rules or {}
+        else
+            rules = {}
         end
     end
 
-    for i, rule in ipairs(rules) do
-        rules[i] = ensure_rule_fields(rule)
-    end
-    return rules
+    l1_rules = rules or {}
+    l1_version = shm_version
+    return l1_rules
 end
 
 local function get_extension(uri)
@@ -332,22 +305,18 @@ local function enable_cache(rule, uri)
     end
 
     ngx.var.cache_enabled = "1"
-    local slice_bytes = slice_mb_to_bytes(rule.cache_slice)
-    log_info("matched rule " .. rule.rule_name .. " uri=" .. uri
-        .. " mode=" .. rule.cache_mode
-        .. " slice=" .. tostring(rule.cache_slice or 0) .. "MB"
-        .. " (" .. tostring(slice_bytes) .. " bytes)")
+
+    local caching_time = tonumber(rule.caching_time) or 0
+    if caching_time > 0 then
+        -- Must be set in access phase so ngx_cache_purge C indexer reads the
+        -- rule TTL (not proxy_cache_path inactive=60m) when registering in Redis.
+        ngx.var.cache_inactive_ttl = tostring(math.floor(caching_time))
+    end
 end
 
 local function apply_slice(rule)
     local slice_size = slice_mb_to_bytes(rule.cache_slice)
     if slice_size <= 0 then
-        return false
-    end
-
-    local ok, handle_slice = pcall(require, "resty.handle_slice")
-    if not ok then
-        log_err("resty.handle_slice unavailable: " .. tostring(handle_slice))
         return false
     end
 
@@ -389,8 +358,6 @@ local function exec_cache_location(rule, use_slice)
 end
 
 function _M.start_refresh()
-    refresh_shm()
-
     local function run(premature)
         if premature or ngx.worker.exiting() then
             return
@@ -399,11 +366,12 @@ function _M.start_refresh()
         ngx.timer.at(REFRESH_SEC, run)
     end
 
-    local ok, err = ngx.timer.at(0.5, run)
+    -- Defer first Redis load: cosockets are not allowed in init_worker_by_lua.
+    local ok, err = ngx.timer.at(0, run)
     if not ok then
         log_err("failed to start refresh timer: " .. tostring(err))
     else
-        log_info("refresh timer started for key " .. REDIS_KEY)
+        log_debug("refresh timer started for key " .. REDIS_KEY)
     end
 end
 
