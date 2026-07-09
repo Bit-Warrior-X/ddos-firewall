@@ -21,13 +21,64 @@ PAYLOAD_ATHENS_DIR="${SCRIPT_DIR}/../setup/payload/athens"
 
 export LIB_MAXMINDDB="${LIB_MAXMINDDB:-/usr/local/src/libmaxminddb}"
 export LIB_UTHASH="${LIB_UTHASH:-/usr/local/src/uthash}"
+export LIB_REDIS_ADAPTER="${LIB_REDIS_ADAPTER:-/usr/local}"
 
 NGINX_BUNDLE_DIR="${OPENRESTY_SRC_DIR}/bundle/nginx-1.27.1"
-if [[ -f "${SCRIPT_DIR}/ngx_purge/ngx_http_file_cache-1.27.1.patch" ]]; then
-  patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
-    < "${SCRIPT_DIR}/ngx_purge/ngx_http_file_cache-1.27.1.patch" || true
-  patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
-    < "${SCRIPT_DIR}/ngx_purge/ngx_http_upstream-1.27.1.patch" || true
+
+apply_nginx_patches() {
+  if [[ ! -d "${NGINX_BUNDLE_DIR}" ]]; then
+    echo "error: nginx bundle not found at ${NGINX_BUNDLE_DIR}" >&2
+    exit 1
+  fi
+
+  if [[ -f "${SCRIPT_DIR}/ngx_purge/ngx_http_file_cache-1.27.1.patch" ]]; then
+    patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
+      < "${SCRIPT_DIR}/ngx_purge/ngx_http_file_cache-1.27.1.patch" || true
+    patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
+      < "${SCRIPT_DIR}/ngx_purge/ngx_http_upstream-1.27.1.patch" || true
+  fi
+
+  if [[ -f "${SCRIPT_DIR}/ngx_slice/ngx_http_slice_filter_module.patch" ]]; then
+    patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
+      < "${SCRIPT_DIR}/ngx_slice/ngx_http_slice_filter_module.patch" || true
+  fi
+}
+
+build_redis_nginx_adapter() {
+  if [[ -f "${LIB_REDIS_ADAPTER}/lib/libredis_nginx_adapter.a" ]]; then
+    echo "redis_nginx_adapter already installed at ${LIB_REDIS_ADAPTER}"
+    return 0
+  fi
+
+  local adapter_src="${SCRIPT_DIR}/.ci-deps/redis_nginx_adapter"
+  if [[ ! -d "${adapter_src}/.git" ]]; then
+    rm -rf "${adapter_src}"
+    git clone --depth 1 https://github.com/wandenberg/redis_nginx_adapter.git "${adapter_src}"
+  fi
+
+  make -C "${adapter_src}" clean >/dev/null 2>&1 || true
+  (
+    cd "${adapter_src}"
+    ./configure \
+      --prefix="${LIB_REDIS_ADAPTER}" \
+      --with-nginx-dir="${NGINX_BUNDLE_DIR}"
+    make -j"$(nproc)"
+    make install
+  )
+
+  if [[ ! -f "${LIB_REDIS_ADAPTER}/lib/libredis_nginx_adapter.a" ]]; then
+    echo "error: redis_nginx_adapter build failed" >&2
+    exit 1
+  fi
+}
+
+apply_nginx_patches
+build_redis_nginx_adapter
+
+OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib"
+OPENRESTY_CC_OPT="-I${LIB_REDIS_ADAPTER}/include"
+if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
+  OPENRESTY_LD_OPT="${OPENRESTY_LD_OPT} -Wl,-rpath,${LIB_REDIS_ADAPTER}/lib"
 fi
 
 cd "${OPENRESTY_SRC_DIR}"
@@ -65,7 +116,9 @@ cd "${OPENRESTY_SRC_DIR}"
     --with-stream_realip_module \
     --with-stream_ssl_preread_module \
     --with-threads \
-    --with-file-aio
+    --with-file-aio \
+    --with-ld-opt="${OPENRESTY_LD_OPT}" \
+    --with-cc-opt="${OPENRESTY_CC_OPT}"
 
 make -j"$(nproc)"
 

@@ -66,7 +66,8 @@ jobs:
             libbpf-dev   \
             libnetfilter-conntrack-dev libsqlite3-dev libssl-dev \
             libmicrohttpd-dev \
-            libpcre3-dev zlib1g-dev \
+            libpcre3-dev libpcre2-dev zlib1g-dev \
+            libev-dev libhiredis-dev \
             flex bison libcurl4-openssl-dev libsodium-dev perl \
             cmake \
             python3 python3-venv python3-dev python3-pip \
@@ -134,6 +135,7 @@ jobs:
           DDOS_FW_CI_PAYLOAD_ONLY: "1"
           LIB_UTHASH: ${{ github.workspace }}/openresty-modules/.ci-deps/uthash
           LIB_MAXMINDDB: ${{ github.workspace }}/openresty-modules/.ci-deps/libmaxminddb
+          LIB_REDIS_ADAPTER: ${{ github.workspace }}/openresty-modules/.ci-deps/redis-adapter
         run: bash ./script.sh
 
       - name: Verify athens glibc linkage
@@ -154,7 +156,16 @@ jobs:
           echo "nginx prefix OK (/usr/local/share/dorian/athens)"
 
           export LD_LIBRARY_PATH="${luajit_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-          "${nginx_bin}" -V 2>&1 | head -3
+          nginx_v="$("${nginx_bin}" -V 2>&1)"
+          echo "${nginx_v}" | head -3
+
+          for mod in ngx_http_cache_purge_module ngx_http_slice_module; do
+            if ! echo "${nginx_v}" | grep -q "${mod}"; then
+              echo "error: nginx missing module ${mod}" >&2
+              exit 1
+            fi
+          done
+          echo "nginx modules OK (cache purge + slice)"
 
           echo "Host ldd: $(ldd --version | head -1)"
           echo "nginx dynamic deps:"

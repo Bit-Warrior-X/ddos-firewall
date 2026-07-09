@@ -366,8 +366,44 @@ def _parse_cache_slice_mb(value) -> float:
     return cache_slice
 
 
-_CLEAR_CACHE_MATCH_TYPES = frozenset({"prefix_match", "exact_match", "advanced_match"})
+_CLEAR_CACHE_MATCH_TYPE_BY_ID = {
+    1: "prefix_match",
+    2: "exact_match",
+    3: "advanced_match",
+}
+_CLEAR_CACHE_MATCH_TYPES = frozenset(_CLEAR_CACHE_MATCH_TYPE_BY_ID.values())
 _CLEAR_CACHE_SCHEMES = ("http://", "https://")
+
+
+def _normalize_clear_cache_match_type(match_type) -> tuple:
+    """Resolve public match_type (1/2/3) to internal name. Returns (ok, public_value, internal_name_or_error)."""
+    if match_type is None:
+        return False, match_type, "match_type is required."
+
+    if isinstance(match_type, bool):
+        return False, match_type, "match_type must be 1 (prefix), 2 (exact), or 3 (advanced)."
+
+    if isinstance(match_type, (int, float)):
+        mt_id = int(match_type)
+        if mt_id in _CLEAR_CACHE_MATCH_TYPE_BY_ID:
+            return True, mt_id, _CLEAR_CACHE_MATCH_TYPE_BY_ID[mt_id]
+        return False, match_type, "match_type must be 1 (prefix), 2 (exact), or 3 (advanced)."
+
+    mt_raw = str(match_type).strip()
+    if mt_raw.isdigit():
+        mt_id = int(mt_raw)
+        if mt_id in _CLEAR_CACHE_MATCH_TYPE_BY_ID:
+            return True, mt_id, _CLEAR_CACHE_MATCH_TYPE_BY_ID[mt_id]
+        return False, match_type, "match_type must be 1 (prefix), 2 (exact), or 3 (advanced)."
+
+    mt = mt_raw.lower()
+    if mt in _CLEAR_CACHE_MATCH_TYPES:
+        for mt_id, mt_name in _CLEAR_CACHE_MATCH_TYPE_BY_ID.items():
+            if mt_name == mt:
+                return True, mt_id, mt
+        return False, match_type, "match_type must be 1 (prefix), 2 (exact), or 3 (advanced)."
+
+    return False, match_type, "match_type must be 1 (prefix), 2 (exact), or 3 (advanced)."
 
 
 def _host_for_cache_key(parsed) -> str:
@@ -377,16 +413,16 @@ def _host_for_cache_key(parsed) -> str:
     return host
 
 
-def _validate_clear_cache_request(match_type: str, match_content: str) -> tuple:
+def _validate_clear_cache_request(match_type_name: str, match_content: str) -> tuple:
     """Validate l7_clear_url_cache fields. Returns (ok, message_or_normalized_content)."""
-    mt = str(match_type or "").strip().lower()
+    mt = match_type_name
     mc = str(match_content or "").strip()
-
-    if mt not in _CLEAR_CACHE_MATCH_TYPES:
-        return False, "match_type must be prefix_match, exact_match, or advanced_match."
 
     if not mc:
         return False, "match_content is required."
+
+    if mt == "advanced_match":
+        return True, mc
 
     lower_mc = mc.lower()
     if not lower_mc.startswith(_CLEAR_CACHE_SCHEMES):
@@ -395,18 +431,7 @@ def _validate_clear_cache_request(match_type: str, match_content: str) -> tuple:
     if mt == "prefix_match" and not mc.endswith("/"):
         return False, "prefix_match match_content must end with / (e.g. https://www.cdnray.com/)."
 
-    if mt == "advanced_match" and "*" not in mc:
-        return False, "advanced_match match_content must contain wildcard * (e.g. https://www.cdnray.com/images/*.jpg)."
-
     return True, mc
-
-
-def _strip_url_scheme(url: str) -> str:
-    stripped = url.strip()
-    for prefix in ("https://", "http://"):
-        if stripped.lower().startswith(prefix):
-            return stripped[len(prefix):]
-    return stripped
 
 
 def _build_purge_pattern(match_type: str, match_content: str) -> str:
@@ -415,7 +440,7 @@ def _build_purge_pattern(match_type: str, match_content: str) -> str:
     mc = match_content.strip()
 
     if mt == "advanced_match":
-        return _strip_url_scheme(mc)
+        return mc
 
     parsed = urlparse(mc)
     host = _host_for_cache_key(parsed)
@@ -511,14 +536,14 @@ def l7_clear_url_cache():
     Expected JSON:
       {
         "serverId": 1035,
-        "match_type": "prefix_match",
+        "match_type": 1,
         "match_content": "https://www.cdnray.com/"
       }
 
     match_type:
-      - prefix_match: URL must start with http(s):// and end with /
-      - exact_match: URL must start with http(s)://
-      - advanced_match: URL with * wildcards (e.g. https://www.cdnray.com/images/*.jpg)
+      - 1 (prefix): URL must start with http(s):// and end with /
+      - 2 (exact): URL must start with http(s)://
+      - 3 (advanced): any purge pattern string (glob or PCRE-style regex)
     """
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
@@ -532,15 +557,18 @@ def l7_clear_url_cache():
     except (TypeError, ValueError):
         return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
 
-    match_type = data.get("match_type")
+    match_type_raw = data.get("match_type")
     match_content = data.get("match_content")
-    ok, result = _validate_clear_cache_request(match_type, match_content)
+    ok, match_type, match_type_name = _normalize_clear_cache_match_type(match_type_raw)
+    if not ok:
+        return jsonify({"status": "error", "message": match_type_name}), 400
+
+    ok, result = _validate_clear_cache_request(match_type_name, match_content)
     if not ok:
         return jsonify({"status": "error", "message": result}), 400
 
     match_content = result
-    match_type = str(match_type).strip().lower()
-    purge_pattern = _build_purge_pattern(match_type, match_content)
+    purge_pattern = _build_purge_pattern(match_type_name, match_content)
 
     ok, result, http_status = _call_athens_cache_purge(purge_pattern)
     if not ok:
