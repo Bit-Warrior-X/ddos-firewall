@@ -45,6 +45,11 @@ apply_nginx_patches() {
 }
 
 build_redis_nginx_adapter() {
+  if [[ ! -f "${NGINX_BUNDLE_DIR}/objs/ngx_auto_headers.h" ]]; then
+    echo "error: nginx objs not found; run openresty ./configure first" >&2
+    exit 1
+  fi
+
   if [[ -f "${LIB_REDIS_ADAPTER}/lib/libredis_nginx_adapter.a" ]]; then
     echo "redis_nginx_adapter already installed at ${LIB_REDIS_ADAPTER}"
     return 0
@@ -73,7 +78,6 @@ build_redis_nginx_adapter() {
 }
 
 apply_nginx_patches
-build_redis_nginx_adapter
 
 OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib"
 OPENRESTY_CC_OPT="-I${LIB_REDIS_ADAPTER}/include"
@@ -119,6 +123,8 @@ cd "${OPENRESTY_SRC_DIR}"
     --with-file-aio \
     --with-ld-opt="${OPENRESTY_LD_OPT}" \
     --with-cc-opt="${OPENRESTY_CC_OPT}"
+
+build_redis_nginx_adapter
 
 make -j"$(nproc)"
 
