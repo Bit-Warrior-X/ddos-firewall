@@ -2,11 +2,17 @@
 
 A high-performance, multi-layered DDoS protection system combining eBPF/XDP-based L4 firewall with OpenResty-based L7 protection, managed through a comprehensive REST API.
 
+**Components:** angelos (API) · sparta (L4 eBPF) · athens (L7 OpenResty)  
+**CI:** GitHub Actions builds OS-specific payloads on every push/PR; tag `v*` releases deploy to `/opt/dorian/uploads/`  
+**Version:** see [`VERSION`](VERSION) (tag builds use the tag name, e.g. `v0.2.7` → `0.2.7`)
+
 ## Table of Contents
 
 - [Overview](#overview)
 - [Features](#features)
 - [Architecture](#architecture)
+- [CI/CD (GitHub Actions)](#cicd-github-actions)
+- [Build Process](#build-process)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -24,16 +30,25 @@ DDoS Firewall is a comprehensive network security solution that provides protect
 
 ### Key Components
 
-1. **L4 Firewall (eBPF/XDP)**: Kernel-level packet filtering using eBPF programs attached to XDP hooks
-2. **L7 Firewall (OpenResty)**: Application-layer protection with Nginx/OpenResty and Lua-based ACL rules
-3. **API Parser**: RESTful API service for managing firewall rules and configurations
-4. **Database**: SQLite-based storage for blocklists, whitelists, and firewall state
+The product ships as three coordinated payloads:
+
+| Codename | Directory | Role |
+|----------|-----------|------|
+| **angelos** | `api_parser/` | REST API (Flask/Gunicorn) for L4/L7 management |
+| **sparta** | `ebpf_firewall/` | L4 eBPF/XDP packet filter |
+| **athens** | `openresty-modules/` | L7 OpenResty reverse proxy, ACL, cache, and stats |
+
+Supporting infrastructure:
+
+- **Redis** (`/tmp/redis.sock`) — ACL rules, upstreams, cache rules, cache purge index, temporary blacklist
+- **SQLite** — blocklists, whitelists, and firewall state
 
 ### How It Works
 
-- **L4 Protection**: eBPF programs intercept packets at the XDP layer (before they reach the kernel network stack), providing ultra-low latency protection against flood attacks
-- **L7 Protection**: OpenResty with custom Lua modules handles HTTP/HTTPS traffic, providing application-aware filtering and rate limiting
-- **Centralized Management**: REST API allows remote configuration and monitoring of both L4 and L7 components
+- **L4 (sparta)**: eBPF programs intercept packets at the XDP layer before they reach the kernel network stack
+- **L7 (athens)**: OpenResty with custom C/Lua modules handles HTTP/HTTPS traffic, ACL, dynamic caching, and statistics
+- **API (angelos)**: REST API writes configuration to Redis/SQLite and controls both layers
+- **Centralized management**: Dynamic rules via Redis pub/sub; hot reload without full restarts where possible
 
 ## Features
 
@@ -63,26 +78,16 @@ DDoS Firewall is a comprehensive network security solution that provides protect
   - Minimal CPU overhead
   - High packet processing rates
 
-### L7 Firewall Features
+### L7 Firewall Features (athens)
 
-- **HTTP/HTTPS Protection**:
-  - Request method filtering
-  - Backend server management
-  - ACL (Access Control List) system
-  - Port-based routing
+- **HTTP/HTTPS protection**: ACL, geo filtering, rate limits, user-agent rules, temporary blacklist
+- **Dynamic configuration via Redis**: ACL rules, upstream servers, cache rules loaded from Redis keys
+- **Proxy cache with slice support**: Range-based caching for large files (`ngx_slice` + patched nginx slice module)
+- **Selective cache purge**: Redis-indexed purge module (`ngx_purge`) with Lua sync on key expiration
+- **Statistics API**: Per-IP, URL, country, ISP, referer, and traffic metrics on port 9000
+- **Custom OpenResty modules**: `ngx_acl`, `ngx_lic`, `ngx_slice`, `ngx_purge`
 
-- **Advanced ACL System**:
-  - Rule-based access control
-  - Priority-based rule matching
-  - Dynamic rule application
-  - IP-based allow/deny lists
-
-- **Nginx Integration**:
-  - Dynamic configuration management
-  - Hot reload without downtime
-  - Custom OpenResty modules support
-
-### API Features
+### API Features (angelos)
 
 - **RESTful API**: Complete HTTP API for all operations
 - **Token-based Authentication**: Secure API access
@@ -93,81 +98,204 @@ DDoS Firewall is a comprehensive network security solution that provides protect
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    REST API (Flask/Gunicorn)                 │
-│              /usr/local/share/api_parser/                   │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │  Routes: L4, L7, Common                              │   │
-│  │  Core: Database, Firewall, Nginx, API Client          │   │
-│  │  Utils: Auth, Validators, Nginx Utils                │   │
-│  └──────────────────────────────────────────────────────┘   │
-└───────────────────────┬─────────────────────────────────────┘
-                        │
-        ┌───────────────┴───────────────┐
-        │                               │
-┌───────▼────────┐            ┌─────────▼──────────┐
-│  L4 Firewall   │            │   L7 Firewall      │
-│  (eBPF/XDP)    │            │  (OpenResty)       │
-│                │            │                    │
-│  ┌──────────┐  │            │  ┌──────────────┐ │
-│  │ XDP Hook │  │            │  │  Nginx       │ │
-│  │ eBPF     │  │            │  │  Lua Modules │ │
-│  │ Programs │  │            │  │  ACL Rules   │ │
-│  └──────────┘  │            │  └──────────────┘ │
-│                │            │                    │
-│  CLI:          │            │  Config Files:    │
-│  l4_firewall_  │            │  /usr/local/      │
-│  cli           │            │  openresty/nginx/ │
-└────────────────┘            └───────────────────┘
-        │                               │
-        └───────────────┬───────────────┘
-                        │
-                ┌───────▼───────┐
-                │   SQLite DB   │
-                │  Blocklist/   │
-                │  Whitelist    │
-                └──────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                     angelos (REST API)                            │
+│                  api_parser/ → port 5000                          │
+│   Routes: L4, L7, stats  │  Redis client  │  SQLite (blocklists) │
+└────────────────────────────┬─────────────────────────────────────┘
+                             │ Redis (/tmp/redis.sock)
+              ┌──────────────┴──────────────┐
+              │                             │
+┌─────────────▼─────────────┐   ┌───────────▼──────────────────────┐
+│  sparta (L4 eBPF/XDP)     │   │  athens (L7 OpenResty)           │
+│  ebpf_firewall/           │   │  /usr/local/share/dorian/athens  │
+│  XDP hooks, flood detect  │   │  ACL · cache · purge · stats     │
+└───────────────────────────┘   └──────────────────────────────────┘
 ```
+
+### Runtime paths (athens)
+
+| Path | Purpose |
+|------|---------|
+| `/usr/local/share/dorian/athens/nginx/sbin/nginx` | OpenResty binary |
+| `/usr/local/share/dorian/athens/nginx/conf/athens.conf` | Main config |
+| `/usr/local/share/dorian/athens/nginx/lua/resty/` | Lua modules |
+| `/usr/local/share/dorian/athens/nginx/cache/athens/` | Proxy cache files |
+| `/tmp/redis.sock` | Redis (db 0 = config, db 2 = cache purge index) |
 
 ### Directory Structure
 
 ```
 ddos-firewall/
-├── api_parser/              # API service (modular Python)
-│   ├── app.py              # Entry point
-│   ├── config.py           # Configuration
-│   ├── core/               # Core modules (compiled to .so)
-│   │   ├── database.py
-│   │   ├── firewall.py
-│   │   ├── nginx.py
-│   │   └── ...
-│   ├── routes/             # API routes (compiled to .so)
-│   │   ├── l4_routes.py
-│   │   ├── l7_routes.py
-│   │   └── common_routes.py
-│   └── utils/              # Utilities (compiled to .so)
-│       ├── auth.py
-│       └── validators.py
-├── ebpf_firewall/          # L4 eBPF firewall
-│   ├── firewall.c         # eBPF program
-│   ├── firewall_user.c    # Userspace loader
-│   └── Makefile
-├── openresty-modules/      # OpenResty custom modules
-│   ├── ngx_acl/
-│   ├── ngx_http_report_ip/
-│   └── ngx_lic/
-├── setup/                  # Installation package
-│   ├── pack.sh            # Package builder
-│   ├── installer_stub.sh   # Installation script
-│   └── payload/           # Files to package
-└── lib/                    # Shared libraries
+├── .github/
+│   ├── workflows/build-payload.yml   # CI: build angelos + sparta + athens
+│   └── scripts/install-libxdp-dev.sh
+├── api_parser/                       # angelos — REST API source
+├── ebpf_firewall/                    # sparta — L4 eBPF firewall
+├── openresty-modules/                # athens — L7 OpenResty build
+│   ├── config/                       # nginx conf + Lua (resty/*.lua)
+│   ├── ngx_acl/                      # ACL C module
+│   ├── ngx_lic/                      # License module
+│   ├── ngx_slice/                    # Dynamic slice FFI module
+│   ├── ngx_purge/                    # Redis-indexed cache purge module
+│   ├── libmaxminddb/                 # GeoIP library
+│   └── script.sh                     # Athens build script
+├── setup/
+│   ├── pack.sh                       # Legacy local packager
+│   ├── installer_stub.sh             # Self-extracting installer
+│   └── payload/                      # CI output: angelos, sparta, athens
+├── redis-socket.conf                 # Local Redis config (unix socket)
+└── VERSION                           # Product version file
 ```
+
+## CI/CD (GitHub Actions)
+
+Workflow file: [`.github/workflows/build-payload.yml`](.github/workflows/build-payload.yml)
+
+### Triggers
+
+| Event | Behavior |
+|-------|----------|
+| Push to `main` / `master` | Build payload for Ubuntu 22.04 and 24.04; upload artifacts |
+| Pull request | Same build (no deploy) |
+| Tag push `v*` | Build + upload artifacts + SCP to deploy server |
+
+### Matrix
+
+Builds run on **ubuntu-22.04** and **ubuntu-24.04** runners independently. Each produces an OS-specific tarball:
+
+```
+dorian-ddos-firewall-<version>-<os_slug>-payload.tar.gz
+```
+
+Example: `dorian-ddos-firewall-0.2.7-ubuntu-22.04-payload.tar.gz`
+
+The archive contains `BUILD_INFO` with `os_slug`, `glibc`, git SHA, and build timestamp — **install the tarball matching your target OS**.
+
+### Workflow jobs
+
+```mermaid
+flowchart LR
+  subgraph payload [payload matrix]
+    A[Install deps] --> B[Build angelos]
+    B --> C[Build sparta]
+    C --> D[Fetch OpenResty]
+    D --> E[Build athens]
+    E --> F[Verify glibc + modules]
+    F --> G[Pack tarball]
+  end
+  G --> H[upload artifact]
+  H --> I[upload-to-server on tag v*]
+```
+
+**Job `payload`** (per OS):
+
+1. Install build dependencies (including `libev-dev`, `libhiredis-dev`, `libpcre2-dev`)
+2. Install libxdp (apt on 24.04, source build on 22.04)
+3. **Build angelos** — `api_parser/build.sh` (Cython `.so` compilation)
+4. **Build sparta** — `ebpf_firewall/script.sh`
+5. **Fetch OpenResty** 1.27.1.2 source
+6. **Prepare deps** — uthash, cJSON, libmaxminddb
+7. **Build athens** — `openresty-modules/script.sh`
+8. **Verify** — nginx prefix, GLIBC linkage, purge/slice modules present
+9. **Pack** — tarball to `setup/payload/`
+
+**Job `upload-to-server`** (tags only):
+
+- Requires secrets: `DEPLOY_HOST`, `DEPLOY_USER`, `DEPLOY_SSH_PRIVATE_KEY`, `DEPLOY_SSH_PORT`
+- Optional: `DEPLOY_OS_SLUG` — limit upload to one OS variant
+- Uploads to `/opt/dorian/uploads/` on the deploy server
+
+### Required GitHub secrets (tag deploy)
+
+| Secret | Purpose |
+|--------|---------|
+| `DEPLOY_HOST` | Target server hostname |
+| `DEPLOY_USER` | SSH user |
+| `DEPLOY_SSH_PRIVATE_KEY` | SSH private key |
+| `DEPLOY_SSH_PORT` | SSH port |
+
+## Build Process
+
+### Athens (OpenResty) build steps
+
+`openresty-modules/script.sh` performs:
+
+1. **Patch nginx bundle** (`bundle/nginx-1.27.1/`):
+   - `ngx_purge/ngx_http_file_cache-1.27.1.patch`
+   - `ngx_purge/ngx_http_upstream-1.27.1.patch`
+   - `ngx_slice/ngx_http_slice_filter_module.patch`
+2. **OpenResty `./configure`** with modules: `ngx_acl`, `ngx_lic`, `ngx_slice`, `ngx_purge`, `--with-http_slice_module`
+3. **Build `redis_nginx_adapter`** against `build/nginx-1.27.1/` (requires configure-generated headers)
+4. **`make && make install`** — prefix `/usr/local/share/dorian/athens`
+5. **Copy configs and Lua** into payload staging directory
+
+### Local build (full payload)
+
+```bash
+# From repository root — requires root/sudo for some install paths
+
+# 1. System dependencies
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential clang llvm curl git cmake pkg-config \
+  libbpf-dev libnetfilter-conntrack-dev libsqlite3-dev libssl-dev \
+  libmicrohttpd-dev libpcre3-dev libpcre2-dev zlib1g-dev \
+  libev-dev libhiredis-dev flex bison libcurl4-openssl-dev \
+  libsodium-dev python3 python3-venv python3-dev
+
+# 2. Build angelos
+export DDOS_FW_CI_PAYLOAD_ONLY=1
+bash api_parser/build.sh
+
+# 3. Build sparta
+bash ebpf_firewall/script.sh
+
+# 4. Fetch OpenResty and build athens
+cd openresty-modules
+curl -fsSL https://openresty.org/download/openresty-1.27.1.2.tar.gz -o /tmp/openresty.tgz
+tar xzf /tmp/openresty.tgz -C .
+bash script.sh
+```
+
+Output lands in `setup/payload/{angelos,sparta,athens}/`.
+
+### Payload contents
+
+Each tarball includes:
+
+| Directory | Contents |
+|-----------|----------|
+| `angelos/` | Compiled API `.so` files, Python app, systemd unit |
+| `sparta/` | eBPF binaries, config templates, systemd unit |
+| `athens/` | OpenResty/nginx binary, configs, Lua modules, luajit libs |
+| `VERSION` | Product version string |
+| `BUILD_INFO` | `os_slug`, glibc version, git SHA, build timestamp |
+
+### Athens-only rebuild
+
+```bash
+cd openresty-modules
+sudo apt-get install -y libev-dev libhiredis-dev
+bash script.sh
+sudo systemctl reload athens   # if installed
+```
+
+### CI vs local environment variables
+
+| Variable | CI value | Purpose |
+|----------|----------|---------|
+| `DDOS_FW_CI_PAYLOAD_ONLY` | `1` | Stage into `setup/payload/` without system install |
+| `LIB_UTHASH` | `.ci-deps/uthash` | uthash headers for ngx_acl |
+| `LIB_MAXMINDDB` | `.ci-deps/libmaxminddb` | GeoIP library |
+| `LIB_REDIS_ADAPTER` | `.ci-deps/redis-adapter` | redis_nginx_adapter install prefix |
+| `OPENRESTY_VER` | `1.27.1.2` | Set in workflow env |
 
 ## Requirements
 
 ### System Requirements
 
-- **OS**: Linux (Ubuntu 20.04+, Debian 11+, or similar)
+- **OS**: Linux (Ubuntu 22.04 / 24.04 tested in CI; Ubuntu 20.04+, Debian 11+, or similar)
 - **Kernel**: 5.10+ (for XDP support)
 - **Architecture**: x86_64
 
@@ -176,9 +304,9 @@ ddos-firewall/
 - **Python**: 3.8+ (3.10 recommended)
 - **GCC/Clang**: For compiling eBPF programs
 - **LLVM**: 10+ for eBPF compilation
-- **OpenResty**: 1.25.3.1+ (for L7 protection)
+- **OpenResty**: 1.27.1.2 (athens)
+- **Redis**: Required (unix socket `/tmp/redis.sock`; see `redis-socket.conf`)
 - **SQLite**: 3.x
-- **Redis**: Optional (for advanced features)
 
 ### Build Dependencies
 
@@ -188,30 +316,47 @@ apt-get install -y \
     python3 python3-venv python3-dev \
     gcc clang llvm libelf-dev libbpf-dev \
     xdp-tools libnetfilter-conntrack-dev \
-    build-essential curl wget
+    build-essential curl wget git cmake pkg-config \
+    libpcre3-dev libpcre2-dev zlib1g-dev \
+    libev-dev libhiredis-dev \
+    libssl-dev libmicrohttpd-dev libsodium-dev \
+    flex bison libcurl4-openssl-dev
 ```
+
+Additional libraries built by `openresty-modules/script.sh`:
+
+- **uthash** — hash tables for ngx_acl
+- **cJSON** — JSON parsing in ngx_acl
+- **libmaxminddb** — GeoIP lookups
+- **redis_nginx_adapter** — async Redis for ngx_purge ([wandenberg/redis_nginx_adapter](https://github.com/wandenberg/redis_nginx_adapter))
 
 ## Installation
 
-### Quick Installation
+### From CI artifact (recommended)
 
-1. **Build the installer package**:
-   ```bash
-   cd ddos-firewall/setup
-   ./pack.sh
+1. Download the tarball matching your OS from GitHub Actions artifacts or `/opt/dorian/uploads/`:
    ```
-   This creates `setup.sh` - a self-extracting installer.
+   dorian-ddos-firewall-<version>-ubuntu-22.04-payload.tar.gz
+   ```
+2. Extract and inspect `BUILD_INFO` inside the archive.
+3. Run the installer stub (see `setup/installer_stub.sh` for deployment steps).
 
-2. **Transfer to target system** (if building on different machine):
-   ```bash
-   scp setup.sh user@target-server:/tmp/
-   ```
+### Legacy local packager
 
-3. **Run installation on target system**:
-   ```bash
-   sudo chmod +x /tmp/setup.sh
-   sudo /tmp/setup.sh
-   ```
+```bash
+cd setup
+./pack.sh          # builds angelos .so files + creates setup.sh installer
+sudo ./setup.sh    # on target host
+```
+
+### Installation layout
+
+| Component | Install path |
+|-----------|--------------|
+| angelos | `/usr/local/share/api_parser/` (service: `angelos.service`) |
+| sparta | `/usr/local/bin/` (service: `sparta.service`) |
+| athens | `/usr/local/share/dorian/athens/` (service: `athens.service`) |
+| Redis config | `/etc/redis/redis-socket.conf` |
 
 ### Installation Process
 
@@ -231,16 +376,18 @@ The installer performs the following steps:
 After installation, verify services are running:
 
 ```bash
-# Check API parser service
-sudo systemctl status api_parser
+# Angelos (API)
+sudo systemctl status angelos
+sudo journalctl -u angelos -f
 
-# Check L4 firewall (if running)
-sudo systemctl status l4_firewall
+# Sparta (L4)
+sudo systemctl status sparta
 
-# View API parser logs
-sudo journalctl -u api_parser -f
+# Athens (L7)
+sudo systemctl status athens
+sudo /usr/local/share/dorian/athens/nginx/sbin/nginx -t
 
-# Verify .so files were compiled
+# Verify angelos .so files were compiled
 find /usr/local/share/api_parser -name "*.so"
 ```
 
@@ -283,15 +430,29 @@ syn_challenge_timeout = 3    # Challenge timeout (seconds)
 # Similar configs for ACK, RST, ICMP, UDP, GRE...
 ```
 
-### L7 Firewall Configuration
+### L7 Firewall Configuration (athens)
 
-L7 firewall uses OpenResty configuration files in `/usr/local/openresty/nginx/conf/`:
+Main config: `/usr/local/share/dorian/athens/nginx/conf/athens.conf`
 
-- `http_lua_acl.conf` - ACL system configuration
-- `backend_list.conf` - Backend server definitions
-- `server_acl.conf` - Server-level ACL rules
+Key includes:
 
-Configuration is managed through the API (see API Documentation).
+| File | Purpose |
+|------|---------|
+| `http_lua_acl.conf` | ACL module, GeoIP database path |
+| `http_purge_cache.conf` | Redis socket + db for cache purge index |
+| `http_proxy_cache.conf` | Proxy cache zone (`athens_cache`) |
+| `http_shared_dicts.conf` | Lua shared dicts (ACL cache, stats, purge sync) |
+| `server_main_acl.conf` | Main protected server + Lua access phase |
+| `server_stats_api.conf` | Stats and purge API on port 9000 |
+
+**Redis** (`redis-socket.conf`):
+
+- Unix socket: `/tmp/redis.sock`
+- db 0 — ACL rules, upstreams, cache rules, temporary blacklist
+- db 2 — cache purge index (key → cache file path)
+- `notify-keyspace-events Exgh$` — required for cache purge sync and ACL keyevent fallback
+
+Configuration is managed through the angelos API (see API Documentation).
 
 ## API Documentation
 
@@ -683,34 +844,26 @@ print(response.json())
 
 ### Systemd Services
 
-The installation creates the following systemd services:
-
-- **`api_parser.service`**: REST API service
-- **`l4_firewall.service`**: L4 eBPF firewall (optional)
+| Service | Component | Description |
+|---------|-----------|-------------|
+| `angelos.service` / `api_parser.service` | angelos | REST API |
+| `sparta.service` | sparta | L4 eBPF firewall |
+| `athens.service` | athens | L7 OpenResty |
 
 ### Managing Services
 
 ```bash
-# Start API parser
-sudo systemctl start api_parser
+# Athens (L7)
+sudo systemctl start athens
+sudo systemctl status athens
+sudo /usr/local/share/dorian/athens/nginx/sbin/nginx -t
 
-# Stop API parser
-sudo systemctl stop api_parser
+# Angelos (API)
+sudo systemctl start angelos
+sudo journalctl -u angelos -f
 
-# Restart API parser
-sudo systemctl restart api_parser
-
-# Enable auto-start on boot
-sudo systemctl enable api_parser
-
-# Check status
-sudo systemctl status api_parser
-
-# View logs
-sudo journalctl -u api_parser -f
-
-# View last 100 lines
-sudo journalctl -u api_parser -n 100
+# Sparta (L4)
+sudo systemctl start sparta
 ```
 
 ### Manual CLI Commands (L4 Firewall)
@@ -812,27 +965,32 @@ sudo l4_firewall_cli STATS_FW
 ls -la /usr/local/bin/l4_firewall_cli
 ```
 
-### L7 Firewall Issues
+### L7 Firewall Issues (athens)
 
 **OpenResty not starting:**
 ```bash
-# Check OpenResty status
-sudo systemctl status openresty
+sudo systemctl status athens
+sudo /usr/local/share/dorian/athens/nginx/sbin/nginx -t
+sudo tail -f /usr/local/share/dorian/athens/nginx/logs/athens_error.log
+```
 
-# Test Nginx configuration
-sudo /usr/local/openresty/nginx/sbin/nginx -t
+**Cache not purging on expiration:**
+```bash
+# Verify Redis keyspace notifications
+redis-cli -s /tmp/redis.sock CONFIG GET notify-keyspace-events
+# Should include: Exgh$
 
-# Check error logs
-sudo tail -f /usr/local/openresty/nginx/logs/error.log
+# Check cache purge sync logs
+grep cache_purge_sync /usr/local/share/dorian/athens/nginx/logs/athens_error.log
+
+# Verify db 2 index keys
+redis-cli -s /tmp/redis.sock -n 2 KEYS '*'
 ```
 
 **ACL rules not applying:**
 ```bash
-# Verify configuration files
-ls -la /usr/local/openresty/nginx/conf/
-
-# Check Lua module loading
-sudo tail -f /usr/local/openresty/nginx/logs/error.log | grep lua
+grep acl_manager /usr/local/share/dorian/athens/nginx/logs/athens_error.log
+redis-cli -s /tmp/redis.sock GET whitelist
 ```
 
 ### Network Issues
@@ -857,40 +1015,48 @@ curl http://localhost:5000/API/common/health_check \
 
 ## Development
 
-### Project Structure
+### Project layout
 
-The API parser uses a modular architecture with Cython compilation:
+| Path | Description |
+|------|-------------|
+| `api_parser/` | angelos — Flask API; Cython compiles `core/`, `routes/`, `utils/` to `.so` |
+| `ebpf_firewall/` | sparta — eBPF C sources + `script.sh` |
+| `openresty-modules/` | athens — OpenResty build, configs, Lua, C modules |
+| `setup/` | Packaging and installer |
 
-- **Source files**: Python modules in `core/`, `routes/`, `utils/`
-- **Compiled files**: `.so` files generated during installation
-- **Entry point**: `app.py` (minimal wrapper)
-
-### Building from Source
+### Building from source (development)
 
 ```bash
-# Clone repository
 git clone <repository-url>
 cd ddos-firewall
 
-# Set up development environment
+# Angelos — run API without .so compilation
 cd api_parser
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-
-# Build .so files
-python setup.py build_ext --inplace
-
-# Run in development mode
 python app.py
+
+# Sparta
+bash ebpf_firewall/script.sh
+
+# Athens — see Build Process section
+cd openresty-modules && bash script.sh
 ```
 
-### Code Organization
+### Release workflow
 
-- **`core/`**: Business logic (database, firewall, nginx operations)
-- **`routes/`**: Flask route handlers (L4, L7, common endpoints)
-- **`utils/`**: Utility functions (authentication, validation)
-- **`config.py`**: Centralized configuration
+1. Update `VERSION` file
+2. Commit and push to `main`
+3. Tag release: `git tag v0.2.8 && git push origin v0.2.8`
+4. GitHub Actions builds OS-specific tarballs and uploads to deploy server
+5. Install matching tarball on target host
+
+### Code organization (angelos)
+
+- **`core/`** — Business logic (database, firewall, redis, nginx operations)
+- **`routes/`** — Flask route handlers (L4, L7, common endpoints)
+- **`utils/`** — Authentication, validation
+- **`config.py`** — Centralized configuration
 
 ### Testing
 
