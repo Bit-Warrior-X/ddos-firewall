@@ -141,8 +141,7 @@ ddos-firewall/
 │   ├── libmaxminddb/                 # GeoIP library
 │   └── script.sh                     # Athens build script
 ├── setup/
-│   ├── pack.sh                       # Legacy local packager
-│   ├── installer_stub.sh             # Self-extracting installer
+│   ├── select-payload.sh             # Pick newest OS-matched tarball from uploads
 │   └── payload/                      # CI output: angelos, sparta, athens
 ├── redis-socket.conf                 # Local Redis config (unix socket)
 └── VERSION                           # Product version file
@@ -338,38 +337,30 @@ Additional libraries built by `openresty-modules/script.sh`:
    ```
    dorian-ddos-firewall-<version>-ubuntu-22.04-payload.tar.gz
    ```
+   Helper to pick the newest matching file on a host:
+   ```bash
+   ./setup/select-payload.sh /opt/dorian/uploads
+   ```
 2. Extract and inspect `BUILD_INFO` inside the archive.
-3. Run the installer stub (see `setup/installer_stub.sh` for deployment steps).
-
-### Legacy local packager
-
-```bash
-cd setup
-./pack.sh          # builds angelos .so files + creates setup.sh installer
-sudo ./setup.sh    # on target host
-```
+3. Deploy with **deploy_license** (`POST /upgrade_version`), which uploads the tarball and runs remote `deploy.sh --version-only` (extract under `/usr/local/share/dorian/`, angelos venv, enable/start systemd units).
 
 ### Installation layout
 
 | Component | Install path |
 |-----------|--------------|
-| angelos | `/usr/local/share/api_parser/` (service: `angelos.service`) |
-| sparta | `/usr/local/bin/` (service: `sparta.service`) |
+| angelos | `/usr/local/share/dorian/angelos/` (service: `angelos.service`) |
+| sparta | `/usr/local/share/dorian/sparta/` (service: `sparta.service`) |
 | athens | `/usr/local/share/dorian/athens/` (service: `athens.service`) |
 | Redis config | `/etc/redis/redis-socket.conf` |
 
 ### Installation Process
 
-The installer performs the following steps:
+`deploy.sh --version-only` (or `--all`) performs:
 
-1. **Extract payload** → Files extracted to temporary directory
-2. **Copy binaries** → L4/L7 firewall binaries copied to `/usr/local/bin/`
-3. **Install API parser** → Python modules installed to `/usr/local/share/api_parser/`
-4. **Create Python venv** → Virtual environment created
-5. **Install dependencies** → Packages from `requirements.txt` installed
-6. **Compile .so files** → Python modules compiled to `.so` files (code protection)
-7. **Install systemd services** → Services installed and enabled
-8. **Start services** → Services started automatically
+1. **Extract payload** → Unpack tarball into `/usr/local/share/dorian/`
+2. **Angelos venv** → Create/update venv and `pip install -r requirements.txt`
+3. **Install systemd units** → Copy `angelos.service`, `athens.service`, `sparta.service`
+4. **Enable and start** → `systemctl enable --now` for all three services
 
 ### Post-Installation
 

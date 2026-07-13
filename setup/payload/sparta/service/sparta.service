@@ -1,0 +1,55 @@
+
+[Unit]
+Description=SPARTA Anti-DDoS Firewall
+After=network-online.target
+Wants=network-online.target
+
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/usr/local/share/dorian/sparta/
+ExecStart=/usr/local/share/dorian/sparta/bin/sparta_user
+Restart=on-failure
+RestartSec=1
+
+Environment="LD_LIBRARY_PATH=/usr/local/lib"
+Environment="EBPF_FIREWALL_XDP_KO=/usr/local/share/dorian/sparta/sparta_kernel.o"
+Environment="EBPF_FIREWALL_XDP_CONFIG=/usr/local/share/dorian/sparta/firewall.config"
+Environment="PUBKEY_PATH=/usr/local/share/dorian/license/server_public_key.pem"
+Environment="LICENSE_PATH=/usr/local/share/dorian/license/license.lic"
+Environment="SQLITE_DB_NAME=/usr/local/share/dorian/sparta/firewall_control.db"
+
+
+# --- Memory ---
+# BPF maps need locked memory. Without this, map creation fails.
+LimitMEMLOCK=infinity
+
+# --- File descriptors ---
+# BPF maps, ring buffers, conntrack sockets all consume FDs.
+LimitNOFILE=1048576
+
+# --- Scheduling priority ---
+# Do NOT use Nice=-20: it starves sshd, nginx, and other services during a flood,
+# so you cannot connect to administer the host. Default (0) keeps admin traffic viable.
+Nice=0
+
+# --- Core dumps ---
+# Enable core dumps for debugging crash-during-attack issues.
+# Disable again once the bug is found.
+LimitCORE=infinity
+
+# --- Restart behavior ---
+# If the firewall crashes during an attack, restart immediately.
+# The conntrack flush + iptables DROP NEW rule protects during the gap.
+#
+# Do NOT set WatchdogSec until the daemon calls sd_notify(0, "WATCHDOG=1") on a
+# timer (e.g. every WatchdogSec/2). Without it, systemd kills the process on each
+# timeout and you get repeated core dumps in /var/crash (often exactly
+# StartLimitBurst times per StartLimitIntervalSec).
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
