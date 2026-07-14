@@ -203,30 +203,40 @@ jobs:
           fi
           echo "nginx modules OK (cache purge + slice)"
 
-          # Confirm long gzip_types (OpenXML) work with the patched test_types_hash bucket.
-          verify_dir="$(mktemp -d)"
-          verify_conf="${verify_dir}/athens-gzip-verify.conf"
-          cat > "${verify_conf}" <<EOF
-          error_log ${verify_dir}/error.log;
-          pid ${verify_dir}/nginx.pid;
-          events {}
-          http {
-              types_hash_max_size 2048;
-              types_hash_bucket_size 128;
-              gzip on;
-              gzip_types application/vnd.openxmlformats-officedocument.wordprocessingml.document application/vnd.openxmlformats-officedocument.spreadsheetml.sheet application/vnd.openxmlformats-officedocument.presentationml.presentation;
-              server { listen 127.0.0.1:18080; return 200; }
-          }
-          EOF
-          # Strip the YAML/shell indent so nginx sees a clean conf.
-          sed -i 's/^[[:space:]]*//' "${verify_conf}"
-          if ! "${nginx_bin}" -t -c "${verify_conf}" -p "${verify_dir}" 2>"${verify_dir}/nginx-t.err"; then
-            echo "error: patched nginx rejected long OpenXML gzip_types (test_types_hash_bucket patch missing?)" >&2
-            cat "${verify_dir}/nginx-t.err" >&2 || true
-            cat "${verify_dir}/error.log" >&2 || true
+          # Confirm test_types_hash_bucket patch landed in the built nginx sources
+          # (nginx -t of a stub conf is unreliable here: compile-time log paths +
+          # ngx_purge requires $cache_inactive_ttl in every http{}).
+          ngx_http_c=""
+          for candidate in \
+            "${GITHUB_WORKSPACE}/openresty-modules/openresty-${OPENRESTY_VER}/build/nginx-1.27.1/src/http/ngx_http.c" \
+            "${GITHUB_WORKSPACE}/openresty-modules/openresty-${OPENRESTY_VER}/bundle/nginx-1.27.1/src/http/ngx_http.c"
+          do
+            if [[ -f "${candidate}" ]]; then
+              ngx_http_c="${candidate}"
+              break
+            fi
+          done
+          if [[ -z "${ngx_http_c}" ]]; then
+            echo "error: ngx_http.c not found to verify test_types_hash_bucket patch" >&2
             exit 1
           fi
-          echo "nginx gzip_types OpenXML hash OK (test_types_hash_bucket patch)"
+          python3 - <<PY
+          from pathlib import Path
+          import re
+          import sys
+          text = Path("${ngx_http_c}").read_text()
+          sizes = re.findall(
+              r'hash\.bucket_size = (\d+);\s*\n\s*hash\.name = "test_types_hash";',
+              text,
+          )
+          if sizes != ["128", "128"]:
+              print(
+                  f"error: test_types_hash_bucket patch missing in {Path('${ngx_http_c}')}: got {sizes}",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print("nginx test_types_hash_bucket patch OK (both sites = 128)")
+          PY
 
           echo "Host ldd: $(ldd --version | head -1)"
           echo "nginx dynamic deps:"
