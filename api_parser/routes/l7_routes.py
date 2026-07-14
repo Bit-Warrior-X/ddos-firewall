@@ -891,6 +891,277 @@ def l7_update_listeningports():
     }), 200
 
 
+# Category -> MIME types for gzip_types. text/html is always compressed by nginx
+# when gzip is on, so it is omitted from the gzip_types line to avoid a warning.
+# application/json; charset=utf-8 cannot be expressed in gzip_types ('; ends the
+# directive); application/json covers those responses.
+_COMPRESS_MIME_TYPES = {
+    "css": (
+        "text/css",
+        "application/css",
+    ),
+    "html": (
+        "text/html",
+        "application/xhtml+xml",
+        "application/xml",
+    ),
+    "js": (
+        "application/javascript",
+        "application/ecmascript",
+        "text/javascript",
+    ),
+    "audio": (
+        "audio/wav",
+        "audio/midi",
+        "audio/vnd.wave",
+        "audio/wave",
+        "audio/3gpp",
+    ),
+    "font": (
+        "application/x-font-ttf",
+        "application/x-font-otf",
+        "font/otf",
+        "font/woff",
+        "font/woff2",
+    ),
+    "applications": (
+        "application/pdf",
+        "application/java-archive",
+        "application/octet-stream",
+        "application/x-msdownload",
+        "application/vnd.debian.binary-package",
+        "application/mac-binhex40",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/postscript",
+        "application/rtf",
+        "application/vnd.ms-fontobject",
+        "application/x-rpm",
+        "text/plain",
+        "application/json",
+    ),
+}
+_COMPRESS_KEYS = ("css", "html", "js", "audio", "font", "applications")
+
+
+def _normalize_compress_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on", "enable", "enabled")
+    return False
+
+
+def _normalize_compress_flags(compress_in) -> dict:
+    flags = {key: False for key in _COMPRESS_KEYS}
+    if not isinstance(compress_in, dict):
+        return flags
+    for key in _COMPRESS_KEYS:
+        if key in compress_in:
+            flags[key] = _normalize_compress_bool(compress_in.get(key))
+    return flags
+
+
+def _compress_marker_line(flags: dict) -> str:
+    parts = [f"{key}={1 if flags.get(key) else 0}" for key in _COMPRESS_KEYS]
+    return "# compress: " + " ".join(parts)
+
+
+def _build_gzip_types(flags: dict) -> list:
+    types = []
+    seen = set()
+    for key in _COMPRESS_KEYS:
+        if not flags.get(key):
+            continue
+        for mime in _COMPRESS_MIME_TYPES[key]:
+            # nginx always compresses text/html when gzip is on; listing it
+            # explicitly only triggers a duplicate-type warning.
+            if mime == "text/html":
+                continue
+            if mime in seen:
+                continue
+            seen.add(mime)
+            types.append(mime)
+    return types
+
+
+def _build_gzip_conf(flags: dict) -> str:
+    any_enabled = any(flags.get(key) for key in _COMPRESS_KEYS)
+    lines = [
+        "# Managed by angelos l7_update_compress. Do not edit by hand.",
+        _compress_marker_line(flags),
+    ]
+    if not any_enabled:
+        lines.append("gzip off;")
+        return "\n".join(lines) + "\n"
+
+    gzip_types = _build_gzip_types(flags)
+    lines.extend([
+        "gzip on;",
+        "gzip_vary on;",
+        "gzip_proxied any;",
+        "gzip_comp_level 4;",
+        "gzip_min_length 256;",
+    ])
+    if gzip_types:
+        lines.append("gzip_types " + " ".join(gzip_types) + ";")
+    lines.append('gzip_disable "msie6";')
+    return "\n".join(lines) + "\n"
+
+
+def _parse_compress_flags(content: str) -> dict:
+    flags = {key: False for key in _COMPRESS_KEYS}
+    for line in (content or "").splitlines():
+        line = line.strip()
+        if not line.startswith("# compress:"):
+            continue
+        body = line[len("# compress:"):].strip()
+        for token in body.split():
+            if "=" not in token:
+                continue
+            key, _, raw = token.partition("=")
+            key = key.strip().lower()
+            if key in flags:
+                flags[key] = raw.strip() in ("1", "true", "yes", "on")
+        return flags
+
+    # Fallback for legacy inline gzip config without a marker comment.
+    lowered = (content or "").lower()
+    if re.search(r"^\s*gzip\s+off\s*;", content or "", re.IGNORECASE | re.MULTILINE):
+        return flags
+    if not re.search(r"^\s*gzip\s+on\s*;", content or "", re.IGNORECASE | re.MULTILINE):
+        return flags
+
+    types_match = re.search(r"gzip_types\s+([^;]+);", content or "", re.IGNORECASE)
+    type_set = set()
+    if types_match:
+        type_set = {t.strip().lower() for t in types_match.group(1).split() if t.strip()}
+
+    for key, mimes in _COMPRESS_MIME_TYPES.items():
+        if key == "html":
+            # gzip on implies text/html compression in nginx.
+            flags["html"] = True
+            continue
+        flags[key] = any(mime.lower() in type_set for mime in mimes if mime != "text/html")
+    return flags
+
+
+def _read_gzip_conf() -> tuple:
+    path = Path(config.L7_GZIP_CONF)
+    try:
+        if not path.is_file():
+            return "", None
+        return path.read_text(encoding="utf-8"), None
+    except Exception as exc:
+        return "", str(exc)
+
+
+def _write_gzip_conf(content: str) -> tuple:
+    path = Path(config.L7_GZIP_CONF)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+@l7_bp.route('/l7_update_compress', methods=['POST'])
+def l7_update_compress():
+    """Receive compression category flags and update athens http_gzip.conf.
+
+    Expected JSON:
+      {
+        "serverId": 42,
+        "compress": {
+          "css": true,
+          "html": true,
+          "js": true,
+          "audio": false,
+          "font": false,
+          "applications": false
+        }
+      }
+
+    Enabled categories are mapped to nginx gzip_types. If every category is
+    false, gzip is turned off. When the resulting config differs from the
+    current http_gzip.conf, the file is rewritten and athens is restarted.
+    """
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"status": "error", "message": "Body must be JSON object."}), 400
+
+    server_id = data.get("serverId")
+    if server_id is None:
+        return jsonify({"status": "error", "message": "Missing 'serverId'."}), 400
+    try:
+        server_id = int(server_id)
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid 'serverId' (must be integer)."}), 400
+
+    compress_in = data.get("compress")
+    if compress_in is None:
+        return jsonify({"status": "error", "message": "Missing 'compress'."}), 400
+    if not isinstance(compress_in, dict):
+        return jsonify({"status": "error", "message": "Invalid 'compress' (must be object)."}), 400
+
+    flags = _normalize_compress_flags(compress_in)
+    new_conf = _build_gzip_conf(flags)
+
+    current_conf, read_err = _read_gzip_conf()
+    if read_err:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to read current compression configuration.",
+            "details": read_err
+        }), 500
+
+    current_flags = _parse_compress_flags(current_conf)
+    changed = current_flags != flags or current_conf.strip() != new_conf.strip()
+
+    if not changed:
+        return jsonify({
+            "status": "success",
+            "message": "Compression settings unchanged; no restart required.",
+            "serverId": server_id,
+            "compress": flags,
+            "changed": False
+        }), 200
+
+    ok, write_err = _write_gzip_conf(new_conf)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write compression configuration.",
+            "details": write_err or "Unknown error"
+        }), 500
+
+    restarted, restart_err = _restart_l7_service()
+    if not restarted:
+        return jsonify({
+            "status": "error",
+            "message": "Compression configuration updated but service restart failed.",
+            "details": restart_err or "Unknown error",
+            "serverId": server_id,
+            "compress": flags,
+            "changed": True
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "Compression settings updated and athens service restarted.",
+        "serverId": server_id,
+        "compress": flags,
+        "changed": True
+    }), 200
+
+
 @l7_bp.route('/l7_update_temporaryblacklist', methods=['POST'])
 def l7_update_temporaryblacklist():
     """

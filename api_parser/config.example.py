@@ -20,6 +20,7 @@ SPARTA_SERVICE = "sparta.service"
 L7_SERVICE = "l7_firewall"
 L7_NGINX_CONF_DIR = Path("/usr/local/share/dorian/athens/nginx/conf")
 L7_DEFAULT_PORTS_CONF = str(L7_NGINX_CONF_DIR / "server_default_ports.conf")
+L7_GZIP_CONF = str(L7_NGINX_CONF_DIR / "http_gzip.conf")
 
 # Server configuration
 SERVER_IP = "0.0.0.0"

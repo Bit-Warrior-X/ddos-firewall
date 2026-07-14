@@ -1,0 +1,20 @@
+--- a/src/http/ngx_http.c
++++ b/src/http/ngx_http.c
+@@ -2119,7 +2119,7 @@
+         hash.hash = types_hash;
+         hash.key = NULL;
+         hash.max_size = 2048;
+-        hash.bucket_size = 64;
++        hash.bucket_size = 128;
+         hash.name = "test_types_hash";
+         hash.pool = cf->pool;
+         hash.temp_pool = NULL;
+@@ -2149,7 +2149,7 @@
+         hash.hash = prev_types_hash;
+         hash.key = NULL;
+         hash.max_size = 2048;
+-        hash.bucket_size = 64;
++        hash.bucket_size = 128;
+         hash.name = "test_types_hash";
+         hash.pool = cf->pool;
+         hash.temp_pool = NULL;

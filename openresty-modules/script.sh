@@ -61,6 +61,12 @@ apply_nginx_patches() {
     patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
       < "${SCRIPT_DIR}/ngx_slice/ngx_http_slice_filter_module.patch" || true
   fi
+
+  # gzip_types hash is hardcoded to 64 bytes; OpenXML MIME names exceed that (~46 char effective max).
+  if [[ -f "${SCRIPT_DIR}/ngx_gzip/ngx_http_test_types_hash_bucket-1.27.1.patch" ]]; then
+    patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
+      < "${SCRIPT_DIR}/ngx_gzip/ngx_http_test_types_hash_bucket-1.27.1.patch" || true
+  fi
 }
 
 build_redis_nginx_adapter() {

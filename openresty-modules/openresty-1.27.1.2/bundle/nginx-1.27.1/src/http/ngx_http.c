@@ -2119,7 +2119,7 @@ ngx_http_merge_types(ngx_conf_t *cf, ngx_array_t **keys, ngx_hash_t *types_hash,
         hash.hash = types_hash;
         hash.key = NULL;
         hash.max_size = 2048;
-        hash.bucket_size = 64;
+        hash.bucket_size = 128;
         hash.name = "test_types_hash";
         hash.pool = cf->pool;
         hash.temp_pool = NULL;
@@ -2149,7 +2149,7 @@ ngx_http_merge_types(ngx_conf_t *cf, ngx_array_t **keys, ngx_hash_t *types_hash,
         hash.hash = prev_types_hash;
         hash.key = NULL;
         hash.max_size = 2048;
-        hash.bucket_size = 64;
+        hash.bucket_size = 128;
         hash.name = "test_types_hash";
         hash.pool = cf->pool;
         hash.temp_pool = NULL;

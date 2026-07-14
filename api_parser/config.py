@@ -20,6 +20,7 @@ SPARTA_SERVICE = "sparta.service"
 L7_SERVICE = "athens.service"
 L7_NGINX_CONF_DIR = Path("/usr/local/share/dorian/athens/nginx/conf")
 L7_DEFAULT_PORTS_CONF = str(L7_NGINX_CONF_DIR / "server_default_ports.conf")
+L7_GZIP_CONF = str(L7_NGINX_CONF_DIR / "http_gzip.conf")
 L7_CACHE_PURGE_BASE = os.environ.get("L7_CACHE_PURGE_BASE", "http://127.0.0.1:9000").rstrip("/")
 
 # Server configuration

@@ -99,6 +99,31 @@ jobs:
           curl -fsSL "https://openresty.org/download/openresty-${OPENRESTY_VER}.tar.gz" -o /tmp/openresty.tgz
           tar xzf /tmp/openresty.tgz -C "${GITHUB_WORKSPACE}/openresty-modules"
 
+      - name: Apply nginx test_types_hash_bucket patch
+        working-directory: openresty-modules
+        run: |
+          set -euo pipefail
+          # gzip_types hash bucket is hardcoded to 64 (~46-char max MIME). OpenXML types need 128.
+          NGINX_BUNDLE="openresty-${OPENRESTY_VER}/bundle/nginx-1.27.1"
+          PATCH="ngx_gzip/ngx_http_test_types_hash_bucket-1.27.1.patch"
+          test -d "${NGINX_BUNDLE}/src/http"
+          test -f "${PATCH}"
+          patch -p1 -d "${NGINX_BUNDLE}" --forward < "${PATCH}"
+          python3 - <<PY
+          from pathlib import Path
+          import re
+          import sys
+          text = Path("${NGINX_BUNDLE}/src/http/ngx_http.c").read_text()
+          sizes = re.findall(
+              r'hash\.bucket_size = (\d+);\s*\n\s*hash\.name = "test_types_hash";',
+              text,
+          )
+          if sizes != ["128", "128"]:
+              print(f"error: expected two test_types_hash bucket_size=128 sites, got {sizes}", file=sys.stderr)
+              sys.exit(1)
+          print("test_types_hash_bucket patch OK (both sites = 128)")
+          PY
+
       - name: Prepare uthash, cJSON and libmaxminddb
         working-directory: openresty-modules
         run: |
@@ -177,6 +202,29 @@ jobs:
             exit 1
           fi
           echo "nginx modules OK (cache purge + slice)"
+
+          # Confirm long gzip_types (OpenXML) work with the patched test_types_hash bucket.
+          verify_dir="$(mktemp -d)"
+          verify_conf="${verify_dir}/athens-gzip-verify.conf"
+          cat > "${verify_conf}" <<EOF
+error_log ${verify_dir}/error.log;
+pid ${verify_dir}/nginx.pid;
+events {}
+http {
+    types_hash_max_size 2048;
+    types_hash_bucket_size 128;
+    gzip on;
+    gzip_types application/vnd.openxmlformats-officedocument.wordprocessingml.document application/vnd.openxmlformats-officedocument.spreadsheetml.sheet application/vnd.openxmlformats-officedocument.presentationml.presentation;
+    server { listen 127.0.0.1:18080; return 200; }
+}
+EOF
+          if ! "${nginx_bin}" -t -c "${verify_conf}" -p "${verify_dir}" 2>"${verify_dir}/nginx-t.err"; then
+            echo "error: patched nginx rejected long OpenXML gzip_types (test_types_hash_bucket patch missing?)" >&2
+            cat "${verify_dir}/nginx-t.err" >&2 || true
+            cat "${verify_dir}/error.log" >&2 || true
+            exit 1
+          fi
+          echo "nginx gzip_types OpenXML hash OK (test_types_hash_bucket patch)"
 
           echo "Host ldd: $(ldd --version | head -1)"
           echo "nginx dynamic deps:"
