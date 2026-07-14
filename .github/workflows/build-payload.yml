@@ -207,17 +207,19 @@ jobs:
           verify_dir="$(mktemp -d)"
           verify_conf="${verify_dir}/athens-gzip-verify.conf"
           cat > "${verify_conf}" <<EOF
-error_log ${verify_dir}/error.log;
-pid ${verify_dir}/nginx.pid;
-events {}
-http {
-    types_hash_max_size 2048;
-    types_hash_bucket_size 128;
-    gzip on;
-    gzip_types application/vnd.openxmlformats-officedocument.wordprocessingml.document application/vnd.openxmlformats-officedocument.spreadsheetml.sheet application/vnd.openxmlformats-officedocument.presentationml.presentation;
-    server { listen 127.0.0.1:18080; return 200; }
-}
-EOF
+          error_log ${verify_dir}/error.log;
+          pid ${verify_dir}/nginx.pid;
+          events {}
+          http {
+              types_hash_max_size 2048;
+              types_hash_bucket_size 128;
+              gzip on;
+              gzip_types application/vnd.openxmlformats-officedocument.wordprocessingml.document application/vnd.openxmlformats-officedocument.spreadsheetml.sheet application/vnd.openxmlformats-officedocument.presentationml.presentation;
+              server { listen 127.0.0.1:18080; return 200; }
+          }
+          EOF
+          # Strip the YAML/shell indent so nginx sees a clean conf.
+          sed -i 's/^[[:space:]]*//' "${verify_conf}"
           if ! "${nginx_bin}" -t -c "${verify_conf}" -p "${verify_dir}" 2>"${verify_dir}/nginx-t.err"; then
             echo "error: patched nginx rejected long OpenXML gzip_types (test_types_hash_bucket patch missing?)" >&2
             cat "${verify_dir}/nginx-t.err" >&2 || true
