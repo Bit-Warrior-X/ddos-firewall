@@ -294,6 +294,7 @@ jobs:
         with:
           name: full-payload-${{ matrix.os_slug }}
           path: ${{ steps.pack.outputs.tarball }}
+          retention-days: 1
 
   upload-to-server:
     name: upload payloads
