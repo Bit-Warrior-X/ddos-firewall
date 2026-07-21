@@ -36,10 +36,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Self-hosted: prin1ub22 — add label os-22.04 on that runner
           - os_slug: ubuntu-22.04
-            runner: ubuntu-22.04
+            runner: [self-hosted, Linux, X64, os-22.04]
+          # Self-hosted: prin2ub24 (labels: self-hosted, Linux, X64, os-24.04)
           - os_slug: ubuntu-24.04
-            runner: ubuntu-24.04
+            runner: [self-hosted, Linux, X64, os-24.04]
     outputs:
       version: ${{ steps.version.outputs.version }}
       tarball: ${{ steps.pack.outputs.tarball }}
