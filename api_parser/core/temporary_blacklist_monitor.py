@@ -63,6 +63,7 @@ def _run_monitor():
                     if isinstance(item, dict):
                         print(
                             f"[TEMP_BL_MONITOR] pid={pid} parsed item ip={item.get('ip','')} "
+                            f"site_id={item.get('site_id','')} "
                             f"trigger_rule={item.get('trigger_rule','')}"
                         )
                         ok = APIClient.notify_temporary_blacklist_added(item)

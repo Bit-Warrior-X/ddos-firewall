@@ -3,7 +3,8 @@
 import redis
 import json
 import time
-from typing import List, Dict
+from datetime import datetime
+from typing import Any, List, Dict, Optional
 import config
 
 class RedisClient:
@@ -452,6 +453,39 @@ class RedisClient:
     TEMPORARYBLACKLIST_PREFIX = "temporaryblacklist:"
 
     @staticmethod
+    def parse_blocked_at(raw) -> int:
+        """Parse blocked_at as epoch seconds (int or ISO-8601)."""
+        if raw is None or raw == "":
+            return 0
+        if isinstance(raw, bool):
+            return 0
+        if isinstance(raw, (int, float)):
+            ts = int(raw)
+            return ts if ts > 0 else 0
+        s = str(raw).strip()
+        if not s:
+            return 0
+        if s.isdigit():
+            return int(s)
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.fromisoformat(s)
+            return int(dt.timestamp())
+        except Exception:
+            return 0
+
+    @staticmethod
+    def parse_optional_site_id(raw) -> Optional[int]:
+        if raw is None or raw == "":
+            return None
+        try:
+            site_id = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return site_id if site_id > 0 else None
+
+    @staticmethod
     def clear_temporaryblacklist() -> None:
         """Delete all temporaryblacklist:* keys from Redis."""
         rcli = RedisClient.get_client()
@@ -471,8 +505,8 @@ class RedisClient:
         Store temporary blacklist entries as individual keys with proper TTL.
 
         Each entry is written as:
-          key:   temporaryblacklist:<ip>:<blocked_at>
-          value: JSON { ip, url, country, city, blocked_at, ttl, trigger_rule }
+          key:   temporaryblacklist:<ip>:<blocked_at>[:<site_id>]
+          value: JSON { ip, url, country, city, blocked_at, ttl, trigger_rule, site_id }
 
         Redis TTL is computed as: blocked_at + ttl - now_epoch().
         Expired entries (TTL <= 0) are skipped.
@@ -489,14 +523,12 @@ class RedisClient:
                 ip = (e.get("ip") or "").strip()
                 if not ip:
                     continue
-                blocked_at_raw = e.get("blocked_at")
-                ttl_raw = e.get("ttl", 0)
+                blocked_at = RedisClient.parse_blocked_at(e.get("blocked_at"))
                 try:
-                    blocked_at = int(blocked_at_raw)
-                    ttl_val = int(ttl_raw)
+                    ttl_val = int(e.get("ttl", 0))
                 except (TypeError, ValueError):
                     continue
-                if ttl_val <= 0:
+                if blocked_at <= 0 or ttl_val <= 0:
                     continue
 
                 remaining = blocked_at + ttl_val - now_ts
@@ -504,7 +536,12 @@ class RedisClient:
                     # Already expired according to backend timing; skip
                     continue
 
+                site_id = RedisClient.parse_optional_site_id(
+                    e.get("site_id") if e.get("site_id") is not None else e.get("siteId")
+                )
                 key = f"{RedisClient.TEMPORARYBLACKLIST_PREFIX}{ip}:{blocked_at}"
+                if site_id is not None:
+                    key = f"{key}:{site_id}"
                 value_obj = {
                     "ip": ip,
                     "url": e.get("url", "") or "",
@@ -514,12 +551,273 @@ class RedisClient:
                     "ttl": ttl_val,
                     "trigger_rule": e.get("trigger_rule", "") or "",
                 }
+                if site_id is not None:
+                    value_obj["site_id"] = site_id
                 value = json.dumps(value_obj, ensure_ascii=False, separators=(",", ":")).replace("\\/", "/")
                 pipe.set(key, value)
                 pipe.expire(key, remaining)
 
             pipe.execute()
             return True, None
+        except Exception as e:
+            return False, str(e)
+
+    # -----------------------------
+    # Per-site L7 config (l7_update_site)
+    # -----------------------------
+
+    WAF_RULE_TYPES = (
+        "whitelist",
+        "blacklist",
+        "geo",
+        "anticc",
+        "antiheader",
+        "intervalfreqlimit",
+        "secondfreqlimit",
+        "responsefreq",
+        "useragent",
+    )
+
+    @staticmethod
+    def store_domain_mapping(domain: str, site_id: int) -> tuple:
+        """Store domain -> site_id mapping under key 'domain:{domain}'."""
+        try:
+            rcli = RedisClient.get_client()
+            rcli.set(f"domain:{domain}", str(site_id))
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_domains_for_site(site_id: int) -> list:
+        """Return hostnames whose domain:{host} value equals site_id."""
+        try:
+            rcli = RedisClient.get_client()
+            site_id_str = str(site_id)
+            domains = []
+            cursor = "0"
+            while True:
+                cursor, keys = rcli.scan(cursor=cursor, match="domain:*", count=100)
+                for key in keys or []:
+                    try:
+                        val = rcli.get(key)
+                    except Exception:
+                        continue
+                    if val is None or str(val).strip() != site_id_str:
+                        continue
+                    domain = key.split(":", 1)[-1] if isinstance(key, str) else ""
+                    if domain:
+                        domains.append(domain)
+                if cursor == 0 or cursor == "0":
+                    break
+            return domains
+        except Exception:
+            return []
+
+    @staticmethod
+    def rename_site_domain(site_id: int, old_domain: str, new_domain: str) -> tuple:
+        """Retarget site domain mapping from old_domain to new_domain.
+
+        - SET domain:{new_domain} -> site_id
+        - DELETE domain:{old_domain} when it differs from new_domain
+        - DELETE any other domain:* keys that currently map to this site_id
+
+        Site-scoped keys (waf:{site_id}:*, cache:{site_id}, ...) stay unchanged.
+        Returns (True, details_dict) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            old_domain = (old_domain or "").strip()
+            new_domain = (new_domain or "").strip()
+            if not new_domain:
+                return False, "new_domain is empty"
+
+            new_key = f"domain:{new_domain}"
+            old_key = f"domain:{old_domain}" if old_domain else ""
+            site_id_str = str(site_id)
+            removed = []
+
+            pipe = rcli.pipeline()
+            pipe.set(new_key, site_id_str)
+
+            if old_key and old_key != new_key:
+                pipe.delete(old_key)
+                removed.append(old_key)
+
+            # Drop leftover domain mappings for this site (stale hostnames).
+            cursor = "0"
+            while True:
+                cursor, keys = rcli.scan(cursor=cursor, match="domain:*", count=100)
+                for key in keys or []:
+                    if key == new_key or key in removed:
+                        continue
+                    try:
+                        val = rcli.get(key)
+                    except Exception:
+                        continue
+                    if val is None:
+                        continue
+                    if str(val).strip() == site_id_str:
+                        pipe.delete(key)
+                        removed.append(key)
+                if cursor == 0 or cursor == "0":
+                    break
+
+            pipe.execute()
+            return True, {
+                "newKey": new_key,
+                "removedKeys": removed,
+            }
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def store_site_waf_rules(site_id: int, rule_type: str, payload: Dict) -> tuple:
+        """Store site-scoped WAF rules under key 'waf:{site_id}:{rule_type}'.
+
+        payload must have: id (int), rules (list of {action, priority, rule}).
+        Publishes acl:updates with the Redis key on success.
+        """
+        try:
+            key = f"waf:{site_id}:{rule_type}"
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2
+            ).replace("\\/", "/")
+            rcli.set(key, value)
+            rcli.publish("acl:updates", key)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def store_site_cache(site_id: int, rules_list: List[Dict]) -> tuple:
+        """Store site-scoped cache rules under key 'cache:{site_id}'."""
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                rules_list,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
+            rcli.set(f"cache:{site_id}", value)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def store_site_listening(site_id: int, ports_payload: Any) -> tuple:
+        """Store site-scoped listening ports under key 'listening:{site_id}'.
+
+        ports_payload is { http_ports: [...], https_ports: [...] } (or a legacy list).
+        """
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                ports_payload,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
+            rcli.set(f"listening:{site_id}", value)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def store_site_upstreamservers(site_id: int, upstreams_list: List[Dict]) -> tuple:
+        """Store site-scoped upstream servers under key 'upstreamservers:{site_id}'."""
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                upstreams_list,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
+            rcli.set(f"upstreamservers:{site_id}", value)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def store_site_compress(site_id: int, compress_flags: Dict) -> tuple:
+        """Store site-scoped compress settings under key 'compress:{site_id}'."""
+        try:
+            rcli = RedisClient.get_client()
+            value = json.dumps(
+                compress_flags,
+                ensure_ascii=False,
+                separators=(",", ":")
+            )
+            rcli.set(f"compress:{site_id}", value)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def _scan_keys(rcli, pattern: str) -> list:
+        found = []
+        cursor = "0"
+        while True:
+            cursor, keys = rcli.scan(cursor=cursor, match=pattern, count=100)
+            if keys:
+                found.extend(keys)
+            if cursor == 0 or cursor == "0":
+                break
+        return found
+
+    @staticmethod
+    def delete_site_config(site_id: int, domain: str = "") -> tuple:
+        """Delete all per-site L7 Redis keys for a site.
+
+        Removes:
+          domain:{domain} and any other domain:* mapping to this site_id
+          waf:{site_id}:* (whitelist, blacklist, geo, ...)
+          cache:{site_id}
+          listening:{site_id}
+          upstreamservers:{site_id}
+          compress:{site_id}
+
+        Publishes acl:updates for each deleted WAF key so OpenResty can reload.
+        Returns (True, deleted_keys_list) on success, (False, error_message) on failure.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            site_id_str = str(site_id)
+            keys_to_delete = set()
+
+            domain = (domain or "").strip()
+            if domain:
+                keys_to_delete.add(f"domain:{domain}")
+
+            for key in RedisClient._scan_keys(rcli, "domain:*"):
+                try:
+                    val = rcli.get(key)
+                except Exception:
+                    continue
+                if val is not None and str(val).strip() == site_id_str:
+                    keys_to_delete.add(key)
+
+            for rule_type in RedisClient.WAF_RULE_TYPES:
+                keys_to_delete.add(f"waf:{site_id}:{rule_type}")
+            for key in RedisClient._scan_keys(rcli, f"waf:{site_id}:*"):
+                keys_to_delete.add(key)
+
+            for prefix in ("cache", "listening", "upstreamservers", "compress"):
+                keys_to_delete.add(f"{prefix}:{site_id}")
+
+            deleted = []
+            pipe = rcli.pipeline()
+            for key in sorted(keys_to_delete):
+                pipe.delete(key)
+                deleted.append(key)
+                if isinstance(key, str) and key.startswith(f"waf:{site_id}:"):
+                    rule_type = key.split(":", 2)[-1]
+                    pipe.publish("acl:updates", f"waf_deleted:{site_id}:{rule_type}")
+            if deleted:
+                pipe.execute()
+            return True, deleted
         except Exception as e:
             return False, str(e)
 

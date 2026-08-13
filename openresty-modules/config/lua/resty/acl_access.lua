@@ -81,6 +81,7 @@ local function add_temporaryblacklist(rule_id, ip, url, trigger_rule)
     end
 
     local blocked_at = tostring(ngx.time())
+    local site_id = temp_blacklist.lookup_site_id and temp_blacklist.lookup_site_id() or nil
     local entry = {
         ip = ip,
         url = url,
@@ -90,11 +91,17 @@ local function add_temporaryblacklist(rule_id, ip, url, trigger_rule)
         ttl = DEFAULT_TEMP_BLACKLIST_TTL,
         trigger_rule = trigger_rule or RULE_NAMES[rule_id] or tostring(rule_id),
     }
+    if site_id then
+        entry.site_id = site_id
+    end
     local json_str = cjson.encode(entry)
     if json_str then
         temp_blacklist.on_entry_added(entry)
 
         local item_key = "temporaryblacklist:" .. ip .. ":" .. blocked_at
+        if site_id then
+            item_key = item_key .. ":" .. tostring(site_id)
+        end
         red:set(item_key, json_str)
         red:expire(item_key, DEFAULT_TEMP_BLACKLIST_TTL)
         red:publish("temporaryblacklist:added", json_str)

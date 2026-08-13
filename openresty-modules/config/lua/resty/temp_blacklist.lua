@@ -35,12 +35,26 @@ local function match_uri(uri, url_pat)
     return ok and matched ~= nil
 end
 
-local function rules_match(rules, uri)
+local function entry_applies_to_site(item, site_id)
+    local item_site = tonumber(item.site_id)
+    if not item_site or item_site == 0 then
+        -- L4 / global entries apply to every site.
+        return true
+    end
+    if not site_id then
+        return false
+    end
+    return item_site == tonumber(site_id)
+end
+
+local function rules_match(rules, uri, site_id)
     if type(rules) ~= "table" then
         return false
     end
     for _, item in ipairs(rules) do
-        if type(item) == "table" and match_uri(uri, item.url) then
+        if type(item) == "table"
+            and entry_applies_to_site(item, site_id)
+            and match_uri(uri, item.url) then
             return true
         end
     end
@@ -150,6 +164,41 @@ function _M.on_entry_added(item)
     _M.cache_rules(ip, rules)
 end
 
+function _M.lookup_site_id()
+    if ngx.ctx._temp_bl_site_id ~= nil then
+        local cached = ngx.ctx._temp_bl_site_id
+        if cached == false then
+            return nil
+        end
+        return cached
+    end
+
+    local host = ngx.var.host or ngx.var.http_host or ""
+    host = host:match("^([^:]+)") or host
+    if host == "" then
+        ngx.ctx._temp_bl_site_id = false
+        return nil
+    end
+
+    local red, err = get_redis(500)
+    if not red then
+        ngx.log(ngx.WARN, "temp_blacklist: site_id lookup redis failed: ", tostring(err))
+        ngx.ctx._temp_bl_site_id = false
+        return nil
+    end
+
+    local val = red:get("domain:" .. host)
+    red:set_keepalive(10000, 100)
+    if not val or val == ngx.null or val == "" then
+        ngx.ctx._temp_bl_site_id = false
+        return nil
+    end
+
+    local site_id = tonumber(val)
+    ngx.ctx._temp_bl_site_id = site_id or false
+    return site_id
+end
+
 function _M.check(ip, uri)
     if not ip or ip == "" then
         return false
@@ -160,6 +209,7 @@ function _M.check(ip, uri)
         return false
     end
 
+    local site_id = _M.lookup_site_id()
     local key = cache_key(ip)
     local cached = dict:get(key)
     if cached == NEG_SENTINEL then
@@ -168,7 +218,7 @@ function _M.check(ip, uri)
 
     if cached and cached ~= "" then
         local rules = cjson.decode(cached)
-        return rules_match(rules, uri or "")
+        return rules_match(rules, uri or "", site_id)
     end
 
     local rules = load_rules_from_redis(ip)
@@ -177,7 +227,7 @@ function _M.check(ip, uri)
     end
 
     _M.cache_rules(ip, rules)
-    return rules_match(rules, uri or "")
+    return rules_match(rules, uri or "", site_id)
 end
 
 function _M.start_subscriber(premature)
