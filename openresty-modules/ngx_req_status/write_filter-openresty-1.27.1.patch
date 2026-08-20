@@ -1,0 +1,50 @@
+diff --git a/src/http/ngx_http.c b/src/http/ngx_http.c
+--- a/src/http/ngx_http.c
++++ b/src/http/ngx_http.c
+@@ -73,6 +73,7 @@ ngx_uint_t   ngx_http_max_module;
+ 
+ ngx_http_output_header_filter_pt  ngx_http_top_header_filter;
+ ngx_http_output_body_filter_pt    ngx_http_top_body_filter;
++ngx_http_output_write_filter_pt   ngx_http_top_write_filter;
+ ngx_http_request_body_filter_pt   ngx_http_top_request_body_filter;
+ 
+ 
+diff --git a/src/http/ngx_http.h b/src/http/ngx_http.h
+--- a/src/http/ngx_http.h
++++ b/src/http/ngx_http.h
+@@ -174,6 +174,7 @@ extern ngx_str_t  ngx_http_html_default_types[];
+ 
+ extern ngx_http_output_header_filter_pt  ngx_http_top_header_filter;
+ extern ngx_http_output_body_filter_pt    ngx_http_top_body_filter;
++extern ngx_http_output_write_filter_pt   ngx_http_top_write_filter;
+ extern ngx_http_request_body_filter_pt   ngx_http_top_request_body_filter;
+ 
+ 
+diff --git a/src/http/ngx_http_core_module.h b/src/http/ngx_http_core_module.h
+--- a/src/http/ngx_http_core_module.h
++++ b/src/http/ngx_http_core_module.h
+@@ -515,6 +515,8 @@ ngx_http_cleanup_t *ngx_http_cleanup_add(ngx_http_request_t *r, size_t size);
+ typedef ngx_int_t (*ngx_http_output_header_filter_pt)(ngx_http_request_t *r);
+ typedef ngx_int_t (*ngx_http_output_body_filter_pt)
+     (ngx_http_request_t *r, ngx_chain_t *chain);
++typedef ngx_int_t (*ngx_http_output_write_filter_pt)
++    (ngx_http_request_t *r, off_t bsent);
+ typedef ngx_int_t (*ngx_http_request_body_filter_pt)
+     (ngx_http_request_t *r, ngx_chain_t *chain);
+ 
+diff --git a/src/http/ngx_http_write_filter_module.c b/src/http/ngx_http_write_filter_module.c
+--- a/src/http/ngx_http_write_filter_module.c
++++ b/src/http/ngx_http_write_filter_module.c
+@@ -307,6 +307,10 @@ ngx_http_write_filter(ngx_http_request_t *r, ngx_chain_t *in)
+     if (chain == NGX_CHAIN_ERROR) {
+         c->error = 1;
+         return NGX_ERROR;
+     }
++
++    if (ngx_http_top_write_filter) {
++        ngx_http_top_write_filter(r, sent);
++    }
+ 
+     if (r->limit_rate) {
+ 
+         nsent = c->sent;

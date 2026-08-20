@@ -1,0 +1,1172 @@
+openapi: 3.0.3
+info:
+  title: Athens Metrics API
+  description: |
+    L7/L4 metrics exposed by Athens (OpenResty) on the internal stats server.
+
+    - Base URL: `http://{edge}:9000`
+    - Interval: 60s buckets (except `/req-status`, which is ~10s live bandwidth)
+    - L7 dimension and site metrics are keyed by `site_id` from Redis `domain:{host}`
+    - Unmapped Hosts use `site_id` `0`
+    - Traffic fields are **bytes**; bandwidth fields are **bits/s** over the interval
+  version: 1.2.1
+
+servers:
+  - url: http://{host}:9000
+    description: Athens stats / purge listener
+    variables:
+      host:
+        default: 127.0.0.1
+
+tags:
+  - name: Server
+    description: Edge-wide aggregates (includes NIC)
+  - name: Site
+    description: Per-site L7 aggregates (`site_id`)
+  - name: Dimensions
+    description: Per-site breakdowns (IP, URL, UA, country, ISP, referer, domain)
+  - name: Bandwidth
+    description: Live ngx_req_status bandwidth by Host
+  - name: L4
+    description: Sparta eBPF traffic / attack counters
+
+paths:
+  /server_traffic_stats:
+    get:
+      tags: [Server]
+      summary: Server-wide traffic snapshot
+      description: |
+        Latest (or historical) edge-wide stats including NIC and summed L7 counters.
+        Without `timestamp`, returns the newest history bucket.
+      operationId: getServerTrafficStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+      responses:
+        '200':
+          description: Server traffic stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerTrafficStats'
+              examples:
+                latest:
+                  $ref: '#/components/examples/ServerTrafficStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /server_traffic_stats/timestamps:
+    get:
+      tags: [Server]
+      summary: Available server_traffic_stats timestamps
+      operationId: getServerTrafficStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /site_traffic_stats:
+    get:
+      tags: [Site]
+      summary: Per-site L7 traffic snapshot
+      description: |
+        Same L7 counters as server traffic, partitioned by `site_id`. No NIC fields.
+        Live (no `timestamp`) reads the current 60s window; with `timestamp` reads history.
+      operationId: getSiteTrafficStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Site traffic stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SiteTrafficStatsResponse'
+              examples:
+                allSites:
+                  $ref: '#/components/examples/SiteTrafficStatsAllExample'
+                oneSite:
+                  $ref: '#/components/examples/SiteTrafficStatsFilteredExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /site_traffic_stats/timestamps:
+    get:
+      tags: [Site]
+      summary: Available site_traffic_stats timestamps
+      operationId: getSiteTrafficStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /domain_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site domain (Host) request / traffic stats
+      operationId: getDomainRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Domain request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DomainRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/DomainRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /domain_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available domain_request_stats timestamps
+      operationId: getDomainRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /ip_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site client IP request counts
+      operationId: getIpRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: IP request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IpRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/IpRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /ip_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available ip_request_stats timestamps
+      operationId: getIpRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /url_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site URL path request counts
+      operationId: getUrlRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: URL request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UrlRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/UrlRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /url_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available url_request_stats timestamps
+      operationId: getUrlRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /useragent_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site User-Agent request counts
+      operationId: getUserAgentRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: User-Agent request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserAgentRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/UserAgentRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /useragent_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available useragent_request_stats timestamps
+      operationId: getUserAgentRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /country_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site country request / block counts
+      operationId: getCountryRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Country request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CountryRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/CountryRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /country_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available country_request_stats timestamps
+      operationId: getCountryRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /isp_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site ISP request counts
+      operationId: getIspRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: ISP request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IspRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/IspRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /isp_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available isp_request_stats timestamps
+      operationId: getIspRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /referer_request_stats:
+    get:
+      tags: [Dimensions]
+      summary: Per-site Referer request counts
+      operationId: getRefererRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Referer request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefererRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/RefererRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /referer_request_stats/timestamps:
+    get:
+      tags: [Dimensions]
+      summary: Available referer_request_stats timestamps
+      operationId: getRefererRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /req-status:
+    get:
+      tags: [Bandwidth]
+      summary: Live per-Host bandwidth (ngx_req_status)
+      description: |
+        C-module live view keyed by `$host` (~10s). Not site-scoped; join Host → `site_id`
+        via `/domain_request_stats` or Redis `domain:{host}`.
+      operationId: getReqStatus
+      parameters:
+        - name: domain
+          in: query
+          schema:
+            type: string
+          description: Filter by Host / domain name
+        - name: zone_name
+          in: query
+          schema:
+            type: string
+          description: Filter by zone name (Athens uses `host`)
+        - name: bandwidth
+          in: query
+          schema:
+            type: string
+            enum: [true, false]
+          description: If `true`, only non-zero bandwidth rows
+        - name: active
+          in: query
+          schema:
+            type: string
+            enum: [true, false]
+          description: If `true`, only currently active rows
+      responses:
+        '200':
+          description: Live req-status JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReqStatusResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/ReqStatusExample'
+            text/plain:
+              schema:
+                $ref: '#/components/schemas/ReqStatusResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/ReqStatusExample'
+
+  /l4_attack_stats:
+    get:
+      tags: [L4]
+      summary: L4 traffic / attack stats (Sparta)
+      description: Without `timestamp`, returns the latest available Sparta bucket.
+      operationId: getL4AttackStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+      responses:
+        '200':
+          description: L4 stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/L4AttackStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/L4AttackStatsExample'
+        '400':
+          $ref: '#/components/responses/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /l4_attack_stats/timestamps:
+    get:
+      tags: [L4]
+      summary: Available L4 attack stats timestamps
+      operationId: getL4AttackStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+components:
+  parameters:
+    Timestamp:
+      name: timestamp
+      in: query
+      required: false
+      description: Unix epoch for a 60s history bucket (or Sparta L4 bucket)
+      schema:
+        type: integer
+        format: int64
+        example: 1723900800
+
+    SiteId:
+      name: siteId
+      in: query
+      required: false
+      description: |
+        Filter to one site. Alias `site_id` is also accepted.
+        `0` means unmapped Host.
+      schema:
+        type: integer
+        example: 12
+
+  responses:
+    TimestampList:
+      description: Sorted list of available history timestamps
+      content:
+        application/json:
+          schema:
+            type: array
+            items:
+              type: string
+          examples:
+            sample:
+              summary: Available 60s buckets
+              value: ["1723900680", "1723900740", "1723900800"]
+
+    NotFound:
+      description: No data for the requested timestamp / resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            missing:
+              summary: Timestamp not found
+              value:
+                error: "No data found for timestamp 1723900800"
+
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          examples:
+            badRequest:
+              summary: Invalid query
+              value:
+                error: "Invalid timestamp"
+
+  examples:
+    ServerTrafficStatsExample:
+      summary: Latest server-wide bucket
+      description: Includes NIC + summed L7 counters for the edge.
+      value:
+        timestamp: 1723900800
+        traffic_nic_rx: 1572864000
+        traffic_nic_tx: 3145728000
+        bandwidth_nic_rx: 209715200
+        bandwidth_nic_tx: 419430400
+        traffic_l7_rx: 52428800
+        traffic_l7_tx: 209715200
+        bandwidth_l7_rx: 6990506
+        bandwidth_l7_tx: 27962026
+        request_count: 18420
+        response_count: 17910
+        blocked_request_count: 312
+        ip_count: 4210
+        blocked_ip_count: 48
+        code200: 16200
+        code206: 120
+        code301: 80
+        code302: 40
+        code400: 25
+        code403: 210
+        code404: 390
+        code444: 15
+        code499: 60
+        code500: 8
+        code501: 0
+        code502: 12
+        code503: 4
+        code504: 2
+        code904: 0
+        code929: 18
+        code978: 6
+        get_count: 15100
+        post_count: 2800
+        delete_count: 40
+        put_count: 90
+        head_count: 120
+        patch_count: 30
+        options_count: 200
+        others_count: 40
+        http1_0_count: 15
+        http1_1_count: 9800
+        http2_count: 8400
+        http3_count: 205
+
+    SiteTrafficStatsAllExample:
+      summary: All sites (live or historical)
+      value:
+        timestamp: 1723900800
+        site_traffic_stats:
+          - site_id: 12
+            traffic_l7_rx: 31457280
+            traffic_l7_tx: 125829120
+            bandwidth_l7_rx: 4194304
+            bandwidth_l7_tx: 16777216
+            request_count: 10240
+            response_count: 9980
+            blocked_request_count: 180
+            ip_count: 2100
+            blocked_ip_count: 22
+            code200: 9100
+            code206: 60
+            code301: 40
+            code302: 20
+            code400: 10
+            code403: 120
+            code404: 200
+            code444: 5
+            code499: 30
+            code500: 4
+            code501: 0
+            code502: 6
+            code503: 2
+            code504: 1
+            code904: 0
+            code929: 10
+            code978: 3
+            get_count: 8500
+            post_count: 1500
+            delete_count: 20
+            put_count: 40
+            head_count: 60
+            patch_count: 15
+            options_count: 90
+            others_count: 15
+            http1_0_count: 5
+            http1_1_count: 5200
+            http2_count: 4800
+            http3_count: 240
+          - site_id: 0
+            traffic_l7_rx: 1048576
+            traffic_l7_tx: 2097152
+            bandwidth_l7_rx: 139810
+            bandwidth_l7_tx: 279620
+            request_count: 120
+            response_count: 110
+            blocked_request_count: 40
+            ip_count: 35
+            blocked_ip_count: 12
+            code200: 70
+            code206: 0
+            code301: 0
+            code302: 0
+            code400: 2
+            code403: 30
+            code404: 10
+            code444: 5
+            code499: 3
+            code500: 0
+            code501: 0
+            code502: 0
+            code503: 0
+            code504: 0
+            code904: 0
+            code929: 5
+            code978: 0
+            get_count: 100
+            post_count: 15
+            delete_count: 0
+            put_count: 0
+            head_count: 2
+            patch_count: 0
+            options_count: 3
+            others_count: 0
+            http1_0_count: 0
+            http1_1_count: 90
+            http2_count: 30
+            http3_count: 0
+
+    SiteTrafficStatsFilteredExample:
+      summary: Filtered with ?siteId=12
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        site_traffic_stats:
+          - site_id: 12
+            traffic_l7_rx: 31457280
+            traffic_l7_tx: 125829120
+            bandwidth_l7_rx: 4194304
+            bandwidth_l7_tx: 16777216
+            request_count: 10240
+            response_count: 9980
+            blocked_request_count: 180
+            ip_count: 2100
+            blocked_ip_count: 22
+            code200: 9100
+            code403: 120
+            code404: 200
+            get_count: 8500
+            post_count: 1500
+            http1_1_count: 5200
+            http2_count: 4800
+
+    DomainRequestStatsExample:
+      summary: Domains for one site
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        domain_request_stats:
+          - site_id: 12
+            domain: www.example.com
+            request_count: 8200
+            traffic_l7_rx: 25165824
+            traffic_l7_tx: 104857600
+            bandwidth_l7_rx: 3355443
+            bandwidth_l7_tx: 13981013
+          - site_id: 12
+            domain: api.example.com
+            request_count: 2040
+            traffic_l7_rx: 6291456
+            traffic_l7_tx: 20971520
+            bandwidth_l7_rx: 838860
+            bandwidth_l7_tx: 2796202
+
+    IpRequestStatsExample:
+      summary: Top client IPs
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        ip_request_stats:
+          - site_id: 12
+            ip: 203.0.113.10
+            request_count: 420
+          - site_id: 12
+            ip: 198.51.100.55
+            request_count: 180
+          - site_id: 12
+            ip: 2001:db8::1
+            request_count: 95
+
+    UrlRequestStatsExample:
+      summary: Top URL paths
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        url_request_stats:
+          - site_id: 12
+            url: /
+            request_count: 3100
+          - site_id: 12
+            url: /api/v1/status
+            request_count: 1400
+          - site_id: 12
+            url: /static/app.js
+            request_count: 890
+
+    UserAgentRequestStatsExample:
+      summary: Top User-Agents
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        useragent_request_stats:
+          - site_id: 12
+            user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+            request_count: 5200
+          - site_id: 12
+            user_agent: curl/8.5.0
+            request_count: 310
+          - site_id: 12
+            user_agent: Googlebot/2.1
+            request_count: 140
+
+    CountryRequestStatsExample:
+      summary: Country breakdown with blocks
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        country_request_stats:
+          - site_id: 12
+            country_iso: US
+            request_count: 5400
+            block_count: 8
+          - site_id: 12
+            country_iso: DE
+            request_count: 2100
+            block_count: 3
+          - site_id: 12
+            country_iso: CN
+            request_count: 680
+            block_count: 40
+
+    IspRequestStatsExample:
+      summary: ISP breakdown
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        isp_request_stats:
+          - site_id: 12
+            isp: Cloudflare, Inc.
+            request_count: 1200
+          - site_id: 12
+            isp: Deutsche Telekom AG
+            request_count: 860
+          - site_id: 12
+            isp: Unknown
+            request_count: 220
+
+    RefererRequestStatsExample:
+      summary: Referer breakdown
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        referer_request_stats:
+          - site_id: 12
+            referer: https://www.google.com/
+            request_count: 1800
+          - site_id: 12
+            referer: https://www.example.com/
+            request_count: 940
+          - site_id: 12
+            referer: "-"
+            request_count: 4200
+
+    ReqStatusExample:
+      summary: Live Host bandwidth (~10s)
+      value:
+        timestamp: 1723900860
+        data:
+          - domain: www.example.com
+            zone_name: host
+            bandwidth: 125829120
+            active: 14
+          - domain: api.example.com
+            zone_name: host
+            bandwidth: 31457280
+            active: 3
+
+    L4AttackStatsExample:
+      summary: Sparta L4 counters
+      value:
+        timestamp: 1723900800
+        stats:
+          total: 1500000
+          allow: 1420000
+          block: 80000
+          syn: 420000
+          ack: 900000
+          rst: 12000
+          tcp: 1400000
+          udp: 90000
+          icmp: 5000
+          gre: 2000
+          other: 3000
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          example: "No data found for timestamp 1723900800"
+
+    L7Counters:
+      type: object
+      description: Shared L7 counter fields (bytes / counts over the interval)
+      properties:
+        traffic_l7_rx:
+          type: number
+          description: Request body bytes received
+        traffic_l7_tx:
+          type: number
+          description: Response bytes sent
+        bandwidth_l7_rx:
+          type: number
+          description: Request bits/s over the 60s interval
+        bandwidth_l7_tx:
+          type: number
+          description: Response bits/s over the 60s interval
+        request_count:
+          type: integer
+        response_count:
+          type: integer
+          description: Excludes 408/444/499/5xx/904/929/978
+        blocked_request_count:
+          type: integer
+        ip_count:
+          type: integer
+          description: Unique client IPs in the interval
+        blocked_ip_count:
+          type: integer
+          description: Unique blocked IPs in the interval
+        code200:
+          type: integer
+        code206:
+          type: integer
+        code301:
+          type: integer
+        code302:
+          type: integer
+        code400:
+          type: integer
+        code403:
+          type: integer
+        code404:
+          type: integer
+        code444:
+          type: integer
+        code499:
+          type: integer
+        code500:
+          type: integer
+        code501:
+          type: integer
+        code502:
+          type: integer
+        code503:
+          type: integer
+        code504:
+          type: integer
+        code904:
+          type: integer
+        code929:
+          type: integer
+        code978:
+          type: integer
+        get_count:
+          type: integer
+        post_count:
+          type: integer
+        delete_count:
+          type: integer
+        put_count:
+          type: integer
+        head_count:
+          type: integer
+        patch_count:
+          type: integer
+        options_count:
+          type: integer
+        others_count:
+          type: integer
+        http1_0_count:
+          type: integer
+        http1_1_count:
+          type: integer
+        http2_count:
+          type: integer
+        http3_count:
+          type: integer
+      additionalProperties:
+        type: number
+        description: Extra `codeNNN` counters may appear when seen
+
+    ServerTrafficStats:
+      allOf:
+        - type: object
+          required: [timestamp]
+          properties:
+            timestamp:
+              type: integer
+              format: int64
+            traffic_nic_rx:
+              type: number
+              description: NIC RX bytes (from firewall.config `dev=`)
+            traffic_nic_tx:
+              type: number
+            bandwidth_nic_rx:
+              type: number
+              description: NIC RX bits/s
+            bandwidth_nic_tx:
+              type: number
+        - $ref: '#/components/schemas/L7Counters'
+
+    SiteTrafficItem:
+      allOf:
+        - type: object
+          required: [site_id]
+          properties:
+            site_id:
+              type: integer
+              description: Site id; `0` = unmapped Host
+        - $ref: '#/components/schemas/L7Counters'
+
+    SiteTrafficStatsResponse:
+      type: object
+      required: [timestamp, site_traffic_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+          description: Echoed when filtered with `siteId`
+        site_traffic_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/SiteTrafficItem'
+
+    DomainRequestItem:
+      type: object
+      required: [site_id, domain, request_count]
+      properties:
+        site_id:
+          type: integer
+        domain:
+          type: string
+          description: Request Host
+        request_count:
+          type: integer
+        traffic_l7_rx:
+          type: number
+        traffic_l7_tx:
+          type: number
+        bandwidth_l7_rx:
+          type: number
+        bandwidth_l7_tx:
+          type: number
+
+    DomainRequestStatsResponse:
+      type: object
+      required: [timestamp, domain_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        domain_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/DomainRequestItem'
+
+    IpRequestItem:
+      type: object
+      required: [site_id, ip, request_count]
+      properties:
+        site_id:
+          type: integer
+        ip:
+          type: string
+        request_count:
+          type: integer
+
+    IpRequestStatsResponse:
+      type: object
+      required: [timestamp, ip_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        ip_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/IpRequestItem'
+
+    UrlRequestItem:
+      type: object
+      required: [site_id, url, request_count]
+      properties:
+        site_id:
+          type: integer
+        url:
+          type: string
+        request_count:
+          type: integer
+
+    UrlRequestStatsResponse:
+      type: object
+      required: [timestamp, url_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        url_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/UrlRequestItem'
+
+    UserAgentRequestItem:
+      type: object
+      required: [site_id, user_agent, request_count]
+      properties:
+        site_id:
+          type: integer
+        user_agent:
+          type: string
+        request_count:
+          type: integer
+
+    UserAgentRequestStatsResponse:
+      type: object
+      required: [timestamp, useragent_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        useragent_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserAgentRequestItem'
+
+    CountryRequestItem:
+      type: object
+      required: [site_id, country_iso, request_count]
+      properties:
+        site_id:
+          type: integer
+        country_iso:
+          type: string
+        request_count:
+          type: integer
+        block_count:
+          type: integer
+          description: Unique blocked IPs attributed to this country (per site)
+
+    CountryRequestStatsResponse:
+      type: object
+      required: [timestamp, country_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        country_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/CountryRequestItem'
+
+    IspRequestItem:
+      type: object
+      required: [site_id, isp, request_count]
+      properties:
+        site_id:
+          type: integer
+        isp:
+          type: string
+        request_count:
+          type: integer
+
+    IspRequestStatsResponse:
+      type: object
+      required: [timestamp, isp_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        isp_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/IspRequestItem'
+
+    RefererRequestItem:
+      type: object
+      required: [site_id, referer, request_count]
+      properties:
+        site_id:
+          type: integer
+        referer:
+          type: string
+        request_count:
+          type: integer
+
+    RefererRequestStatsResponse:
+      type: object
+      required: [timestamp, referer_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        referer_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/RefererRequestItem'
+
+    ReqStatusItem:
+      type: object
+      properties:
+        domain:
+          type: string
+          description: Host key (`$host`)
+        zone_name:
+          type: string
+          example: host
+        bandwidth:
+          oneOf:
+            - type: integer
+            - type: string
+          description: Live bandwidth in bits/s (~10s window)
+        active:
+          type: integer
+          description: In-flight requests for this Host
+
+    ReqStatusResponse:
+      type: object
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReqStatusItem'
+
+    L4Stats:
+      type: object
+      properties:
+        total:
+          type: integer
+        allow:
+          type: integer
+        block:
+          type: integer
+        syn:
+          type: integer
+        ack:
+          type: integer
+        rst:
+          type: integer
+        tcp:
+          type: integer
+        udp:
+          type: integer
+        icmp:
+          type: integer
+        gre:
+          type: integer
+        other:
+          type: integer
+
+    L4AttackStatsResponse:
+      type: object
+      required: [timestamp, stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        stats:
+          $ref: '#/components/schemas/L4Stats'
