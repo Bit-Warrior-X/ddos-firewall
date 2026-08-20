@@ -639,6 +639,7 @@ class RedisClient:
 
             pipe = rcli.pipeline()
             pipe.set(new_key, site_id_str)
+            pipe.set(f"site:{site_id}:domain", new_domain)
 
             if old_key and old_key != new_key:
                 pipe.delete(old_key)
@@ -756,6 +757,70 @@ class RedisClient:
             return False, str(e)
 
     @staticmethod
+    def store_site_ssl(site_id: int, domain: str, ssl_payload: Dict) -> tuple:
+        """Store site SSL material under ssl:{site_id} for OpenResty SNI.
+
+        ssl_payload fields: ssl_type, ssl_cert (PEM), ssl_cert_key (PEM).
+        Also stores site:{site_id}:domain for reverse lookup.
+        Publishes ssl:updates with ssl:{site_id} so workers can invalidate caches.
+        """
+        try:
+            if not isinstance(ssl_payload, dict):
+                return False, "ssl payload must be object"
+
+            ssl_type = str(ssl_payload.get("ssl_type") or ssl_payload.get("sslType") or "").strip()
+            ssl_cert = ssl_payload.get("ssl_cert") or ssl_payload.get("sslCert") or ""
+            ssl_cert_key = (
+                ssl_payload.get("ssl_cert_key")
+                or ssl_payload.get("sslCertKey")
+                or ssl_payload.get("ssl_key")
+                or ""
+            )
+            if not isinstance(ssl_cert, str):
+                ssl_cert = str(ssl_cert or "")
+            if not isinstance(ssl_cert_key, str):
+                ssl_cert_key = str(ssl_cert_key or "")
+
+            ssl_cert = ssl_cert.replace("\\n", "\n").strip()
+            ssl_cert_key = ssl_cert_key.replace("\\n", "\n").strip()
+
+            value_obj = {
+                "site_id": int(site_id),
+                "domain": (domain or "").strip(),
+                "ssl_type": ssl_type,
+                "ssl_cert": ssl_cert,
+                "ssl_cert_key": ssl_cert_key,
+            }
+            rcli = RedisClient.get_client()
+            key = f"ssl:{site_id}"
+            value = json.dumps(value_obj, ensure_ascii=False, separators=(",", ":"))
+            pipe = rcli.pipeline()
+            pipe.set(key, value)
+            if domain:
+                pipe.set(f"site:{site_id}:domain", str(domain).strip())
+            pipe.publish("ssl:updates", key)
+            pipe.execute()
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def store_site_domain(site_id: int, domain: str) -> tuple:
+        """Store site:{site_id}:domain and domain:{domain} -> site_id."""
+        try:
+            domain = (domain or "").strip()
+            if not domain:
+                return False, "domain is empty"
+            rcli = RedisClient.get_client()
+            pipe = rcli.pipeline()
+            pipe.set(f"domain:{domain}", str(site_id))
+            pipe.set(f"site:{site_id}:domain", domain)
+            pipe.execute()
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
     def _scan_keys(rcli, pattern: str) -> list:
         found = []
         cursor = "0"
@@ -804,8 +869,9 @@ class RedisClient:
             for key in RedisClient._scan_keys(rcli, f"waf:{site_id}:*"):
                 keys_to_delete.add(key)
 
-            for prefix in ("cache", "listening", "upstreamservers", "compress"):
+            for prefix in ("cache", "listening", "upstreamservers", "compress", "ssl"):
                 keys_to_delete.add(f"{prefix}:{site_id}")
+            keys_to_delete.add(f"site:{site_id}:domain")
 
             deleted = []
             pipe = rcli.pipeline()
@@ -815,6 +881,8 @@ class RedisClient:
                 if isinstance(key, str) and key.startswith(f"waf:{site_id}:"):
                     rule_type = key.split(":", 2)[-1]
                     pipe.publish("acl:updates", f"waf_deleted:{site_id}:{rule_type}")
+                elif isinstance(key, str) and key.startswith("ssl:"):
+                    pipe.publish("ssl:updates", f"ssl_deleted:{site_id}")
             if deleted:
                 pipe.execute()
             return True, deleted

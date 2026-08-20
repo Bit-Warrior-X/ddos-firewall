@@ -523,6 +523,8 @@ ngx_http_cleanup_t *ngx_http_cleanup_add(ngx_http_request_t *r, size_t size);
 typedef ngx_int_t (*ngx_http_output_header_filter_pt)(ngx_http_request_t *r);
 typedef ngx_int_t (*ngx_http_output_body_filter_pt)
     (ngx_http_request_t *r, ngx_chain_t *chain);
+typedef ngx_int_t (*ngx_http_output_write_filter_pt)
+    (ngx_http_request_t *r, off_t bsent);
 typedef ngx_int_t (*ngx_http_request_body_filter_pt)
     (ngx_http_request_t *r, ngx_chain_t *chain);
 

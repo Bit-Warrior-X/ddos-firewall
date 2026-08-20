@@ -5,8 +5,10 @@ local temp_blacklist = require "resty.temp_blacklist"
 local redis = require "resty.redis"
 local cjson = require "cjson.safe"
 local upstream_redis = require "resty.upstream_redis"
+local site_resolver = require "resty.site_resolver"
+local acl_manager = require "resty.acl_manager"
 
-local _M = { _VERSION = "1.1.0" }
+local _M = { _VERSION = "2.0.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
 local DEFAULT_TEMP_BLACKLIST_TTL = 180
@@ -26,9 +28,10 @@ local RULE_NAMES = {
     [3] = "geo",
     [4] = "antiheader",
     [5] = "intervalfreqlimit",
-    [6] = "secondaryfreqlimit",
+    [6] = "secondfreqlimit",
     [7] = "responsefreq",
     [8] = "useragent",
+    [9] = "anticc",
 }
 
 local function stats_interval()
@@ -36,15 +39,22 @@ local function stats_interval()
     return (stats_cache and stats_cache:get("STATS_INTERVAL")) or 60
 end
 
-local function mark_blocked_ip(stats_cache, interval, country)
+local function mark_blocked_ip(stats_cache, interval, country, site_id)
+    local sid = site_id and tostring(site_id) or "0"
     stats_cache:incr("blocked_request_count", 1, 0)
+    stats_cache:incr("s:" .. sid .. ":blocked_request_count", 1, 0)
 
     local ip = ngx.var.remote_addr
     local blocked_ip_key = "blocked_ip:" .. ip
     if not stats_cache:get(blocked_ip_key) then
         stats_cache:set(blocked_ip_key, true, interval)
         stats_cache:incr("blocked_ip_count", 1, 0)
-        stats_cache:incr("block_country_req_count:" .. country, 1, 0)
+    end
+    local site_blocked_ip_key = "s:" .. sid .. ":blocked_ip:" .. ip
+    if not stats_cache:get(site_blocked_ip_key) then
+        stats_cache:set(site_blocked_ip_key, true, interval)
+        stats_cache:incr("s:" .. sid .. ":blocked_ip_count", 1, 0)
+        stats_cache:incr("block_country_req_count:" .. sid .. ":" .. country, 1, 0)
     end
 end
 
@@ -81,7 +91,7 @@ local function add_temporaryblacklist(rule_id, ip, url, trigger_rule)
     end
 
     local blocked_at = tostring(ngx.time())
-    local site_id = temp_blacklist.lookup_site_id and temp_blacklist.lookup_site_id() or nil
+    local site_id = site_resolver.lookup_site_id()
     local entry = {
         ip = ip,
         url = url,
@@ -117,11 +127,18 @@ function _M.run()
     ngx.var.acl_ret = "0"
     ngx.var.acl_rule_id = "-"
 
+    -- Resolve site early; used by temp blacklist, upstream, ACL, and stats.
+    local site_id = site_resolver.lookup_site_id()
+    ngx.var.site_id = site_id and tostring(site_id) or "0"
+
     if check_temporaryblacklist() then
         local country = geo_lookup.country()
-        mark_blocked_ip(stats_cache, interval, country)
+        mark_blocked_ip(stats_cache, interval, country, site_id)
         return ngx.exit(444)
     end
+
+    -- Merge Host-scoped site WAF rules into ngx_acl when Redis config changes.
+    pcall(acl_manager.ensure_applied)
 
     local function mark_block(rule_id, ret, action)
         local country = geo_lookup.country()
@@ -129,7 +146,7 @@ function _M.run()
         ngx.var.acl_rule_id = RULE_NAMES[rule_id] or tostring(rule_id)
         ngx.var.acl_ret = action
 
-        mark_blocked_ip(stats_cache, interval, country)
+        mark_blocked_ip(stats_cache, interval, country, site_id)
 
         if action == "drop_block" then
             add_temporaryblacklist(
@@ -170,7 +187,7 @@ function _M.run()
         end
     end
 
-    for rule_id = 1, 8 do
+    for rule_id = 1, 9 do
         local ret = handle_acl.process_acl_id(rule_id)
         local res = handle_result(rule_id, ret)
         if res ~= "no_rule" then
@@ -179,7 +196,7 @@ function _M.run()
     end
 
     if upstream_redis.get_backend then
-        ngx.var.backend = upstream_redis.get_backend()
+        ngx.var.backend = upstream_redis.get_backend(site_id)
     else
         ngx.var.backend = "http://127.0.0.1:9000"
     end

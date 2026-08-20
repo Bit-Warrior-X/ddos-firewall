@@ -195,6 +195,10 @@ jobs:
             echo "error: nginx missing ngx_slice add-module" >&2
             exit 1
           fi
+          if ! echo "${nginx_v}" | grep -q 'ngx_req_status'; then
+            echo "error: nginx missing ngx_req_status add-module" >&2
+            exit 1
+          fi
           if ! echo "${nginx_v}" | grep -q 'http_slice_module'; then
             echo "error: nginx missing --with-http_slice_module" >&2
             exit 1
@@ -203,7 +207,7 @@ jobs:
             echo "error: nginx binary missing redis_cache_handler (cache purge module)" >&2
             exit 1
           fi
-          echo "nginx modules OK (cache purge + slice)"
+          echo "nginx modules OK (cache purge + slice + req_status)"
 
           # Confirm test_types_hash_bucket patch landed in the built nginx sources
           # (nginx -t of a stub conf is unreliable here: compile-time log paths +

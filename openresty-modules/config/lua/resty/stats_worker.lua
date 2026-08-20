@@ -66,15 +66,120 @@ local function collect_dimension_items(stats_cache, pattern, build_item)
     local items = {}
     local keys = stats_cache:get_keys(0)
     for _, key in ipairs(keys) do
-        local captured = key:match(pattern)
+        local site_id, captured = key:match(pattern)
         if captured then
             local count = stats_cache:get(key) or 0
             if count and count > 0 then
-                table.insert(items, build_item(captured, count, stats_cache))
+                table.insert(items, build_item(site_id, captured, count, stats_cache))
             end
             stats_cache:delete(key)
         end
     end
+    return items
+end
+
+local function collect_domain_items(stats_cache, interval)
+    local domains = {}
+    local keys = stats_cache:get_keys(0)
+    for _, key in ipairs(keys) do
+        local kind, sid, domain = "req_count", key:match("^domain_req_count:(%d+):(.+)$")
+        if not domain then
+            kind, sid, domain = "rx", key:match("^domain_rx:(%d+):(.+)$")
+        end
+        if not domain then
+            kind, sid, domain = "tx", key:match("^domain_tx:(%d+):(.+)$")
+        end
+        if domain then
+            local row_key = sid .. "\0" .. domain
+            local row = domains[row_key]
+            if not row then
+                row = {
+                    site_id = tonumber(sid) or 0,
+                    domain = domain,
+                    request_count = 0,
+                    traffic_l7_rx = 0,
+                    traffic_l7_tx = 0,
+                }
+                domains[row_key] = row
+            end
+            local val = tonumber(stats_cache:get(key)) or 0
+            if kind == "req_count" then
+                row.request_count = val
+            elseif kind == "rx" then
+                row.traffic_l7_rx = val
+            else
+                row.traffic_l7_tx = val
+            end
+            stats_cache:delete(key)
+        end
+    end
+
+    local items = {}
+    for _, row in pairs(domains) do
+        if row.request_count > 0 or row.traffic_l7_rx > 0 or row.traffic_l7_tx > 0 then
+            row.bandwidth_l7_rx = row.traffic_l7_rx * 8 / interval
+            row.bandwidth_l7_tx = row.traffic_l7_tx * 8 / interval
+            table.insert(items, row)
+        end
+    end
+    return items
+end
+
+local function empty_site_row(site_id)
+    return {
+        site_id = tonumber(site_id) or 0,
+        traffic_l7_rx = 0,
+        traffic_l7_tx = 0,
+        bandwidth_l7_rx = 0,
+        bandwidth_l7_tx = 0,
+        request_count = 0,
+        response_count = 0,
+        blocked_request_count = 0,
+        ip_count = 0,
+        blocked_ip_count = 0,
+        code200 = 0, code206 = 0, code301 = 0, code302 = 0,
+        code400 = 0, code403 = 0, code404 = 0, code444 = 0, code499 = 0,
+        code500 = 0, code501 = 0, code502 = 0, code503 = 0, code504 = 0,
+        code904 = 0, code929 = 0, code978 = 0,
+        get_count = 0, post_count = 0, delete_count = 0, put_count = 0,
+        head_count = 0, patch_count = 0, options_count = 0, others_count = 0,
+        http1_0_count = 0, http1_1_count = 0, http2_count = 0, http3_count = 0,
+    }
+end
+
+function _M.empty_site_row(site_id)
+    return empty_site_row(site_id)
+end
+
+local function collect_site_traffic_items(stats_cache, interval)
+    local sites = {}
+    local keys = stats_cache:get_keys(0)
+    for _, key in ipairs(keys) do
+        local sid, rest = key:match("^s:(%d+):(.+)$")
+        if sid and rest and not rest:find("^seen_ip:") and not rest:find("^blocked_ip:") then
+            local row = sites[sid]
+            if not row then
+                row = empty_site_row(sid)
+                sites[sid] = row
+            end
+            local val = tonumber(stats_cache:get(key)) or 0
+            -- Keep known L7 fields; also accept any HTTP status code counter.
+            if row[rest] ~= nil or rest:match("^code%d+$") then
+                row[rest] = val
+            end
+            stats_cache:delete(key)
+        end
+    end
+
+    local items = {}
+    for _, row in pairs(sites) do
+        row.bandwidth_l7_rx = (tonumber(row.traffic_l7_rx) or 0) * 8 / interval
+        row.bandwidth_l7_tx = (tonumber(row.traffic_l7_tx) or 0) * 8 / interval
+        table.insert(items, row)
+    end
+    table.sort(items, function(a, b)
+        return a.site_id < b.site_id
+    end)
     return items
 end
 
@@ -170,24 +275,34 @@ local function collect_stats(premature)
         http3_count = stats_cache:get("http3_count") or 0,
     }
 
-    local ip_items = collect_dimension_items(stats_cache, "^ip_req_count:(.+)$", function(ip, count)
-        return { ip = ip, request_count = count }
+    local ip_items = collect_dimension_items(stats_cache, "^ip_req_count:(%d+):(.+)$", function(site_id, ip, count)
+        return { site_id = tonumber(site_id) or 0, ip = ip, request_count = count }
     end)
-    local url_items = collect_dimension_items(stats_cache, "^url_req_count:(.+)$", function(url_path, count)
-        return { url = url_path, request_count = count }
+    local url_items = collect_dimension_items(stats_cache, "^url_req_count:(%d+):(.+)$", function(site_id, url_path, count)
+        return { site_id = tonumber(site_id) or 0, url = url_path, request_count = count }
     end)
-    local ua_items = collect_dimension_items(stats_cache, "^ua_req_count:(.+)$", function(ua, count)
-        return { user_agent = ua, request_count = count }
+    local ua_items = collect_dimension_items(stats_cache, "^ua_req_count:(%d+):(.+)$", function(site_id, ua, count)
+        return { site_id = tonumber(site_id) or 0, user_agent = ua, request_count = count }
     end)
-    local country_items = collect_dimension_items(stats_cache, "^country_req_count:(.+)$", function(country_iso, count)
-        return { country_iso = country_iso, request_count = count }
+    local country_items = collect_dimension_items(stats_cache, "^country_req_count:(%d+):(.+)$", function(site_id, country_iso, count, cache)
+        local block_key = "block_country_req_count:" .. site_id .. ":" .. country_iso
+        local block_count = tonumber(cache:get(block_key)) or 0
+        cache:delete(block_key)
+        return {
+            site_id = tonumber(site_id) or 0,
+            country_iso = country_iso,
+            request_count = count,
+            block_count = block_count,
+        }
     end)
-    local isp_items = collect_dimension_items(stats_cache, "^isp_req_count:(.+)$", function(isp_name, count)
-        return { isp = isp_name, request_count = count }
+    local isp_items = collect_dimension_items(stats_cache, "^isp_req_count:(%d+):(.+)$", function(site_id, isp_name, count)
+        return { site_id = tonumber(site_id) or 0, isp = isp_name, request_count = count }
     end)
-    local referer_items = collect_dimension_items(stats_cache, "^referer_req_count:(.+)$", function(referer, count)
-        return { referer = referer, request_count = count }
+    local referer_items = collect_dimension_items(stats_cache, "^referer_req_count:(%d+):(.+)$", function(site_id, referer, count)
+        return { site_id = tonumber(site_id) or 0, referer = referer, request_count = count }
     end)
+    local domain_items = collect_domain_items(stats_cache, interval)
+    local site_items = collect_site_traffic_items(stats_cache, interval)
 
     local ok_j, cjson = pcall(require, "cjson.safe")
     if ok_j and cjson and cjson.encode then
@@ -201,6 +316,8 @@ local function collect_stats(premature)
             { shm = ngx.shared.country_stats_history, key = "country_request_stats", items = country_items },
             { shm = ngx.shared.isp_stats_history, key = "isp_request_stats", items = isp_items },
             { shm = ngx.shared.referer_stats_history, key = "referer_request_stats", items = referer_items },
+            { shm = ngx.shared.domain_stats_history, key = "domain_request_stats", items = domain_items },
+            { shm = ngx.shared.site_stats_history, key = "site_traffic_stats", items = site_items },
         }
 
         for _, payload in ipairs(history_payloads) do

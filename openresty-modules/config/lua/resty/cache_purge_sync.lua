@@ -104,27 +104,47 @@ local function get_max_cache_ttl()
         return 600
     end
 
-    local raw = red:get("cacherules")
-    red:select(REDIS_DB)
-    release_redis(red)
-
-    if not raw or raw == ngx.null or raw == "" then
-        return 600
-    end
-
-    local rules = get_cjson().decode(raw)
-    if type(rules) ~= "table" then
-        return 600
-    end
-
     local max_ttl = 0
-    for _, rule in ipairs(rules) do
-        local t = tonumber(rule.caching_time) or 0
-        if t > max_ttl then
-            max_ttl = t
+    local cursor = "0"
+    repeat
+        local res = red:scan(cursor, "MATCH", "cache:*", "COUNT", 50)
+        if not res then
+            break
+        end
+        cursor = res[1]
+        for _, key in ipairs(res[2] or {}) do
+            local site_raw = red:get(key)
+            if site_raw and site_raw ~= ngx.null and site_raw ~= "" then
+                local site_rules = get_cjson().decode(site_raw)
+                if type(site_rules) == "table" then
+                    for _, rule in ipairs(site_rules) do
+                        local t = tonumber(rule.caching_time) or 0
+                        if t > max_ttl then
+                            max_ttl = t
+                        end
+                    end
+                end
+            end
+        end
+    until cursor == "0"
+
+    if max_ttl <= 0 then
+        local raw = red:get("cacherules")
+        if raw and raw ~= ngx.null and raw ~= "" then
+            local rules = get_cjson().decode(raw)
+            if type(rules) == "table" then
+                for _, rule in ipairs(rules) do
+                    local t = tonumber(rule.caching_time) or 0
+                    if t > max_ttl then
+                        max_ttl = t
+                    end
+                end
+            end
         end
     end
 
+    red:select(REDIS_DB)
+    release_redis(red)
     return max_ttl > 0 and max_ttl or 600
 end
 

@@ -995,8 +995,8 @@ def _normalize_listening_protocol(protocol: str) -> str:
 
 def _listen_line(port: int, protocol: str) -> str:
     if protocol == "HTTPS":
-        return f"listen {port} ssl;"
-    return f"listen {port};"
+        return f"listen {port} ssl reuseport;"
+    return f"listen {port} reuseport;"
 
 
 def _build_default_ports_conf(ports: list) -> str:
@@ -1013,7 +1013,11 @@ def _parse_default_ports_conf(content: str) -> list:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        match = re.match(r"listen\s+(\d+)(?:\s+ssl)?\s*;", line, re.IGNORECASE)
+        match = re.match(
+            r"listen\s+(\d+)(?:\s+(?:ssl|http2|reuseport|deferred|fastopen=\d+|default_server))*\s*;",
+            line,
+            re.IGNORECASE,
+        )
         if not match:
             continue
         port = int(match.group(1))
@@ -1719,7 +1723,7 @@ def l7_update_site():
         "server_id": 1033,
         "site_id": 55,
         "domain": "www.example.com",
-        "ssl": { ... },                  # accepted, not stored yet
+        "ssl": { ssl_type, ssl_cert, ssl_cert_key },
         "waf_rules": {
           "waf_rule_id": 42,
           "waf_whitelist": [...],
@@ -1741,6 +1745,8 @@ def l7_update_site():
 
     Redis keys written:
       domain:{domain}              -> site_id
+      site:{site_id}:domain        -> domain
+      ssl:{site_id}                -> { ssl_type, ssl_cert, ssl_cert_key, domain }
       waf:{site_id}:whitelist|blacklist|geo|anticc|antiheader|
            intervalfreqlimit|secondfreqlimit|responsefreq|useragent
       cache:{site_id}
@@ -1771,6 +1777,10 @@ def l7_update_site():
     domain = str(_pick_field(data, "domain", default="") or "").strip()
     if not domain:
         return jsonify({"status": "error", "message": "Missing 'domain'."}), 400
+
+    ssl_in = data.get("ssl")
+    if ssl_in is not None and not isinstance(ssl_in, dict):
+        return jsonify({"status": "error", "message": "Invalid 'ssl' (must be object)."}), 400
 
     waf_rules = data.get("waf_rules")
     if waf_rules is None:
@@ -1817,13 +1827,27 @@ def l7_update_site():
     redis_compress = _normalize_compress_flags(compress_in)
 
     # --- Store ---
-    ok, err = RedisClient.store_domain_mapping(domain, site_id)
+    ok, err = RedisClient.store_site_domain(site_id, domain)
     if not ok:
         return jsonify({
             "status": "error",
             "message": "Failed to write domain mapping to Redis.",
             "details": err or "Unknown error",
         }), 500
+
+    ssl_stored = False
+    if isinstance(ssl_in, dict) and (
+        (ssl_in.get("ssl_cert") or ssl_in.get("sslCert"))
+        and (ssl_in.get("ssl_cert_key") or ssl_in.get("sslCertKey") or ssl_in.get("ssl_key"))
+    ):
+        ok, err = RedisClient.store_site_ssl(site_id, domain, ssl_in)
+        if not ok:
+            return jsonify({
+                "status": "error",
+                "message": "Failed to write SSL certificate to Redis.",
+                "details": err or "Unknown error",
+            }), 500
+        ssl_stored = True
 
     waf_counts = {}
     for rule_type, rules in waf_payloads.items():
@@ -1878,6 +1902,7 @@ def l7_update_site():
         "server_id": server_id,
         "site_id": site_id,
         "domain": domain,
+        "sslStored": ssl_stored,
         "wafRulesCount": waf_counts,
         "cacheRulesCount": len(redis_cache),
         "httpPortsCount": len(redis_listening.get("http_ports", [])),
@@ -1899,6 +1924,8 @@ def l7_delete_site():
 
     Deletes:
       domain:{domain}
+      site:{site_id}:domain
+      ssl:{site_id}
       waf:{site_id}:* (whitelist, blacklist, geo, anticc, antiheader, ...)
       cache:{site_id}
       listening:{site_id}

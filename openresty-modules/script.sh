@@ -67,6 +67,24 @@ apply_nginx_patches() {
     patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward \
       < "${SCRIPT_DIR}/ngx_gzip/ngx_http_test_types_hash_bucket-1.27.1.patch" || true
   fi
+
+  # ngx_req_status needs ngx_http_top_write_filter to count bytes sent per domain.
+  local req_status_patch=""
+  if [[ -f "${SCRIPT_DIR}/ngx_req_status/write_filter-openresty-1.27.1.patch" ]]; then
+    req_status_patch="${SCRIPT_DIR}/ngx_req_status/write_filter-openresty-1.27.1.patch"
+  elif [[ -f "${SCRIPT_DIR}/ngx_req_status/write_filter-openresty-1.21.4.2.patch" ]]; then
+    req_status_patch="${SCRIPT_DIR}/ngx_req_status/write_filter-openresty-1.21.4.2.patch"
+  fi
+  if [[ -n "${req_status_patch}" ]]; then
+    patch -p1 -d "${NGINX_BUNDLE_DIR}" -N --forward < "${req_status_patch}" || true
+    if ! grep -q 'ngx_http_top_write_filter' \
+         "${NGINX_BUNDLE_DIR}/src/http/ngx_http.c" \
+      || ! grep -q 'ngx_http_top_write_filter' \
+         "${NGINX_BUNDLE_DIR}/src/http/ngx_http_write_filter_module.c"; then
+      echo "error: ngx_req_status write_filter patch did not apply (${req_status_patch})" >&2
+      exit 1
+    fi
+  fi
 }
 
 build_redis_nginx_adapter() {
@@ -122,6 +140,7 @@ cd "${OPENRESTY_SRC_DIR}"
     --add-module=../ngx_lic/ \
     --add-module=../ngx_slice/ \
     --add-module=../ngx_purge/ \
+    --add-module=../ngx_req_status/ \
     --with-pcre-jit \
     --with-ipv6 \
     --with-http_ssl_module \

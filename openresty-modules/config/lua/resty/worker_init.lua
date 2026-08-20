@@ -48,6 +48,16 @@ function _M.run()
         cache_manager.start_refresh()
     end
 
+    local ok_cmp, compress_manager = pcall(require, "resty.compress_manager")
+    if ok_cmp and compress_manager and compress_manager.start_refresh then
+        compress_manager.start_refresh()
+    end
+
+    local ok_lp, listening_manager = pcall(require, "resty.listening_manager")
+    if ok_lp and listening_manager and listening_manager.start_refresh then
+        listening_manager.start_refresh()
+    end
+
     local ok_mm, maxminddb = pcall(require, "resty.maxminddb")
     if ok_mm and maxminddb and maxminddb.init then
         local ok_geo, err_geo = maxminddb.init(GEO_DB_PATH)
@@ -59,6 +69,11 @@ function _M.run()
     local ok_tb, temp_blacklist = pcall(require, "resty.temp_blacklist")
     if ok_tb and temp_blacklist and temp_blacklist.start then
         temp_blacklist.start()
+    end
+
+    local ok_ssl, ssl_cert = pcall(require, "resty.ssl_cert")
+    if ok_ssl and ssl_cert and ssl_cert.start then
+        ssl_cert.start()
     end
 
     local ok_cps, cache_purge_sync = pcall(require, "resty.cache_purge_sync")

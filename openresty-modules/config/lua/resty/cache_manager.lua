@@ -1,4 +1,4 @@
--- Dynamic cache rules from Redis key "cacherules".
+-- Dynamic cache rules from Redis key cache:{site_id}.
 -- Rule fields: rule_name, rule_type (url|file), caching_time, url, file_types,
 -- priority, cache_slice (megabytes, float e.g. 10.21 = 10.21 MB), without_parameter (yes|no), cache_mode (origin|force)
 --
@@ -10,16 +10,15 @@
 local redis = require "resty.redis"
 local cjson = require "cjson.safe"
 local handle_slice = require "resty.handle_slice"
+local site_resolver = require "resty.site_resolver"
 local ngx = ngx
 
-local _M = { _VERSION = "1.1.0" }
+local _M = { _VERSION = "2.0.0" }
 
--- Per-worker L1 cache for decoded rules (invalidated by shm "updated" timestamp).
-local l1_rules
-local l1_version = 0
+-- Per-worker L1 cache: { [site_id] = { rules=..., version=... } }
+local l1 = {}
 
 local REDIS_SOCK  = "unix:/tmp/redis.sock"
-local REDIS_KEY   = "cacherules"
 local SHM_NAME    = "cache_rules"
 local REFRESH_SEC = 5
 local SLICE_MB_BYTES = 1024 * 1024
@@ -110,13 +109,14 @@ local function normalize_rule(item)
     }
 end
 
-local function load_from_redis()
+local function load_from_redis(site_id)
     local red, err = get_redis()
     if not red then
         return nil, err
     end
 
-    local raw = red:get(REDIS_KEY)
+    local key = "cache:" .. tostring(site_id)
+    local raw = red:get(key)
     red:set_keepalive(10000, 100)
 
     if not raw or raw == ngx.null or raw == "" then
@@ -125,7 +125,7 @@ local function load_from_redis()
 
     local list, jerr = cjson.decode(raw)
     if type(list) ~= "table" then
-        log_err("invalid JSON for " .. REDIS_KEY .. ": " .. tostring(jerr))
+        log_err("invalid JSON for " .. key .. ": " .. tostring(jerr))
         return {}
     end
 
@@ -153,64 +153,69 @@ local function refresh_shm()
         return
     end
 
-    local rules, err = load_from_redis()
-    if err then
-        ngx.log(ngx.WARN, "cache_manager: load failed: ", tostring(err))
-        return
+    local site_domains = site_resolver.list_site_domains()
+    local now = ngx.time()
+    local site_ids = {}
+
+    for site_id, _ in pairs(site_domains) do
+        local rules, err = load_from_redis(site_id)
+        if err then
+            ngx.log(ngx.WARN, "cache_manager: load failed for site ", site_id, ": ", tostring(err))
+        else
+            local sid = tostring(site_id)
+            dict:set("rules:" .. sid, cjson.encode(rules), 0)
+            dict:set("updated:" .. sid, now, 0)
+            l1[sid] = { rules = rules, version = now }
+            site_ids[#site_ids + 1] = sid
+            log_debug("loaded " .. tostring(#rules) .. " cache rule(s) for site " .. sid)
+        end
     end
 
-    local now = ngx.time()
-    dict:set("rules", cjson.encode(rules), 0)
+    dict:set("sites", table.concat(site_ids, ","), 0)
     dict:set("updated", now, 0)
-    l1_rules = rules
-    l1_version = now
-    log_debug("loaded " .. tostring(#rules) .. " cache rule(s) into shm")
 end
 
-local function get_rules()
-    local dict = ngx.shared[SHM_NAME]
-    local now = ngx.time()
-    local shm_version = dict and (dict:get("updated") or 0) or 0
-
-    if l1_rules and l1_version == shm_version and shm_version > 0 then
-        return l1_rules
+local function get_rules(site_id)
+    site_id = site_id or site_resolver.lookup_site_id()
+    if not site_id then
+        return {}
     end
 
-    local rules
-    local need_reload = true
+    local sid = tostring(site_id)
+    local dict = ngx.shared[SHM_NAME]
+    local shm_version = dict and (dict:get("updated:" .. sid) or 0) or 0
+    local entry = l1[sid]
 
-    if dict and now - shm_version < REFRESH_SEC then
-        local raw = dict:get("rules")
+    if entry and entry.version == shm_version and shm_version > 0 then
+        return entry.rules
+    end
+
+    if dict then
+        local raw = dict:get("rules:" .. sid)
         if raw and raw ~= "" then
             local decoded = cjson.decode(raw)
             if type(decoded) == "table" then
-                rules = decoded
-                need_reload = false
+                l1[sid] = { rules = decoded, version = shm_version }
+                return decoded
             end
         end
     end
 
-    if need_reload then
-        local loaded, err = load_from_redis()
-        if loaded then
-            rules = loaded
-            if dict then
-                dict:set("rules", cjson.encode(rules), 0)
-                dict:set("updated", now, 0)
-                shm_version = now
-            end
-            log_debug("cache rules loaded from redis (" .. #rules .. ")")
-        elseif err then
-            log_err("redis load failed: " .. tostring(err))
-            rules = l1_rules or {}
-        else
-            rules = {}
+    local loaded, err = load_from_redis(site_id)
+    if loaded then
+        local now = ngx.time()
+        if dict then
+            dict:set("rules:" .. sid, cjson.encode(loaded), 0)
+            dict:set("updated:" .. sid, now, 0)
         end
+        l1[sid] = { rules = loaded, version = now }
+        return loaded
     end
 
-    l1_rules = rules or {}
-    l1_version = shm_version
-    return l1_rules
+    if err then
+        log_err("redis load failed for site " .. sid .. ": " .. tostring(err))
+    end
+    return (entry and entry.rules) or {}
 end
 
 local function get_extension(uri)
@@ -371,7 +376,7 @@ function _M.start_refresh()
     if not ok then
         log_err("failed to start refresh timer: " .. tostring(err))
     else
-        log_debug("refresh timer started for key " .. REDIS_KEY)
+        log_debug("refresh timer started for key cache:{site_id}")
     end
 end
 
@@ -387,7 +392,8 @@ function _M.apply()
         uri = "/"
     end
 
-    local rules = get_rules()
+    local site_id = site_resolver.lookup_site_id()
+    local rules = get_rules(site_id)
     local rule = match_rule(rules, uri)
     if not rule or rule.caching_time <= 0 then
         disable_cache()

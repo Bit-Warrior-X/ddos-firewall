@@ -2,6 +2,7 @@ local redis      = require "resty.redis"
 local cjson      = require "cjson.safe"
 local mlcache    = require "resty.mlcache"
 local handle_acl = require "resty.handle_acl"
+local site_resolver = require "resty.site_resolver"
 local ngx        = ngx
 
 local log       = ngx.log
@@ -15,22 +16,24 @@ local shared    = ngx.shared
 local sleep     = ngx.sleep
 local null      = ngx.null
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "2.0.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
+local VERSION_KEY = "acl_config_version"
 
+-- Names match Angelos waf:{site_id}:{name} keys.
 local acl_rules = {
     { id = 1, name = "whitelist" },
     { id = 2, name = "blacklist" },
     { id = 3, name = "geo" },
     { id = 4, name = "antiheader" },
     { id = 5, name = "intervalfreqlimit" },
-    { id = 6, name = "secondaryfreqlimit" },
+    { id = 6, name = "secondfreqlimit" },
     { id = 7, name = "responsefreq" },
     { id = 8, name = "useragent" },
+    { id = 9, name = "anticc" },
 }
 
--- quick lookup by id/name
 local acl_rules_by_id = {}
 local acl_rules_by_name = {}
 for _, rule in ipairs(acl_rules) do
@@ -38,16 +41,17 @@ for _, rule in ipairs(acl_rules) do
     acl_rules_by_name[rule.name] = rule
 end
 
--- module-level mlcache object (initialized in init())
-local cache -- mlcache instance
+local cache
 local cache_opts = {
-    ttl     = 3600,            -- 1h ttl for hits
-    neg_ttl = 30,              -- 30s ttl for misses
-    lru_size = 2000,           -- size of the L1 (Lua VM) cache
-    ipc_shm = "ipc_shared_dict"
+    ttl      = 3600,
+    neg_ttl  = 30,
+    lru_size = 2000,
+    ipc_shm  = "ipc_shared_dict",
 }
 
--- Redis connection helpers
+-- Per-worker: last applied config version
+local applied_version = 0
+
 local function get_redis_connection(timeout)
     local red = redis:new()
     red:set_timeout(timeout or 2000)
@@ -59,7 +63,6 @@ local function get_redis_connection(timeout)
     return red
 end
 
--- Keepalive ping for general Redis connections
 local function pubsub_keepalive_ping(premature)
     if premature or worker.exiting() then
         return
@@ -84,7 +87,10 @@ local function pubsub_keepalive_ping(premature)
     end
 end
 
--- Loader helpers
+local function redis_key(site_id, rule_name)
+    return "waf:" .. tostring(site_id) .. ":" .. rule_name
+end
+
 local function loader_rule(key)
     local red, err = get_redis_connection()
     if not red then
@@ -106,7 +112,83 @@ local function loader_rule(key)
     return parsed
 end
 
--- mlcache init
+local function bump_version()
+    local state = shared.acl_init_state
+    if not state then
+        return
+    end
+    local v = state:incr(VERSION_KEY, 1, 0)
+    if not v then
+        state:set(VERSION_KEY, 1, 0)
+    end
+    site_resolver.invalidate_domain_cache()
+end
+
+local function current_version()
+    local state = shared.acl_init_state
+    if not state then
+        return 0
+    end
+    return tonumber(state:get(VERSION_KEY)) or 0
+end
+
+local function wrap_rule_with_hosts(rule_body, domains)
+    if not domains or #domains == 0 then
+        return nil
+    end
+    local host_list = table.concat(domains, ",")
+    local host_clause = '["Header","Host","is in","' .. host_list .. '"]'
+    if not rule_body or rule_body == "" then
+        return host_clause
+    end
+    return host_clause .. " \nAND \n" .. rule_body
+end
+
+--- Build merged { id, rules } for one ACL type across all sites (Host-scoped).
+local function build_merged_cfg(rule_meta)
+    local site_domains = site_resolver.list_site_domains()
+    local merged = {}
+    local priority_base = 0
+
+    for site_id, domains in pairs(site_domains) do
+        if type(domains) == "table" and #domains > 0 then
+            local key = redis_key(site_id, rule_meta.name)
+            local cfg
+            if cache then
+                local err
+                cfg, err = cache:get(key, nil, loader_rule, key)
+                if not cfg and err and err ~= "not_found" then
+                    log(WARN, "failed loading ", key, ": ", tostring(err))
+                end
+            else
+                cfg = loader_rule(key)
+            end
+
+            if type(cfg) == "table" and type(cfg.rules) == "table" then
+                for _, r in ipairs(cfg.rules) do
+                    if type(r) == "table" then
+                        local wrapped = wrap_rule_with_hosts(r.rule, domains)
+                        if wrapped then
+                            local prio = tonumber(r.priority) or 0
+                            merged[#merged + 1] = {
+                                action = tonumber(r.action) or 3,
+                                priority = priority_base + prio,
+                                rule = wrapped,
+                            }
+                        end
+                    end
+                end
+            end
+            priority_base = priority_base + 100000
+        end
+    end
+
+    return {
+        id = rule_meta.id,
+        rules = merged,
+    }
+end
+
 function _M.init()
     if cache then
         return true
@@ -119,11 +201,11 @@ function _M.init()
     end
 
     cache = c
-    log(INFO, "mlcache initialized for ACLs")
+    log(INFO, "mlcache initialized for site-scoped ACLs")
     return true
 end
 
--- Load all rules
+--- Prefetch all waf:{site}:* keys into mlcache (no ngx_acl apply; needs request ctx).
 function _M.load_all_rules()
     if not cache then
         local ok, err = _M.init()
@@ -132,37 +214,81 @@ function _M.load_all_rules()
         end
     end
 
-    for _, rule in ipairs(acl_rules) do
-        local rule_cfg, err = cache:get(rule.name, nil, loader_rule, rule.name)
-        if rule_cfg then
-            local ok_set, set_err = pcall(handle_acl.set_acl_rule, rule_cfg)
-            if not ok_set then
-                log(ERR, "failed to apply ACL rule '", rule.name, "': ", tostring(set_err))
+    local site_domains = site_resolver.list_site_domains()
+    local n = 0
+    for site_id, _ in pairs(site_domains) do
+        for _, rule in ipairs(acl_rules) do
+            local key = redis_key(site_id, rule.name)
+            cache:delete(key)
+            local cfg, err = cache:get(key, nil, loader_rule, key)
+            if cfg then
+                n = n + 1
+            elseif err and err ~= "not_found" then
+                log(WARN, "failed loading ACL key '", key, "': ", tostring(err))
             end
-        elseif err and err ~= "not_found" then
-            log(WARN, "failed loading ACL rule '", rule.name, "': ", tostring(err))
         end
     end
 
+    bump_version()
+    log(INFO, "load_all_rules: prefetched ", n, " site ACL payload(s)")
     return true
 end
 
-function _M.initialize_on_first_request()
-    local state = shared.acl_init_state
-    if state:get("initialized") then
-        return
+--- Apply merged site ACLs into ngx_acl. Must run in request context.
+function _M.apply_to_engine()
+    if not cache then
+        local ok, err = _M.init()
+        if not ok then
+            return nil, err
+        end
     end
 
-    local ok, err = _M.load_all_rules()
-    if ok then
-        state:set("initialized", true, 60)
-    else
-        log(ERR, "initialize_on_first_request: load_all_rules failed: ", tostring(err))
+    for _, rule in ipairs(acl_rules) do
+        local cfg = build_merged_cfg(rule)
+        local ok_set, set_err = pcall(handle_acl.set_acl_rule, cfg)
+        if not ok_set then
+            log(ERR, "failed to apply ACL '", rule.name, "': ", tostring(set_err))
+        end
     end
+
+    applied_version = current_version()
+    return true
 end
 
--- Update/delete rule
-function _M.update_rule(rule_id)
+--- Ensure ngx_acl matches latest Redis site configs (request context).
+function _M.ensure_applied()
+    local ver = current_version()
+    if applied_version == ver and ver > 0 then
+        return true
+    end
+    return _M.apply_to_engine()
+end
+
+local function parse_waf_payload(payload)
+    -- waf:{site_id}:{rule_type} or waf_deleted:{site_id}:{rule_type}
+    if type(payload) ~= "string" then
+        return nil
+    end
+
+    local deleted, site_id, rule_type = payload:match("^waf_(deleted):(%d+):([%w_]+)$")
+    if deleted then
+        return "delete", tonumber(site_id), rule_type
+    end
+
+    site_id, rule_type = payload:match("^waf:(%d+):([%w_]+)$")
+    if site_id then
+        return "update", tonumber(site_id), rule_type
+    end
+
+    -- Legacy global key name
+    if acl_rules_by_name[payload] then
+        return "legacy", nil, payload
+    end
+
+    return nil
+end
+
+function _M.update_rule(rule_id, site_id)
     local rule = acl_rules_by_id[rule_id]
     if not rule then
         log(WARN, "update_rule: unknown rule_id: ", tostring(rule_id))
@@ -177,49 +303,55 @@ function _M.update_rule(rule_id)
         end
     end
 
-    cache:delete(rule.name)
-
-    local rule_cfg, err = cache:get(rule.name, nil, loader_rule, rule.name)
-    if rule_cfg then
-        local ok_set, set_err = pcall(handle_acl.set_acl_rule, rule_cfg)
-        if not ok_set then
-            log(ERR, "update_rule: failed to apply ACL rule '", rule.name, "': ", tostring(set_err))
+    if site_id then
+        local key = redis_key(site_id, rule.name)
+        cache:delete(key)
+        cache:get(key, nil, loader_rule, key)
+    else
+        -- Invalidate all sites for this rule type
+        local site_domains = site_resolver.list_site_domains()
+        for sid, _ in pairs(site_domains) do
+            cache:delete(redis_key(sid, rule.name))
         end
-    elseif err and err ~= "not_found" then
-        log(WARN, "update_rule: failed to reload rule '", rule.name, "': ", tostring(err))
     end
+
+    bump_version()
 end
 
-function _M.delete_rule(rule_id)
+function _M.delete_rule(rule_id, site_id)
     local rule = acl_rules_by_id[rule_id]
     if not rule then
         log(WARN, "delete_rule: unknown rule_id: ", tostring(rule_id))
         return
     end
 
-    if cache then
-        cache:delete(rule.name)
+    if cache and site_id then
+        cache:delete(redis_key(site_id, rule.name))
+    elseif cache then
+        local site_domains = site_resolver.list_site_domains()
+        for sid, _ in pairs(site_domains) do
+            cache:delete(redis_key(sid, rule.name))
+        end
     end
+
+    bump_version()
 end
 
--- Redis subscriber: listens to key event notifications and invalidates / reloads cache
 function _M.start_redis_subscriber(premature)
     if premature then
         return
     end
 
-    log(INFO, "Starting Redis subscriber for ACL rule updates...")
+    log(INFO, "Starting Redis subscriber for site-scoped ACL updates...")
 
     local backoff = 1
 
-    -- spawn keepalive timer (safe)
     local ok_k, err_k = timer_at(0, pubsub_keepalive_ping)
     if not ok_k then
         log(ERR, "start_redis_subscriber: failed to start keepalive timer: ", tostring(err_k))
     end
 
     while not worker.exiting() do
-        -- try to connect
         local red, err = get_redis_connection(2000)
         if not red then
             log(ERR, "start_redis_subscriber: redis conn failed: ", tostring(err))
@@ -228,13 +360,8 @@ function _M.start_redis_subscriber(premature)
             goto continue
         end
 
-        -- use a finite blocking timeout so we can wake up periodically to check exiting()
-        local ok_set, set_err = pcall(function() red:set_timeout(5000) end)
-        if not ok_set then
-            log(WARN, "start_redis_subscriber: set_timeout failed: ", tostring(set_err))
-        end
+        pcall(function() red:set_timeout(5000) end)
 
-        -- subscribe to channel and pattern (ignore subscribe ack table)
         local ok_sub, perr1 = red:subscribe("acl:updates")
         if not ok_sub then
             log(ERR, "start_redis_subscriber: subscribe acl:updates failed: ", tostring(perr1))
@@ -244,16 +371,14 @@ function _M.start_redis_subscriber(premature)
             goto continue
         end
 
-        -- psubscribe optional: if it fails we'll continue with explicit channel
         local ok_psub, perr2 = red:psubscribe("__keyevent@0__:*")
         if not ok_psub then
             log(WARN, "start_redis_subscriber: psubscribe __keyevent@0__:* failed: ", tostring(perr2))
         end
 
-        log(INFO, "start_redis_subscriber: subscribed to acl:updates and __keyevent@0__:* (if available)")
+        log(INFO, "start_redis_subscriber: subscribed to acl:updates")
         backoff = 1
 
-        -- inner read loop: timed read so we can break on worker exit
         while not worker.exiting() do
             local msg, read_err = red:read_reply()
             if not msg then
@@ -261,41 +386,40 @@ function _M.start_redis_subscriber(premature)
                     log(ERR, "start_redis_subscriber: pubsub read_reply failed: ", tostring(read_err))
                     break
                 end
-            else
-                if type(msg) == "table" then
-                    if msg[1] == "message" then
-                        local channel, payload = msg[2], msg[3]
-                        log(DEBUG, "pubsub message channel=", tostring(channel), " payload=", tostring(payload))
-                        if channel == "acl:updates" and type(payload) == "string" then
-                            local rule = acl_rules_by_name[payload]
-                            if rule then
-                                _M.update_rule(rule.id)
-                            end
-                        end
-                    elseif msg[1] == "pmessage" then
-                        local pattern, channel, payload = msg[2], msg[3], msg[4]
-                        log(DEBUG, "pubsub pmessage pattern=", tostring(pattern),
-                            " channel=", tostring(channel), " payload=", tostring(payload))
+            elseif type(msg) == "table" then
+                local payload
+                if msg[1] == "message" and msg[2] == "acl:updates" then
+                    payload = msg[3]
+                elseif msg[1] == "pmessage" then
+                    local channel = msg[3]
+                    payload = msg[4]
+                    if channel ~= "__keyevent@0__:set"
+                        and channel ~= "__keyevent@0__:hset"
+                        and channel ~= "__keyevent@0__:del"
+                        and channel ~= "__keyevent@0__:expired" then
+                        payload = nil
+                    end
+                end
 
-                        if type(payload) == "string" then
-                            if channel == "__keyevent@0__:set" or channel == "__keyevent@0__:hset" then
-                                local rule = acl_rules_by_name[payload]
-                                if rule then
-                                    _M.update_rule(rule.id)
-                                end
-                            elseif channel == "__keyevent@0__:del" or channel == "__keyevent@0__:expired" then
-                                local rule = acl_rules_by_name[payload]
-                                if rule then
-                                    _M.delete_rule(rule.id)
-                                end
+                if type(payload) == "string" then
+                    log(DEBUG, "acl update payload=", payload)
+                    local action, site_id, rule_type = parse_waf_payload(payload)
+                    if action and rule_type then
+                        local rule = acl_rules_by_name[rule_type]
+                        if rule then
+                            if action == "delete" then
+                                _M.delete_rule(rule.id, site_id)
+                            else
+                                _M.update_rule(rule.id, site_id)
                             end
                         end
+                    elseif payload:match("^domain:") then
+                        bump_version()
                     end
                 end
             end
-        end -- inner while
+        end
 
-        -- clean up subscription and connection before reconnect or exit
         pcall(function()
             pcall(red.unsubscribe, red, "acl:updates")
             pcall(red.punsubscribe, red, "__keyevent@0__:*")
@@ -304,17 +428,18 @@ function _M.start_redis_subscriber(premature)
         end)
 
         if worker.exiting() then
-            log(INFO, "start_redis_subscriber: worker exiting, subscriber stopped")
             break
         end
 
-        -- reconnect with backoff on errors
         sleep(backoff)
         backoff = math.min(backoff * 2, 30)
         ::continue::
-    end -- outer while
+    end
 
     log(INFO, "start_redis_subscriber: exiting")
 end
+
+_M.acl_rules = acl_rules
+_M.acl_rules_by_name = acl_rules_by_name
 
 return _M

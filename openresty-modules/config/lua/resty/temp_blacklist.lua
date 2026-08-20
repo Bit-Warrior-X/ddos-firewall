@@ -3,9 +3,10 @@
 
 local redis = require "resty.redis"
 local cjson = require "cjson.safe"
+local site_resolver = require "resty.site_resolver"
 local ngx = ngx
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
 local SHM_NAME = "temp_blacklist"
@@ -165,38 +166,7 @@ function _M.on_entry_added(item)
 end
 
 function _M.lookup_site_id()
-    if ngx.ctx._temp_bl_site_id ~= nil then
-        local cached = ngx.ctx._temp_bl_site_id
-        if cached == false then
-            return nil
-        end
-        return cached
-    end
-
-    local host = ngx.var.host or ngx.var.http_host or ""
-    host = host:match("^([^:]+)") or host
-    if host == "" then
-        ngx.ctx._temp_bl_site_id = false
-        return nil
-    end
-
-    local red, err = get_redis(500)
-    if not red then
-        ngx.log(ngx.WARN, "temp_blacklist: site_id lookup redis failed: ", tostring(err))
-        ngx.ctx._temp_bl_site_id = false
-        return nil
-    end
-
-    local val = red:get("domain:" .. host)
-    red:set_keepalive(10000, 100)
-    if not val or val == ngx.null or val == "" then
-        ngx.ctx._temp_bl_site_id = false
-        return nil
-    end
-
-    local site_id = tonumber(val)
-    ngx.ctx._temp_bl_site_id = site_id or false
-    return site_id
+    return site_resolver.lookup_site_id()
 end
 
 function _M.check(ip, uri)
@@ -209,7 +179,7 @@ function _M.check(ip, uri)
         return false
     end
 
-    local site_id = _M.lookup_site_id()
+    local site_id = site_resolver.lookup_site_id()
     local key = cache_key(ip)
     local cached = dict:get(key)
     if cached == NEG_SENTINEL then
