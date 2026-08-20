@@ -708,6 +708,43 @@ class RedisClient:
         except Exception as e:
             return False, str(e)
 
+    EDGE_LISTENINGPORTS_KEY = "listeningports"
+
+    @staticmethod
+    def store_edge_listeningports(ports_list: List[Dict]) -> tuple:
+        """Store server-scoped (edge-wide) nginx listen ports under 'listeningports'.
+
+        Value is a JSON array of port objects, e.g.
+          [{ id, serverId, port, protocol, description, status }, ...]
+
+        Publishes listeningports:updates after write.
+        """
+        try:
+            if not isinstance(ports_list, list):
+                return False, "listeningports must be an array"
+            rcli = RedisClient.get_client()
+            value = json.dumps(ports_list, ensure_ascii=False, separators=(",", ":"))
+            pipe = rcli.pipeline()
+            pipe.set(RedisClient.EDGE_LISTENINGPORTS_KEY, value)
+            pipe.publish("listeningports:updates", RedisClient.EDGE_LISTENINGPORTS_KEY)
+            pipe.execute()
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_edge_listeningports() -> List[Dict]:
+        """Load server-scoped listening ports from Redis key 'listeningports'."""
+        try:
+            rcli = RedisClient.get_client()
+            raw = rcli.get(RedisClient.EDGE_LISTENINGPORTS_KEY)
+            if not raw:
+                return []
+            obj = json.loads(raw)
+            return obj if isinstance(obj, list) else []
+        except Exception:
+            return []
+
     @staticmethod
     def store_site_listening(site_id: int, ports_payload: Any) -> tuple:
         """Store site-scoped listening ports under key 'listening:{site_id}'.
@@ -761,6 +798,8 @@ class RedisClient:
         """Store site SSL material under ssl:{site_id} for OpenResty SNI.
 
         ssl_payload fields: ssl_type, ssl_cert (PEM), ssl_cert_key (PEM).
+        When ssl_type is "none" (HTTP-only site), stores an empty marker so Athens
+        refuses HTTPS for this SNI instead of falling back to the default cert.
         Also stores site:{site_id}:domain for reverse lookup.
         Publishes ssl:updates with ssl:{site_id} so workers can invalidate caches.
         """
@@ -768,7 +807,11 @@ class RedisClient:
             if not isinstance(ssl_payload, dict):
                 return False, "ssl payload must be object"
 
-            ssl_type = str(ssl_payload.get("ssl_type") or ssl_payload.get("sslType") or "").strip()
+            ssl_type = str(
+                ssl_payload.get("ssl_type") or ssl_payload.get("sslType") or ""
+            ).strip()
+            ssl_type_norm = ssl_type.lower()
+
             ssl_cert = ssl_payload.get("ssl_cert") or ssl_payload.get("sslCert") or ""
             ssl_cert_key = (
                 ssl_payload.get("ssl_cert_key")
@@ -783,6 +826,13 @@ class RedisClient:
 
             ssl_cert = ssl_cert.replace("\\n", "\n").strip()
             ssl_cert_key = ssl_cert_key.replace("\\n", "\n").strip()
+
+            if ssl_type_norm == "none":
+                ssl_type = "none"
+                ssl_cert = ""
+                ssl_cert_key = ""
+            elif not ssl_cert or not ssl_cert_key:
+                return False, "ssl_cert and ssl_cert_key are required unless ssl_type is none"
 
             value_obj = {
                 "site_id": int(site_id),
@@ -799,6 +849,20 @@ class RedisClient:
             if domain:
                 pipe.set(f"site:{site_id}:domain", str(domain).strip())
             pipe.publish("ssl:updates", key)
+            pipe.execute()
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def delete_site_ssl(site_id: int) -> tuple:
+        """Remove ssl:{site_id} and publish ssl:updates (ssl_deleted:{site_id})."""
+        try:
+            rcli = RedisClient.get_client()
+            key = f"ssl:{site_id}"
+            pipe = rcli.pipeline()
+            pipe.delete(key)
+            pipe.publish("ssl:updates", f"ssl_deleted:{site_id}")
             pipe.execute()
             return True, None
         except Exception as e:

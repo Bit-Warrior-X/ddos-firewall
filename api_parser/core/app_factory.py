@@ -7,6 +7,7 @@ from routes.l7_routes import l7_bp
 from routes.common_routes import common_bp
 from core.fifo_worker import start_fifo_listener
 from core.initializer import sync_l4_lists_and_start_firewall
+from core.listening_ports import sync_from_redis_on_startup
 from core.temporary_blacklist_monitor import start_temporary_blacklist_monitor
 from core.license_monitor import start_license_monitor
 import config
@@ -45,6 +46,8 @@ def initialize_app():
     start_fifo_listener()
     # On real worker start, sync L4 lists from backend and start firewall
     sync_l4_lists_and_start_firewall()
+    # Apply edge-wide nginx listen ports from Redis (listeningports)
+    sync_from_redis_on_startup()
     # Monitor Redis temporaryblacklist:* and notify backend when a new item is added
     start_temporary_blacklist_monitor()
     # Validate license every LICENSE_CHECK_INTERVAL seconds

@@ -1,7 +1,10 @@
 -- Site-scoped listening ports from Redis key listening:{site_id}.
 -- Value: { http_ports: [...], https_ports: [...] }
--- nginx listen sockets remain server-scoped (server_default_ports.conf);
--- this exposes the site's selected ports for request logic / future vhost gen.
+--
+-- Edge-wide nginx listen sockets are NOT managed here. Angelos stores them under
+-- Redis key "listeningports" and writes server_default_ports.conf (see
+-- api_parser/core/listening_ports.py). This module only exposes each site's
+-- selected HTTP/HTTPS ports for request logic.
 
 local redis = require "resty.redis"
 local cjson = require "cjson.safe"

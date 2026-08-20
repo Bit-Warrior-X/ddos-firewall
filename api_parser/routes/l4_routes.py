@@ -611,13 +611,20 @@ def get_blocklist():
 @token_required
 def l4_options():
     interfaces = _list_interfaces()
-    attach_modes = {
+    attach_modes_by_iface = {
         iface: _attach_modes_for_interface(iface)
         for iface in interfaces
     }
+    # Flat union of modes (L4Options.attachModes in angelos_api.yml).
+    attach_modes = sorted({
+        mode
+        for modes in attach_modes_by_iface.values()
+        for mode in (modes or [])
+    })
     return jsonify({
         "interfaces": interfaces,
-        "attachModesByInterface": attach_modes
+        "attachModes": attach_modes,
+        "attachModesByInterface": attach_modes_by_iface
     })
 
 @l4_bp.route('/l4_firewall_data', methods=['POST'])

@@ -15,6 +15,7 @@ extensions = [
     Extension("core.api_client", ["core/api_client.py"]),
     Extension("core.firewall", ["core/firewall.py"]),
     Extension("core.redis_client", ["core/redis_client.py"]),
+    Extension("core.listening_ports", ["core/listening_ports.py"]),
     Extension("core.fifo_worker", ["core/fifo_worker.py"]),
     Extension("core.temporary_blacklist_monitor", ["core/temporary_blacklist_monitor.py"]),
     Extension("core.license_check", ["core/license_check.py"]),

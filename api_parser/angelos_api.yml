@@ -1,0 +1,1907 @@
+openapi: 3.0.3
+info:
+  title: Angelos Edge Agent API
+  description: |
+    HTTP API exposed by the **angelos** edge agent (`api_parser`) on each protected
+    server. The Dorian **back-end** calls these endpoints directly; the Vue
+    front-end never talks to angelos.
+
+    **Base URL:** `http://{edge-server-ip}:5000`
+
+    **Transport**
+
+    - Method: `POST` for all endpoints documented here
+    - Content-Type: `application/json`
+    - Success: HTTP 2xx with empty or JSON body
+    - Failure: non-2xx; Dorian surfaces this as HTTP 502 to dashboard clients
+
+    **Scope**
+
+    - **Server-scoped** calls target one edge node IP (e.g. listening ports,
+      temporary blacklist).
+    - **Site-scoped** calls are issued by Dorian once per edge server assigned
+      to the site; each request carries that edge node's `serverId`.
+
+    **L4 vs L7**
+
+    - `/API/L7/*` — Layer 7 WAF, cache, upstream, compress (angelos)
+    - `/API/L4/*` — Layer 4 firewall whitelist/blacklist and config (same agent
+      port by default; paths configurable in Dorian `config.json`)
+
+    This spec is derived from Dorian back-end callers in `internal/api/l7_site_push.go`,
+    `internal/api/handlers.go`, and `internal/api/agent_client.go`.
+  version: 1.0.0
+
+servers:
+  - url: http://{edgeServerIp}:5000
+    description: Edge server running angelos
+    variables:
+      edgeServerIp:
+        default: 203.0.113.10
+        description: Public IP of the protected edge node
+
+tags:
+  - name: L7 WAF
+  - name: L7 Traffic
+  - name: L7 Cache
+  - name: L4 Firewall
+
+paths:
+  /API/L7/l7_update_whitelist:
+    post:
+      tags: [L7 WAF]
+      summary: Replace WAF whitelist rules
+      description: Dorian trigger — site WAF whitelist create/update/delete/batch-delete.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7WhitelistUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 101
+                  wafRuleId: 42
+                  ips: 192.168.1.0/24,10.0.0.5
+                  url: "/*"
+                  method: GET,POST
+                  description: Office network bypass
+                - id: 102
+                  wafRuleId: 42
+                  ips: 203.0.113.50
+                  url: /api/health
+                  method: GET
+                  description: Monitoring probe
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_blacklist:
+    post:
+      tags: [L7 WAF]
+      summary: Replace WAF blacklist rules
+      description: Dorian trigger — site WAF blacklist mutations.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7BlacklistUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 201
+                  wafRuleId: 42
+                  ips: 198.51.100.77
+                  url: "/*"
+                  method: "*"
+                  behavior: block
+                  description: Known bad actor
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_geolocation:
+    post:
+      tags: [L7 WAF]
+      summary: Replace WAF geolocation rules
+      description: Only rules with status ENABLE are sent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7GeolocationUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 301
+                  wafRuleId: 42
+                  country: CN,RU
+                  url: "/*"
+                  behavior: block
+                  operation: BLACK
+                  status: ENABLE
+                - id: 302
+                  wafRuleId: 42
+                  country: US,CA,GB
+                  url: /checkout/*
+                  behavior: allow
+                  operation: WHITE
+                  status: ENABLE
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_antiheader:
+    post:
+      tags: [L7 WAF]
+      summary: Replace WAF anti-header rules
+      description: Only enabled rules are sent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7AntiHeaderUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 401
+                  wafRuleId: 42
+                  url: "/*"
+                  header: X-Forwarded-For
+                  value: ""
+                  blockMode: missing
+                  behavior: block
+                  status: ENABLE
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_intervalfreqlimit:
+    post:
+      tags: [L7 WAF]
+      summary: Replace interval frequency limit rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7IntervalFreqLimitUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 501
+                  serverId: 1033
+                  url: /login
+                  time: 60
+                  request_count: 30
+                  behavior: block
+                  status: ENABLE
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_secondfreqlimit:
+    post:
+      tags: [L7 WAF]
+      summary: Replace per-second frequency limit rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SecondFreqLimitUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 601
+                  serverId: 1033
+                  url: /api/*
+                  request_count: 100
+                  burst: 20
+                  behavior: block
+                  status: ENABLE
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_responsefreq:
+    post:
+      tags: [L7 WAF]
+      summary: Replace response frequency rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7ResponseFreqUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 701
+                  serverId: 1033
+                  url: /search
+                  response_code: 404
+                  time: 120
+                  response_count: 50
+                  behavior: block
+                  status: ENABLE
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_useragent:
+    post:
+      tags: [L7 WAF]
+      summary: Replace user-agent rules
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7UserAgentUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              serverIp: 203.0.113.10
+              rules:
+                - id: 801
+                  serverId: 1033
+                  url: "/*"
+                  user_agent: curl/*
+                  match: prefix
+                  behavior: block
+                  status: ENABLE
+      responses:
+        "200":
+          description: Rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_temporaryblacklist:
+    post:
+      tags: [L7 WAF]
+      summary: Replace temporary blacklist entries
+      description: |
+        Dorian sends the full temporary blacklist for an edge when rows are
+        added, deleted, or flushed. Each entry includes `site_id` so the block
+        is applied to that site. Incoming agent reports to
+        `/temporary_blacklist_added` should also send `site_id`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7TemporaryBlacklistUpdate"
+            example:
+              serverId: 1033
+              temporaryblacklist:
+                - ip: 198.51.100.99
+                  url: /wp-admin
+                  country: US
+                  city: New York
+                  blocked_at: "2026-08-11T09:15:00Z"
+                  ttl: 3600
+                  trigger_rule: waf_interval_freq_limit
+                  site_id: 55
+                - ip: 203.0.113.200
+                  url: /api/login
+                  country: DE
+                  city: Berlin
+                  blocked_at: "2026-08-11T09:20:00Z"
+                  ttl: 7200
+                  trigger_rule: anti_cc
+                  site_id: 55
+      responses:
+        "200":
+          description: Blacklist applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_upstreamservers:
+    post:
+      tags: [L7 Traffic]
+      summary: Replace upstream origin servers for a site
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7UpstreamServersUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              upstreams:
+                - id: 11
+                  serverId: 1033
+                  ip_port: 10.10.0.5:8080
+                  protocol: http
+                  description: Primary origin
+                - id: 12
+                  serverId: 1033
+                  ip_port: 10.10.0.6:8080
+                  protocol: http
+                  description: Failover origin
+      responses:
+        "200":
+          description: Upstreams applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_site:
+    post:
+      tags: [L7 Traffic]
+      summary: Push full site configuration
+      description: |
+        Called by Dorian when a site is created or updated (once per assigned
+        edge server). Carries domain, SSL, classified WAF rules from
+        `waf_rule_id`, compress, cache rules, selected HTTP/HTTPS site
+        listening ports, and upstream servers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteConfig"
+            example:
+              server_id: 1033
+              site_id: 55
+              domain: www.example.com
+              ssl:
+                ssl_type: custom
+                ssl_cert: |
+                  -----BEGIN CERTIFICATE-----
+                  MIIB...
+                  -----END CERTIFICATE-----
+                ssl_cert_key: |
+                  -----BEGIN PRIVATE KEY-----
+                  MIIE...
+                  -----END PRIVATE KEY-----
+              waf_rules:
+                waf_rule_id: 42
+                waf_whitelist:
+                  - id: 101
+                    wafRuleId: 42
+                    ips: 192.168.1.0/24
+                    url: "/*"
+                    method: GET,POST
+                    description: Office network
+                waf_blacklist:
+                  - id: 201
+                    wafRuleId: 42
+                    ips: 198.51.100.77
+                    url: "/*"
+                    method: "*"
+                    behavior: block
+                    description: Known bad actor
+                waf_geolocation:
+                  - id: 301
+                    wafRuleId: 42
+                    country: CN,RU
+                    url: "/*"
+                    behavior: block
+                    operation: BLACK
+                    status: ENABLE
+                waf_anticc:
+                  - id: 401
+                    wafRuleId: 42
+                    url: /login
+                    method: POST
+                    threshold: 20
+                    window: 60
+                    action: block
+                    behavior: block
+                    status: ENABLE
+                waf_antiheader:
+                  - id: 501
+                    wafRuleId: 42
+                    url: "/*"
+                    header: X-Forwarded-For
+                    value: ""
+                    blockMode: missing
+                    behavior: block
+                    status: ENABLE
+                waf_intervalfreqlimit:
+                  - id: 601
+                    wafRuleId: 42
+                    url: /login
+                    time: 60
+                    requestCount: 30
+                    behavior: block
+                    status: ENABLE
+                waf_secondfreqlimit:
+                  - id: 701
+                    wafRuleId: 42
+                    url: /api/*
+                    requestCount: 100
+                    burst: 20
+                    behavior: block
+                    status: ENABLE
+                waf_responsefreq:
+                  - id: 801
+                    wafRuleId: 42
+                    url: /search
+                    responseCode: "404"
+                    time: 120
+                    responseCount: 50
+                    behavior: block
+                    status: ENABLE
+                waf_useragent:
+                  - id: 901
+                    wafRuleId: 42
+                    url: "/*"
+                    userAgent: curl/*
+                    match: prefix
+                    behavior: block
+                    status: ENABLE
+              compress_settings:
+                css: true
+                html: true
+                js: true
+                audio: false
+                font: true
+                applications: false
+              cache_rules:
+                - id: 31
+                  serverId: 1033
+                  rule_name: static_assets
+                  rule_type: file
+                  caching_time: 86400
+                  url: ""
+                  file_types: jpg,png,css,js
+                  priority: 10
+                  cache_slice: 1.0
+                  without_parameter: yes
+                  cache_mode: origin
+                  status: ENABLE
+              http_ports:
+                - id: 21
+                  serverId: 1033
+                  port: 80
+                  protocol: HTTP
+                  description: Public HTTP
+                  status: ENABLE
+              https_ports:
+                - id: 22
+                  serverId: 1033
+                  port: 443
+                  protocol: HTTPS
+                  description: Public HTTPS
+                  status: ENABLE
+              upstream_servers:
+                - id: 11
+                  serverId: 1033
+                  ip_port: 10.10.0.5:8080
+                  protocol: http
+                  description: Primary origin
+      responses:
+        "200":
+          description: Site configuration applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_domain:
+    post:
+      tags: [L7 Traffic]
+      summary: Rename a site domain on the edge
+      description: |
+        Called by Dorian when a site domain is changed (once per assigned edge
+        server), before `l7_update_site` pushes the full config for the new
+        hostname. Angelos should retarget the existing site from `old_domain`
+        to `new_domain`. Older angelos builds that do not implement this route
+        return HTML 404; Dorian still saves the new domain and surfaces that
+        as a warning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteDomainUpdate"
+            example:
+              server_id: 1033
+              site_id: 55
+              old_domain: old.example.com
+              new_domain: www.example.com
+      responses:
+        "200":
+          description: Site domain renamed on edge
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_delete_site:
+    post:
+      tags: [L7 Traffic]
+      summary: Remove a site from the edge
+      description: |
+        Called by Dorian before deleting a site from the database (once per
+        assigned edge server). Angelos should drop the site domain and related
+        L7 configuration for that `site_id`. Older angelos builds that do not
+        implement this route return HTML 404; Dorian still deletes the site and
+        surfaces that as a warning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteDelete"
+            example:
+              server_id: 1033
+              site_id: 55
+              domain: www.example.com
+      responses:
+        "200":
+          description: Site removed from edge
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_listeningports:
+    post:
+      tags: [L7 Traffic]
+      summary: Replace nginx listening ports on an edge server
+      description: |
+        Server-scoped. Syncs the edge `listening_ports` table — the ports nginx
+        listens on overall. Angelos stores the full list in Redis under key
+        `listeningports` and applies ENABLE entries to `server_default_ports.conf`
+        (HTTP and HTTPS). Does not include `site_id` (see
+        `l7_update_site_listeningports` for per-site port selection).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7ListeningPortsUpdate"
+            example:
+              serverId: 1033
+              listeningports:
+                - id: 21
+                  serverId: 1033
+                  port: 80
+                  protocol: HTTP
+                  description: Public HTTP
+                  status: ENABLE
+                - id: 22
+                  serverId: 1033
+                  port: 443
+                  protocol: HTTPS
+                  description: Public HTTPS
+                  status: ENABLE
+      responses:
+        "200":
+          description: Ports applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_site_listeningports:
+    post:
+      tags: [L7 Traffic]
+      summary: Replace a site's selected HTTP/HTTPS listening ports
+      description: |
+        Site-scoped. Syncs `site_listening_ports` for one site on one edge —
+        which HTTP and HTTPS ports that site should use. Called when site port
+        selections are saved, and the same HTTP/HTTPS split is included in
+        `l7_update_site`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7SiteListeningPortsUpdate"
+            example:
+              server_id: 1033
+              site_id: 55
+              http_ports:
+                - id: 21
+                  serverId: 1033
+                  port: 80
+                  protocol: HTTP
+                  description: Public HTTP
+                  status: ENABLE
+              https_ports:
+                - id: 22
+                  serverId: 1033
+                  port: 443
+                  protocol: HTTPS
+                  description: Public HTTPS
+                  status: ENABLE
+      responses:
+        "200":
+          description: Site listening ports applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_compress:
+    post:
+      tags: [L7 Traffic]
+      summary: Update Gzip compress MIME settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7CompressUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              compress:
+                css: true
+                html: true
+                js: true
+                audio: false
+                font: true
+                applications: false
+      responses:
+        "200":
+          description: Compress settings applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_cacherules:
+    post:
+      tags: [L7 Cache]
+      summary: Replace cache rules
+      description: Full rule set is sent on every create/update/delete.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7CacheRulesUpdate"
+            example:
+              serverId: 1033
+              siteId: 55
+              cacherules:
+                - id: 31
+                  serverId: 1033
+                  rule_name: static_assets
+                  rule_type: file
+                  caching_time: 86400
+                  url: ""
+                  file_types: jpg,png,css,js,woff2
+                  priority: 10
+                  cache_slice: 1.0
+                  without_parameter: yes
+                  cache_mode: origin
+                  status: ENABLE
+                - id: 32
+                  serverId: 1033
+                  rule_name: homepage
+                  rule_type: url
+                  caching_time: 300
+                  url: https://www.example.com/
+                  file_types: ""
+                  priority: 5
+                  cache_slice: 0
+                  without_parameter: no
+                  cache_mode: force
+                  status: ENABLE
+      responses:
+        "200":
+          description: Cache rules applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_clear_cache:
+    post:
+      tags: [L7 Cache]
+      summary: Purge all file cache on the edge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7ServerIdOnly"
+            example:
+              serverId: 1033
+              siteId: 55
+      responses:
+        "200":
+          description: Cache cleared
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_clear_url_cache:
+    post:
+      tags: [L7 Cache]
+      summary: Purge URL cache by match pattern
+      description: |
+        `match_type` is numeric on the wire (CDNRAY convention):
+
+        - `1` — prefix match (`http(s)://…/` ending with `/`)
+        - `2` — exact match (`http(s)://…`)
+        - `3` — advanced wildcard (any non-empty pattern)
+
+        Dorian normalizes dashboard input (`prefix`, `exact`, `advanced`) before
+        calling angelos.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7ClearUrlCache"
+            examples:
+              prefix:
+                summary: Prefix purge
+                value:
+                  serverId: 1033
+                  siteId: 55
+                  match_type: 1
+                  match_content: https://www.example.com/
+              exact:
+                summary: Exact URL purge
+                value:
+                  serverId: 1033
+                  siteId: 55
+                  match_type: 2
+                  match_content: https://www.example.com/index.html
+              advanced:
+                summary: Advanced wildcard purge
+                value:
+                  serverId: 1033
+                  siteId: 55
+                  match_type: 3
+                  match_content: www.example.com/*/api/*
+      responses:
+        "200":
+          description: URL cache cleared
+        "400":
+          description: Invalid match_type or match_content
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/l4_firewall_data:
+    post:
+      tags: [L4 Firewall]
+      summary: Push Layer 4 firewall configuration
+      description: |
+        Path defaults to `/API/L4/l4_firewall_data` (override via Dorian
+        `agentL4Path` in config). Optional `Authorization: Bearer` header when
+        `agentToken` is configured.
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L4ConfigPush"
+            example:
+              token: edge-agent-token-example
+              id: 1033
+              dev: eth0
+              attachMode: native
+              sensitivity: medium
+              protectionMode: drop
+              blackIpDuration: 3600
+              synValid: true
+              synThreshold: 1000
+              synBurstPkt: 200
+              synBurstCountPerSec: 50
+              synFixedThreshold: 500
+              synFixedCheckDuration: 10
+              challengeTimeout: 30
+              synProtectionDuration: 300
+              ackValid: true
+              ackThreshold: 2000
+              ackBurstPkt: 300
+              ackBurstCountPerSec: 80
+              ackFixedThreshold: 800
+              ackFixedCheckDuration: 10
+              ackProtectionDuration: 300
+              rstValid: false
+              rstThreshold: 0
+              icmpValid: true
+              icmpThreshold: 500
+              udpValid: true
+              udpThreshold: 1500
+              greValid: false
+              tcpSegCheck: true
+              geoCheck: false
+              geoDbIpv4Path: /var/lib/geoip/GeoLite2-Country.mmdb
+              geoDbLocationPath: /var/lib/geoip/GeoLite2-City.mmdb
+              geoAllowCountries: []
+              geoCountriesBlockMode: false
+              tcpConnectionLimitCheck: true
+              tcpConnectionLimitCnt: 5000
+      responses:
+        "200":
+          description: L4 config applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/options:
+    post:
+      tags: [L4 Firewall]
+      summary: Fetch attach interfaces and modes
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTokenBody"
+            example:
+              token: edge-agent-token-example
+      responses:
+        "200":
+          description: Available L4 options
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/L4Options"
+              example:
+                interfaces:
+                  - eth0
+                  - eth1
+                attachModes:
+                  - native
+                  - skb
+                  - drv
+                attachModesByInterface:
+                  eth0:
+                    - native
+                    - drv
+                  eth1:
+                    - native
+                    - skb
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/add_white_ip:
+    post:
+      tags: [L4 Firewall]
+      summary: Add IP to L4 whitelist
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 192.168.50.10
+      responses:
+        "200":
+          description: IP whitelisted
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/remove_white_ip:
+    post:
+      tags: [L4 Firewall]
+      summary: Remove IP from L4 whitelist
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 192.168.50.10
+      responses:
+        "200":
+          description: IP removed
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/remove_white_ip_all:
+    post:
+      tags: [L4 Firewall]
+      summary: Clear L4 whitelist
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTokenBody"
+            example:
+              token: edge-agent-token-example
+      responses:
+        "200":
+          description: Whitelist cleared
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/add_block_ip:
+    post:
+      tags: [L4 Firewall]
+      summary: Add IP to L4 blocklist
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 198.51.100.99
+      responses:
+        "200":
+          description: IP blocked
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/remove_block_ip:
+    post:
+      tags: [L4 Firewall]
+      summary: Remove IP from L4 blocklist
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L4IpAction"
+            example:
+              token: edge-agent-token-example
+              ip: 198.51.100.99
+      responses:
+        "200":
+          description: IP unblocked
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+  /API/L4/remove_block_ip_all:
+    post:
+      tags: [L4 Firewall]
+      summary: Clear L4 blocklist
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTokenBody"
+            example:
+              token: edge-agent-token-example
+      responses:
+        "200":
+          description: Blocklist cleared
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
+components:
+  parameters:
+    AgentBearer:
+      name: Authorization
+      in: header
+      required: false
+      schema:
+        type: string
+      description: Optional Bearer agentToken header when configured in Dorian back-end
+
+  responses:
+    AgentError:
+      description: Angelos rejected or failed the request
+      content:
+        text/plain:
+          schema:
+            type: string
+
+  schemas:
+    L7ServerIdOnly:
+      type: object
+      required: [serverId, siteId]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+          description: Edge server ID in Dorian
+        siteId:
+          type: integer
+          format: int64
+          description: Site whose cache should be purged
+
+    L7ServerContext:
+      type: object
+      required: [serverId, siteId, serverIp]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        siteId:
+          type: integer
+          format: int64
+          description: Site these L7 rules belong to
+        serverIp:
+          type: string
+          description: Edge node public IP
+
+    L7WhitelistUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/WafWhitelistRule"
+
+    L7BlacklistUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/WafBlacklistRule"
+
+    L7GeolocationUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/WafGeoRule"
+
+    L7AntiHeaderUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/WafAntiHeaderRule"
+
+    L7IntervalFreqLimitUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/IntervalFreqLimitRule"
+
+    L7SecondFreqLimitUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/SecondFreqLimitRule"
+
+    L7ResponseFreqUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/ResponseFreqRule"
+
+    L7UserAgentUpdate:
+      allOf:
+        - $ref: "#/components/schemas/L7ServerContext"
+        - type: object
+          properties:
+            rules:
+              type: array
+              items:
+                $ref: "#/components/schemas/UserAgentRule"
+
+    L7TemporaryBlacklistUpdate:
+      type: object
+      required: [serverId, temporaryblacklist]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        temporaryblacklist:
+          type: array
+          items:
+            $ref: "#/components/schemas/TemporaryBlacklistEntry"
+
+    L7UpstreamServersUpdate:
+      type: object
+      required: [serverId, siteId, upstreams]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        siteId:
+          type: integer
+          format: int64
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpstreamServerL7"
+
+    L7SiteConfig:
+      type: object
+      required: [server_id, site_id, domain, ssl, waf_rules, compress_settings, cache_rules, http_ports, https_ports, upstream_servers]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+          description: Edge server receiving this site config
+        site_id:
+          type: integer
+          format: int64
+        domain:
+          type: string
+        ssl:
+          $ref: "#/components/schemas/L7SiteSSL"
+        waf_rules:
+          $ref: "#/components/schemas/L7SiteWafRules"
+        compress_settings:
+          $ref: "#/components/schemas/CompressSettingsL7"
+        cache_rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheRuleL7"
+        http_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+          description: HTTP listening ports selected for this site on this edge
+        https_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+          description: HTTPS listening ports selected for this site on this edge
+        upstream_servers:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpstreamServerL7"
+
+    L7SiteDomainUpdate:
+      type: object
+      required: [server_id, site_id, old_domain, new_domain]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+          description: Edge server that should rename the site
+        site_id:
+          type: integer
+          format: int64
+        old_domain:
+          type: string
+          description: Current hostname on the edge
+        new_domain:
+          type: string
+          description: Replacement hostname
+
+    L7SiteDelete:
+      type: object
+      required: [server_id, site_id, domain]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+          description: Edge server that should drop the site
+        site_id:
+          type: integer
+          format: int64
+        domain:
+          type: string
+          description: Site domain being removed
+
+    L7SiteSSL:
+      type: object
+      properties:
+        ssl_type:
+          type: string
+          description: |
+            Certificate mode. `none` means HTTP-only for visitor↔edge (no HTTPS
+            for this site; Angelos stores an empty ssl marker and clears site
+            https_ports). Other values (custom, letsencrypt, zerossl,
+            googletrust, managed) require ssl_cert + ssl_cert_key PEMs.
+        ssl_cert:
+          type: string
+        ssl_cert_key:
+          type: string
+
+    L7SiteWafRules:
+      type: object
+      properties:
+        waf_rule_id:
+          type: integer
+          format: int64
+          description: Dorian waf_rules.id assigned to the site (0 if none)
+        waf_whitelist:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafWhitelistRule"
+        waf_blacklist:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafBlacklistRule"
+        waf_geolocation:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafGeoRule"
+        waf_anticc:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafAntiCcRule"
+        waf_antiheader:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafAntiHeaderRule"
+        waf_intervalfreqlimit:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafIntervalRule"
+        waf_secondfreqlimit:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafSecondRule"
+        waf_responsefreq:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafResponseRule"
+        waf_useragent:
+          type: array
+          items:
+            $ref: "#/components/schemas/WafUserAgentRule"
+
+    WafAntiCcRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        method:
+          type: string
+        threshold:
+          type: integer
+        window:
+          type: integer
+        action:
+          type: string
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafIntervalRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        time:
+          type: integer
+        requestCount:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafSecondRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        requestCount:
+          type: integer
+        burst:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafResponseRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        responseCode:
+          type: string
+        time:
+          type: integer
+        responseCount:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+
+    WafUserAgentRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        userAgent:
+          type: string
+        match:
+          type: string
+        behavior:
+          type: string
+        status:
+          type: string
+
+    L7ListeningPortsUpdate:
+      type: object
+      required: [serverId, listeningports]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        listeningports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+
+    L7SiteListeningPortsUpdate:
+      type: object
+      required: [server_id, site_id, http_ports, https_ports]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+          format: int64
+        http_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+        https_ports:
+          type: array
+          items:
+            $ref: "#/components/schemas/ListeningPortL7"
+
+    L7CompressUpdate:
+      type: object
+      required: [serverId, siteId, compress]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        siteId:
+          type: integer
+          format: int64
+        compress:
+          $ref: "#/components/schemas/CompressSettingsL7"
+
+    L7CacheRulesUpdate:
+      type: object
+      required: [serverId, siteId, cacherules]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        siteId:
+          type: integer
+          format: int64
+        cacherules:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheRuleL7"
+
+    L7ClearUrlCache:
+      type: object
+      required: [serverId, siteId, match_type, match_content]
+      properties:
+        serverId:
+          type: integer
+          format: int64
+        siteId:
+          type: integer
+          format: int64
+        match_type:
+          type: integer
+          enum: [1, 2, 3]
+          description: "1=prefix, 2=exact, 3=advanced"
+        match_content:
+          type: string
+
+    WafWhitelistRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        ips:
+          type: string
+        url:
+          type: string
+        method:
+          type: string
+        description:
+          type: string
+
+    WafBlacklistRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        ips:
+          type: string
+        url:
+          type: string
+        method:
+          type: string
+        behavior:
+          type: string
+        description:
+          type: string
+
+    WafGeoRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        country:
+          type: string
+        url:
+          type: string
+        behavior:
+          type: string
+        operation:
+          type: string
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    WafAntiHeaderRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        wafRuleId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        header:
+          type: string
+        value:
+          type: string
+        blockMode:
+          type: string
+        behavior:
+          type: string
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    IntervalFreqLimitRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        time:
+          type: integer
+          description: Window length in seconds
+        request_count:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    SecondFreqLimitRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        request_count:
+          type: integer
+        burst:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    ResponseFreqRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        response_code:
+          type: string
+        time:
+          type: integer
+        response_count:
+          type: integer
+        behavior:
+          type: string
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    UserAgentRule:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        url:
+          type: string
+        user_agent:
+          type: string
+        match:
+          type: string
+        behavior:
+          type: string
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    TemporaryBlacklistEntry:
+      type: object
+      properties:
+        ip:
+          type: string
+        url:
+          type: string
+        country:
+          type: string
+        city:
+          type: string
+        blocked_at:
+          type: string
+        ttl:
+          type: integer
+          format: int64
+        trigger_rule:
+          type: string
+        site_id:
+          type: integer
+          format: int64
+          description: Site this temporary block belongs to
+
+    UpstreamServerL7:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        ip_port:
+          type: string
+          description: Origin address as IP:port
+        protocol:
+          type: string
+        description:
+          type: string
+
+    ListeningPortL7:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        port:
+          type: integer
+        protocol:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+
+    CompressSettingsL7:
+      type: object
+      properties:
+        css:
+          type: boolean
+        html:
+          type: boolean
+        js:
+          type: boolean
+        audio:
+          type: boolean
+        font:
+          type: boolean
+        applications:
+          type: boolean
+
+    CacheRuleL7:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        serverId:
+          type: integer
+          format: int64
+        rule_name:
+          type: string
+        rule_type:
+          type: string
+          enum: [file, url]
+        caching_time:
+          type: integer
+          description: TTL in seconds
+        url:
+          type: string
+        file_types:
+          type: string
+          description: Comma-separated extensions for file rules
+        priority:
+          type: integer
+        cache_slice:
+          type: number
+          format: double
+        without_parameter:
+          type: string
+          enum: [yes, no]
+        cache_mode:
+          type: string
+          enum: [origin, force]
+        status:
+          type: string
+          enum: [ENABLE, DISABLE]
+
+    AgentTokenBody:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Server or global agent token
+
+    L4IpAction:
+      type: object
+      required: [token, ip]
+      properties:
+        token:
+          type: string
+        ip:
+          type: string
+
+    L4ConfigPush:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+        id:
+          type: integer
+          format: int64
+        dev:
+          type: string
+        attachMode:
+          type: string
+        sensitivity:
+          type: string
+        protectionMode:
+          type: string
+        blackIpDuration:
+          type: integer
+        synValid:
+          type: boolean
+        synThreshold:
+          type: integer
+        synBurstPkt:
+          type: integer
+        synBurstCountPerSec:
+          type: integer
+        synFixedThreshold:
+          type: integer
+        synFixedCheckDuration:
+          type: integer
+        challengeTimeout:
+          type: integer
+        synProtectionDuration:
+          type: integer
+        ackValid:
+          type: boolean
+        ackThreshold:
+          type: integer
+        ackBurstPkt:
+          type: integer
+        ackBurstCountPerSec:
+          type: integer
+        ackFixedThreshold:
+          type: integer
+        ackFixedCheckDuration:
+          type: integer
+        ackProtectionDuration:
+          type: integer
+        rstValid:
+          type: boolean
+        rstThreshold:
+          type: integer
+        rstBurstPkt:
+          type: integer
+        rstBurstCountPerSec:
+          type: integer
+        rstFixedThreshold:
+          type: integer
+        rstFixedCheckDuration:
+          type: integer
+        rstProtectionDuration:
+          type: integer
+        icmpValid:
+          type: boolean
+        icmpThreshold:
+          type: integer
+        icmpBurstPkt:
+          type: integer
+        icmpBurstCountPerSec:
+          type: integer
+        icmpFixedThreshold:
+          type: integer
+        icmpFixedCheckDuration:
+          type: integer
+        icmpProtectionDuration:
+          type: integer
+        udpValid:
+          type: boolean
+        udpThreshold:
+          type: integer
+        udpBurstPkt:
+          type: integer
+        udpBurstCountPerSec:
+          type: integer
+        udpFixedThreshold:
+          type: integer
+        udpFixedCheckDuration:
+          type: integer
+        udpProtectionDuration:
+          type: integer
+        greValid:
+          type: boolean
+        greThreshold:
+          type: integer
+        greBurstPkt:
+          type: integer
+        greBurstCountPerSec:
+          type: integer
+        greFixedThreshold:
+          type: integer
+        greFixedCheckDuration:
+          type: integer
+        greProtectionDuration:
+          type: integer
+        tcpSegCheck:
+          type: boolean
+        geoCheck:
+          type: boolean
+        geoDbIpv4Path:
+          type: string
+        geoDbLocationPath:
+          type: string
+        geoAllowCountries:
+          type: array
+          items:
+            type: string
+        geoCountriesBlockMode:
+          type: boolean
+        tcpConnectionLimitCheck:
+          type: boolean
+        tcpConnectionLimitCnt:
+          type: integer
+
+    L4Options:
+      type: object
+      properties:
+        interfaces:
+          type: array
+          items:
+            type: string
+        attachModes:
+          type: array
+          items:
+            type: string
+        attachModesByInterface:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string

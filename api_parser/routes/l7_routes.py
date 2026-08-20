@@ -688,9 +688,6 @@ def _parse_cache_slice_mb(value) -> float:
     return cache_slice
 
 
-    return cache_slice
-
-
 _CLEAR_CACHE_MATCH_TYPE_BY_ID = {
     1: "prefix_match",
     2: "exact_match",
@@ -1085,10 +1082,12 @@ def l7_update_listeningports():
         ]
       }
 
-    Does not take site_id. Only ENABLE entries are applied. If the resulting
-    listen directives differ from server_default_ports.conf, the file is
-    rewritten and athens is restarted.
+    Persists the full list under Redis key 'listeningports', writes ENABLE
+    entries to server_default_ports.conf, and restarts athens when listen
+    directives change. Does not take site_id (see l7_update_site_listeningports).
     """
+    from core.listening_ports import apply_enabled_ports, normalize_api_ports
+
     data, err = _json_object_or_error()
     if err:
         return err
@@ -1100,76 +1099,34 @@ def l7_update_listeningports():
     if err:
         return err
 
-    enabled_ports = []
-    for entry in listeningports_in:
-        if not isinstance(entry, dict):
-            continue
-        status = str(entry.get("status") or "ENABLE").strip().upper()
-        if status != "ENABLE":
-            continue
-        try:
-            port = int(entry.get("port"))
-        except (TypeError, ValueError):
-            continue
-        if port < 1 or port > 65535:
-            continue
-        protocol = _normalize_listening_protocol(entry.get("protocol"))
-        port_entry = {"port": port, "protocol": protocol}
-        if port_entry not in enabled_ports:
-            enabled_ports.append(port_entry)
-
+    redis_entries, enabled_ports = normalize_api_ports(listeningports_in)
     if not enabled_ports:
         return jsonify({
             "status": "error",
             "message": "No valid enabled listening ports provided."
         }), 400
 
-    new_conf = _build_default_ports_conf(enabled_ports)
-    current_conf, read_err = _read_default_ports_conf()
-    if read_err:
-        return jsonify({
-            "status": "error",
-            "message": "Failed to read current listening ports configuration.",
-            "details": read_err
-        }), 500
-
-    current_ports = _parse_default_ports_conf(current_conf)
-    changed = current_ports != enabled_ports
-
-    if not changed:
-        return jsonify({
-            "status": "success",
-            "message": "Listening ports unchanged; no restart required.",
-            "serverId": server_id,
-            "listeningportsCount": len(enabled_ports),
-            "changed": False
-        }), 200
-
-    ok, write_err = _write_default_ports_conf(new_conf)
+    ok, store_err = RedisClient.store_edge_listeningports(redis_entries)
     if not ok:
         return jsonify({
             "status": "error",
-            "message": "Failed to write listening ports configuration.",
-            "details": write_err or "Unknown error"
+            "message": "Failed to write listeningports to Redis.",
+            "details": store_err or "Unknown error"
         }), 500
 
-    restarted, restart_err = _restart_l7_service()
-    if not restarted:
+    ok, details = apply_enabled_ports(enabled_ports, restart=True)
+    if not ok:
         return jsonify({
             "status": "error",
-            "message": "Listening ports configuration updated but service restart failed.",
-            "details": restart_err or "Unknown error",
             "serverId": server_id,
-            "listeningportsCount": len(enabled_ports),
-            "changed": True
+            **details,
         }), 500
 
     return jsonify({
         "status": "success",
-        "message": "Listening ports updated and athens service restarted.",
         "serverId": server_id,
-        "listeningportsCount": len(enabled_ports),
-        "changed": True
+        "redisCount": len(redis_entries),
+        **details,
     }), 200
 
 
@@ -1723,7 +1680,7 @@ def l7_update_site():
         "server_id": 1033,
         "site_id": 55,
         "domain": "www.example.com",
-        "ssl": { ssl_type, ssl_cert, ssl_cert_key },
+        "ssl": { ssl_type, ssl_cert, ssl_cert_key },  # ssl_type=none => HTTP-only
         "waf_rules": {
           "waf_rule_id": 42,
           "waf_whitelist": [...],
@@ -1836,18 +1793,43 @@ def l7_update_site():
         }), 500
 
     ssl_stored = False
-    if isinstance(ssl_in, dict) and (
-        (ssl_in.get("ssl_cert") or ssl_in.get("sslCert"))
-        and (ssl_in.get("ssl_cert_key") or ssl_in.get("sslCertKey") or ssl_in.get("ssl_key"))
-    ):
-        ok, err = RedisClient.store_site_ssl(site_id, domain, ssl_in)
-        if not ok:
-            return jsonify({
-                "status": "error",
-                "message": "Failed to write SSL certificate to Redis.",
-                "details": err or "Unknown error",
-            }), 500
-        ssl_stored = True
+    ssl_http_only = False
+    if isinstance(ssl_in, dict):
+        ssl_type = str(
+            _pick_field(ssl_in, "ssl_type", "sslType", default="") or ""
+        ).strip().lower()
+        has_cert = bool(
+            (ssl_in.get("ssl_cert") or ssl_in.get("sslCert"))
+            and (ssl_in.get("ssl_cert_key") or ssl_in.get("sslCertKey") or ssl_in.get("ssl_key"))
+        )
+        if ssl_type == "none":
+            # HTTP-only site: visitor↔edge must not use HTTPS for this hostname.
+            ok, err = RedisClient.store_site_ssl(site_id, domain, {
+                "ssl_type": "none",
+                "ssl_cert": "",
+                "ssl_cert_key": "",
+            })
+            if not ok:
+                return jsonify({
+                    "status": "error",
+                    "message": "Failed to clear SSL certificate in Redis.",
+                    "details": err or "Unknown error",
+                }), 500
+            ssl_http_only = True
+            # Drop any HTTPS port selections for this site.
+            redis_listening = {
+                "http_ports": list(redis_listening.get("http_ports") or []),
+                "https_ports": [],
+            }
+        elif has_cert:
+            ok, err = RedisClient.store_site_ssl(site_id, domain, ssl_in)
+            if not ok:
+                return jsonify({
+                    "status": "error",
+                    "message": "Failed to write SSL certificate to Redis.",
+                    "details": err or "Unknown error",
+                }), 500
+            ssl_stored = True
 
     waf_counts = {}
     for rule_type, rules in waf_payloads.items():
@@ -1903,6 +1885,7 @@ def l7_update_site():
         "site_id": site_id,
         "domain": domain,
         "sslStored": ssl_stored,
+        "sslHttpOnly": ssl_http_only,
         "wafRulesCount": waf_counts,
         "cacheRulesCount": len(redis_cache),
         "httpPortsCount": len(redis_listening.get("http_ports", [])),
