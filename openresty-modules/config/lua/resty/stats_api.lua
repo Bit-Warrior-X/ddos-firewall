@@ -1,5 +1,6 @@
 local cjson = require "cjson"
 local sparta_cli = require "resty.sparta_cli"
+local req_status = require "resty.req_status"
 
 local _M = { _VERSION = "1.0.0" }
 
@@ -30,10 +31,36 @@ local function request_site_id_filter()
     return tostring(raw)
 end
 
+-- In-progress bucket counters (grows until the 60s worker flush). Opt-in via ?live=1.
+local function request_wants_live()
+    local live = ngx.req.get_uri_args().live
+    return live == true or live == 1 or live == "1" or live == "true"
+end
+
+local function elapsed_in_bucket(interval)
+    local bucket = current_bucket(interval)
+    return math.max(ngx.now() - bucket, 1), bucket
+end
+
+local function latest_history_encoded(history_shm)
+    local history = ngx.shared[history_shm]
+    if not history then
+        return nil
+    end
+    local keys = history:get_keys(0)
+    if not keys or #keys == 0 then
+        return nil
+    end
+    table.sort(keys, function(a, b)
+        return (tonumber(a) or 0) < (tonumber(b) or 0)
+    end)
+    return history:get(keys[#keys])
+end
+
 local function live_dimension_stats(opts)
     local stats_cache = ngx.shared.stats_cache
     local interval = stats_interval()
-    local bucket = current_bucket(interval)
+    local _, bucket = elapsed_in_bucket(interval)
     local items = {}
     local site_filter = opts.site_id
 
@@ -80,6 +107,34 @@ local function filter_history_items(encoded, response_key, site_filter)
     return cjson.encode(obj)
 end
 
+local function respond_latest_or_live(opts)
+    -- Default matches server_traffic_stats: last completed interval (stable totals).
+    if not request_wants_live() then
+        local encoded = latest_history_encoded(opts.history_shm)
+        if encoded then
+            if opts.overlay_latest then
+                local obj = cjson.decode(encoded)
+                if type(obj) == "table" then
+                    opts.overlay_latest(obj)
+                    if opts.site_id then
+                        encoded = filter_history_items(cjson.encode(obj), opts.response_key, opts.site_id)
+                        ngx.header.content_type = "application/json"
+                        ngx.say(encoded)
+                    else
+                        respond_json(obj)
+                    end
+                    return
+                end
+            end
+            ngx.header.content_type = "application/json"
+            ngx.say(filter_history_items(encoded, opts.response_key, opts.site_id))
+            return
+        end
+    end
+
+    live_dimension_stats(opts)
+end
+
 local function dimension_handler(opts)
     local args = ngx.req.get_uri_args()
     local timestamp = args.timestamp
@@ -101,7 +156,7 @@ local function dimension_handler(opts)
         return
     end
 
-    live_dimension_stats(opts)
+    respond_latest_or_live(opts)
 end
 
 function _M.server_traffic_stats()
@@ -277,24 +332,45 @@ function _M.referer_request_stats()
 end
 
 function _M.domain_request_stats()
+    local domain_bw = {}
+    local domain_bw_loaded = false
+    local function ensure_domain_bw()
+        if not domain_bw_loaded then
+            domain_bw = req_status.domain_bandwidth() or {}
+            domain_bw_loaded = true
+        end
+        return domain_bw
+    end
+
+    local elapsed = elapsed_in_bucket(stats_interval())
+
     dimension_handler({
         history_shm = "domain_stats_history",
         shm_missing_error = "domain_stats_history shared dict not available",
         history_missing_error = "No domain_request_stats data for timestamp",
         key_pattern = "^domain_req_count:(%d+):(.+)$",
         response_key = "domain_request_stats",
+        -- Keep completed-interval traffic totals; refresh egress bandwidth live.
+        overlay_latest = function(obj)
+            local bw = ensure_domain_bw()
+            for _, row in ipairs(obj.domain_request_stats or {}) do
+                local host = tostring(row.domain or ""):lower()
+                row.bandwidth_l7_tx = tonumber(bw[host]) or 0
+            end
+        end,
         build_item = function(site_id, domain, count, stats_cache)
-            local interval = stats_interval()
             local rx = tonumber(stats_cache:get("domain_rx:" .. site_id .. ":" .. domain)) or 0
             local tx = tonumber(stats_cache:get("domain_tx:" .. site_id .. ":" .. domain)) or 0
+            local host = tostring(domain or ""):lower()
+            local bw = ensure_domain_bw()
             return {
                 site_id = tonumber(site_id) or 0,
                 domain = domain,
                 request_count = count,
                 traffic_l7_rx = rx,
                 traffic_l7_tx = tx,
-                bandwidth_l7_rx = rx * 8 / interval,
-                bandwidth_l7_tx = tx * 8 / interval,
+                bandwidth_l7_rx = rx * 8 / elapsed,
+                bandwidth_l7_tx = tonumber(bw[host]) or 0,
             }
         end,
         sort_fn = function(a, b)
@@ -349,6 +425,9 @@ local function live_site_traffic_stats(site_filter)
     local stats_worker = require "resty.stats_worker"
     local stats_cache = ngx.shared.stats_cache
     local interval = stats_interval()
+    local elapsed, bucket = elapsed_in_bucket(interval)
+    -- Real-time egress bandwidth from ngx_req_status, aggregated Host → site_id.
+    local site_bw = req_status.site_bandwidth()
     local sites = {}
     if stats_cache then
         for _, key in ipairs(stats_cache:get_keys(0)) do
@@ -369,14 +448,23 @@ local function live_site_traffic_stats(site_filter)
         end
     end
 
+    -- Include sites that only appear in ngx_req_status (have bandwidth, no counters yet).
+    for sid, bw in pairs(site_bw) do
+        if (not site_filter or sid == site_filter) and bw > 0 and not sites[sid] then
+            sites[sid] = stats_worker.empty_site_row(sid)
+        end
+    end
+
     local items = {}
-    for _, row in pairs(sites) do
+    for sid, row in pairs(sites) do
         local rx = tonumber(row.traffic_l7_rx) or 0
         local tx = tonumber(row.traffic_l7_tx) or 0
         row.traffic_l7_rx = rx
         row.traffic_l7_tx = tx
-        row.bandwidth_l7_rx = rx * 8 / interval
-        row.bandwidth_l7_tx = tx * 8 / interval
+        -- Use elapsed seconds in the current bucket so partial-interval rates are correct.
+        row.bandwidth_l7_rx = rx * 8 / elapsed
+        row.bandwidth_l7_tx = tonumber(site_bw[tostring(sid)]) or 0
+        stats_worker.apply_cache_hit_ratio(row)
         table.insert(items, row)
     end
     table.sort(items, function(a, b)
@@ -384,13 +472,21 @@ local function live_site_traffic_stats(site_filter)
     end)
 
     local payload = {
-        timestamp = current_bucket(interval),
+        timestamp = bucket,
         site_traffic_stats = items,
     }
     if site_filter then
         payload.site_id = tonumber(site_filter) or 0
     end
     respond_json(payload)
+end
+
+local function overlay_site_bandwidth(obj)
+    local site_bw = req_status.site_bandwidth() or {}
+    for _, row in ipairs(obj.site_traffic_stats or {}) do
+        local sid = tostring(row.site_id or 0)
+        row.bandwidth_l7_tx = tonumber(site_bw[sid]) or 0
+    end
 end
 
 function _M.site_traffic_stats()
@@ -412,6 +508,25 @@ function _M.site_traffic_stats()
         ngx.header.content_type = "application/json"
         ngx.say(filter_history_items(stats, "site_traffic_stats", site_filter))
         return
+    end
+
+    -- Default: last completed 60s snapshot (stable traffic_*). Same model as server_traffic_stats.
+    -- Overlay live egress bandwidth from ngx_req_status. Use ?live=1 for in-progress counters.
+    if not request_wants_live() then
+        local encoded = latest_history_encoded("site_stats_history")
+        if encoded then
+            local obj = cjson.decode(encoded)
+            if type(obj) == "table" and type(obj.site_traffic_stats) == "table" then
+                overlay_site_bandwidth(obj)
+                if site_filter then
+                    ngx.header.content_type = "application/json"
+                    ngx.say(filter_history_items(cjson.encode(obj), "site_traffic_stats", site_filter))
+                else
+                    respond_json(obj)
+                end
+                return
+            end
+        end
     end
 
     live_site_traffic_stats(site_filter)

@@ -26,6 +26,45 @@ export LIB_REDIS_ADAPTER="${LIB_REDIS_ADAPTER:-/usr/local}"
 NGINX_BUNDLE_DIR="${OPENRESTY_SRC_DIR}/bundle/nginx-1.27.1"
 NGINX_BUILD_DIR="${NGINX_BUNDLE_DIR}"
 
+# Skip ./configure + make + make install; only refresh conf/lua/payload.
+# Usage: ./script.sh --skip-recompile   OR   SKIP_RECOMPILE=1 ./script.sh
+SKIP_RECOMPILE="${SKIP_RECOMPILE:-0}"
+
+usage() {
+  cat <<'EOF'
+Usage: script.sh [options]
+
+Options:
+  --skip-recompile, -s   Skip OpenResty configure/make/install; only copy
+                         config + lua into the existing prefix and refresh
+                         setup/payload/athens.
+  -h, --help             Show this help.
+
+Environment:
+  SKIP_RECOMPILE=1       Same as --skip-recompile
+  ATHENS_PREFIX=...      Install/runtime prefix (default: /usr/local/share/dorian/athens)
+  OPENRESTY_SRC_DIR=...  OpenResty source tree (ignored when skipping recompile)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --skip-recompile|-s)
+      SKIP_RECOMPILE=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
 resolve_nginx_build_dir() {
   local candidates=(
     "${OPENRESTY_SRC_DIR}/build/nginx-1.27.1"
@@ -119,67 +158,78 @@ build_redis_nginx_adapter() {
   fi
 }
 
-apply_nginx_patches
-
-OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib"
-OPENRESTY_CC_OPT="-I${LIB_REDIS_ADAPTER}/include"
-if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
-  OPENRESTY_LD_OPT="${OPENRESTY_LD_OPT} -Wl,-rpath,${LIB_REDIS_ADAPTER}/lib"
-fi
-
-cd "${OPENRESTY_SRC_DIR}"
-
-./configure \
-    --prefix="${INSTALL_PREFIX}" \
-    --conf-path="${INSTALL_PREFIX}/nginx/conf/athens.conf" \
-    --pid-path="${INSTALL_PREFIX}/nginx/logs/athens.pid" \
-    --error-log-path="${INSTALL_PREFIX}/nginx/logs/athens_error.log" \
-    --http-log-path="${INSTALL_PREFIX}/nginx/logs/athens_access.log" \
-    --lock-path="${INSTALL_PREFIX}/nginx/logs/athens.lock" \
-    --add-module=../ngx_acl \
-    --add-module=../ngx_lic/ \
-    --add-module=../ngx_slice/ \
-    --add-module=../ngx_purge/ \
-    --add-module=../ngx_req_status/ \
-    --with-pcre-jit \
-    --with-ipv6 \
-    --with-http_ssl_module \
-    --with-http_v2_module \
-    --with-http_realip_module \
-    --with-http_addition_module \
-    --with-http_sub_module \
-    --with-http_dav_module \
-    --with-http_flv_module \
-    --with-http_mp4_module \
-    --with-http_gunzip_module \
-    --with-http_gzip_static_module \
-    --with-http_auth_request_module \
-    --with-http_random_index_module \
-    --with-http_secure_link_module \
-    --with-http_slice_module \
-    --with-http_stub_status_module \
-    --with-stream \
-    --with-stream_ssl_module \
-    --with-stream_realip_module \
-    --with-stream_ssl_preread_module \
-    --with-threads \
-    --with-file-aio \
-    --with-ld-opt="${OPENRESTY_LD_OPT}" \
-    --with-cc-opt="${OPENRESTY_CC_OPT}"
-
-build_redis_nginx_adapter
-
-make -j"$(nproc)"
-
-# CI: configure uses runtime prefix but install into a writable staging tree (no sudo).
 STAGING_DIR=""
-if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
-  STAGING_DIR="$(mktemp -d)"
-  make install DESTDIR="${STAGING_DIR}"
-  INSTALL_ROOT="${STAGING_DIR}${INSTALL_PREFIX}"
-else
-  make install
+INSTALL_ROOT=""
+
+if [[ "${SKIP_RECOMPILE}" == "1" ]]; then
+  echo "skipping OpenResty recompile (--skip-recompile)"
+  if [[ ! -x "${NGINX_DIR}/sbin/nginx" ]]; then
+    echo "error: no existing nginx binary at ${NGINX_DIR}/sbin/nginx; cannot --skip-recompile" >&2
+    exit 1
+  fi
   INSTALL_ROOT="${INSTALL_PREFIX}"
+else
+  apply_nginx_patches
+
+  OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib"
+  OPENRESTY_CC_OPT="-I${LIB_REDIS_ADAPTER}/include"
+  if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
+    OPENRESTY_LD_OPT="${OPENRESTY_LD_OPT} -Wl,-rpath,${LIB_REDIS_ADAPTER}/lib"
+  fi
+
+  cd "${OPENRESTY_SRC_DIR}"
+
+  ./configure \
+      --prefix="${INSTALL_PREFIX}" \
+      --conf-path="${INSTALL_PREFIX}/nginx/conf/athens.conf" \
+      --pid-path="${INSTALL_PREFIX}/nginx/logs/athens.pid" \
+      --error-log-path="${INSTALL_PREFIX}/nginx/logs/athens_error.log" \
+      --http-log-path="${INSTALL_PREFIX}/nginx/logs/athens_access.log" \
+      --lock-path="${INSTALL_PREFIX}/nginx/logs/athens.lock" \
+      --add-module=../ngx_acl \
+      --add-module=../ngx_lic/ \
+      --add-module=../ngx_slice/ \
+      --add-module=../ngx_purge/ \
+      --add-module=../ngx_req_status/ \
+      --with-pcre-jit \
+      --with-ipv6 \
+      --with-http_ssl_module \
+      --with-http_v2_module \
+      --with-http_realip_module \
+      --with-http_addition_module \
+      --with-http_sub_module \
+      --with-http_dav_module \
+      --with-http_flv_module \
+      --with-http_mp4_module \
+      --with-http_gunzip_module \
+      --with-http_gzip_static_module \
+      --with-http_auth_request_module \
+      --with-http_random_index_module \
+      --with-http_secure_link_module \
+      --with-http_slice_module \
+      --with-http_stub_status_module \
+      --with-stream \
+      --with-stream_ssl_module \
+      --with-stream_realip_module \
+      --with-stream_ssl_preread_module \
+      --with-threads \
+      --with-file-aio \
+      --with-ld-opt="${OPENRESTY_LD_OPT}" \
+      --with-cc-opt="${OPENRESTY_CC_OPT}"
+
+  build_redis_nginx_adapter
+
+  make -j"$(nproc)"
+
+  # CI: configure uses runtime prefix but install into a writable staging tree (no sudo).
+  if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
+    STAGING_DIR="$(mktemp -d)"
+    make install DESTDIR="${STAGING_DIR}"
+    INSTALL_ROOT="${STAGING_DIR}${INSTALL_PREFIX}"
+  else
+    make install
+    INSTALL_ROOT="${INSTALL_PREFIX}"
+  fi
 fi
 
 mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty" "${INSTALL_ROOT}/nginx/cache/athens"
@@ -213,7 +263,11 @@ rm -rf "${PAYLOAD_ATHENS_DIR}/COPYRIGHT"
 rm -rf "${PAYLOAD_ATHENS_DIR}/resty.index"
 rm -rf "${PAYLOAD_ATHENS_DIR}/LICENSE"
 
-echo "Athens OpenResty build and install completed."
+if [[ "${SKIP_RECOMPILE}" == "1" ]]; then
+  echo "Athens config/lua refresh completed (OpenResty recompile skipped)."
+else
+  echo "Athens OpenResty build and install completed."
+fi
 echo "  prefix: ${INSTALL_PREFIX}"
 if [[ -n "${STAGING_DIR}" ]]; then
   echo "  staged: ${INSTALL_ROOT}"

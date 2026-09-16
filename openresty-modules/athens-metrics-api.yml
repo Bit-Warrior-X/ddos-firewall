@@ -486,6 +486,10 @@ components:
         blocked_request_count: 312
         ip_count: 4210
         blocked_ip_count: 48
+        cache_hit_count: 8200
+        cache_miss_count: 1800
+        cache_bypass_count: 420
+        cache_hit_ratio: 0.82
         code200: 16200
         code206: 120
         code301: 80
@@ -812,6 +816,25 @@ components:
         blocked_ip_count:
           type: integer
           description: Unique blocked IPs in the interval
+        cache_hit_count:
+          type: integer
+          description: >
+            Responses served from proxy cache (HIT, STALE, UPDATING, REVALIDATED)
+        cache_miss_count:
+          type: integer
+          description: >
+            Cacheable responses that fetched origin (MISS, EXPIRED)
+        cache_bypass_count:
+          type: integer
+          description: Responses with upstream_cache_status BYPASS
+        cache_hit_ratio:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: >
+            cache_hit_count / (cache_hit_count + cache_miss_count);
+            0 when there were no cacheable hit/miss responses
         code200:
           type: integer
         code206:

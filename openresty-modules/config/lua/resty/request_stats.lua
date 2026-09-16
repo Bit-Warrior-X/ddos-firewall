@@ -22,6 +22,18 @@ local METHOD_COUNTERS = {
     OPTIONS = "options_count",
 }
 
+-- nginx $upstream_cache_status → hit / miss / bypass buckets for hit ratio.
+local CACHE_HIT_STATUS = {
+    HIT = true,
+    STALE = true,
+    UPDATING = true,
+    REVALIDATED = true,
+}
+local CACHE_MISS_STATUS = {
+    MISS = true,
+    EXPIRED = true,
+}
+
 local function request_domain()
     local host = ngx.var.host
     if not host or host == "" then
@@ -94,6 +106,16 @@ function _M.log_response()
         incr(stats_cache, sid, "http3_count", 1)
     else
         incr(stats_cache, sid, "http1_1_count", 1)
+    end
+
+    -- Available in log phase after proxy_cache; empty on nocache locations.
+    local cache_status = ngx.var.upstream_cache_status or ""
+    if CACHE_HIT_STATUS[cache_status] then
+        incr(stats_cache, sid, "cache_hit_count", 1)
+    elseif CACHE_MISS_STATUS[cache_status] then
+        incr(stats_cache, sid, "cache_miss_count", 1)
+    elseif cache_status == "BYPASS" then
+        incr(stats_cache, sid, "cache_bypass_count", 1)
     end
 end
 

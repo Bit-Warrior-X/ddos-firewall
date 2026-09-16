@@ -1,4 +1,5 @@
 local ngx = ngx
+local req_status = require "resty.req_status"
 
 local _M = { _VERSION = "1.0.0" }
 
@@ -79,6 +80,7 @@ local function collect_dimension_items(stats_cache, pattern, build_item)
 end
 
 local function collect_domain_items(stats_cache, interval)
+    local domain_bw = req_status.domain_bandwidth()
     local domains = {}
     local keys = stats_cache:get_keys(0)
     for _, key in ipairs(keys) do
@@ -117,8 +119,10 @@ local function collect_domain_items(stats_cache, interval)
     local items = {}
     for _, row in pairs(domains) do
         if row.request_count > 0 or row.traffic_l7_rx > 0 or row.traffic_l7_tx > 0 then
+            local host = tostring(row.domain or ""):lower()
             row.bandwidth_l7_rx = row.traffic_l7_rx * 8 / interval
-            row.bandwidth_l7_tx = row.traffic_l7_tx * 8 / interval
+            -- Egress bandwidth from ngx_req_status (bits/s), not interval average.
+            row.bandwidth_l7_tx = tonumber(domain_bw[host]) or 0
             table.insert(items, row)
         end
     end
@@ -137,6 +141,10 @@ local function empty_site_row(site_id)
         blocked_request_count = 0,
         ip_count = 0,
         blocked_ip_count = 0,
+        cache_hit_count = 0,
+        cache_miss_count = 0,
+        cache_bypass_count = 0,
+        cache_hit_ratio = 0,
         code200 = 0, code206 = 0, code301 = 0, code302 = 0,
         code400 = 0, code403 = 0, code404 = 0, code444 = 0, code499 = 0,
         code500 = 0, code501 = 0, code502 = 0, code503 = 0, code504 = 0,
@@ -147,11 +155,25 @@ local function empty_site_row(site_id)
     }
 end
 
+--- cache_hit_ratio = hits / (hits + misses); bypass/nocache excluded from denominator.
+function _M.apply_cache_hit_ratio(row)
+    local hits = tonumber(row.cache_hit_count) or 0
+    local misses = tonumber(row.cache_miss_count) or 0
+    local denom = hits + misses
+    if denom > 0 then
+        row.cache_hit_ratio = hits / denom
+    else
+        row.cache_hit_ratio = 0
+    end
+    return row
+end
+
 function _M.empty_site_row(site_id)
     return empty_site_row(site_id)
 end
 
 local function collect_site_traffic_items(stats_cache, interval)
+    local site_bw = req_status.site_bandwidth()
     local sites = {}
     local keys = stats_cache:get_keys(0)
     for _, key in ipairs(keys) do
@@ -171,10 +193,18 @@ local function collect_site_traffic_items(stats_cache, interval)
         end
     end
 
+    for sid, bw in pairs(site_bw) do
+        if bw > 0 and not sites[sid] then
+            sites[sid] = empty_site_row(sid)
+        end
+    end
+
     local items = {}
-    for _, row in pairs(sites) do
+    for sid, row in pairs(sites) do
         row.bandwidth_l7_rx = (tonumber(row.traffic_l7_rx) or 0) * 8 / interval
-        row.bandwidth_l7_tx = (tonumber(row.traffic_l7_tx) or 0) * 8 / interval
+        -- Real-time egress bandwidth from ngx_req_status (bits/s per site).
+        row.bandwidth_l7_tx = tonumber(site_bw[tostring(sid)]) or 0
+        _M.apply_cache_hit_ratio(row)
         table.insert(items, row)
     end
     table.sort(items, function(a, b)
@@ -273,7 +303,11 @@ local function collect_stats(premature)
         http1_1_count = stats_cache:get("http1_1_count") or 0,
         http2_count = stats_cache:get("http2_count") or 0,
         http3_count = stats_cache:get("http3_count") or 0,
+        cache_hit_count = tonumber(stats_cache:get("cache_hit_count")) or 0,
+        cache_miss_count = tonumber(stats_cache:get("cache_miss_count")) or 0,
+        cache_bypass_count = tonumber(stats_cache:get("cache_bypass_count")) or 0,
     }
+    _M.apply_cache_hit_ratio(stats)
 
     local ip_items = collect_dimension_items(stats_cache, "^ip_req_count:(%d+):(.+)$", function(site_id, ip, count)
         return { site_id = tonumber(site_id) or 0, ip = ip, request_count = count }
@@ -356,6 +390,9 @@ local function collect_stats(premature)
     stats_cache:set("http1_1_count", 0)
     stats_cache:set("http2_count", 0)
     stats_cache:set("http3_count", 0)
+    stats_cache:set("cache_hit_count", 0)
+    stats_cache:set("cache_miss_count", 0)
+    stats_cache:set("cache_bypass_count", 0)
 
     local last_count = tonumber(24 * 3600 / STATS_INTERVAL) + 1 or 300
     local history_keys = stats_history:get_keys(last_count)
