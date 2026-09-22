@@ -202,6 +202,72 @@ bundle_hiredis_libs() {
   echo "bundled hiredis: ${real} -> ${dest_lib}/"
 }
 
+# resty.maxminddb uses ffi.load("libmaxminddb"); ship it under athens/lib.
+bundle_maxminddb_libs() {
+  local dest_lib="${1:?dest lib dir}"
+  mkdir -p "${dest_lib}"
+
+  local candidates=(
+    "${LIB_MAXMINDDB}/lib/libmaxminddb.so.0.0.7"
+    "${LIB_MAXMINDDB}/lib/libmaxminddb.so.0"
+    "${LIB_MAXMINDDB}/lib/libmaxminddb.so"
+    "${SCRIPT_DIR}/libmaxminddb/lib/libmaxminddb.so.0.0.7"
+    "${SCRIPT_DIR}/libmaxminddb/lib/libmaxminddb.so.0"
+    "${SCRIPT_DIR}/libmaxminddb/src/.libs/libmaxminddb.so.0.0.7"
+    /usr/local/lib/libmaxminddb.so.0.0.7
+    /usr/local/lib/libmaxminddb.so.0
+    /usr/lib/x86_64-linux-gnu/libmaxminddb.so.0.0.7
+    /lib/x86_64-linux-gnu/libmaxminddb.so.0.0.7
+  )
+  local src=""
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -f "${c}" ]]; then
+      src="${c}"
+      break
+    fi
+  done
+  if [[ -z "${src}" ]]; then
+    src="$(ldconfig -p 2>/dev/null | awk '/libmaxminddb\\.so/{print $NF; exit}')" || true
+  fi
+  if [[ -z "${src}" || ! -f "${src}" ]]; then
+    echo "error: libmaxminddb shared library not found (build/install libmaxminddb)" >&2
+    exit 1
+  fi
+
+  local real
+  real="$(readlink -f "${src}")"
+  local base
+  base="$(basename "${real}")"
+  cp -a "${real}" "${dest_lib}/${base}"
+
+  local soname
+  soname="$(objdump -p "${real}" 2>/dev/null | awk '/SONAME/{print $2; exit}')" || true
+  if [[ -n "${soname}" && "${soname}" != "${base}" ]]; then
+    ln -sfn "${base}" "${dest_lib}/${soname}"
+  fi
+  ln -sfn "${base}" "${dest_lib}/libmaxminddb.so"
+  # Common SONAME used by ffi.load / ldconfig.
+  if [[ "${base}" != "libmaxminddb.so.0" && "${soname:-}" != "libmaxminddb.so.0" ]]; then
+    ln -sfn "${base}" "${dest_lib}/libmaxminddb.so.0"
+  fi
+  echo "bundled libmaxminddb: ${real} -> ${dest_lib}/"
+}
+
+# lua-resty-mlcache (acl_manager); depends on OpenResty lrucache + lock.
+install_lua_resty_mlcache() {
+  local dest_resty="${1:?dest resty dir}"
+  local src="${SCRIPT_DIR}/third_party/lua-resty-mlcache/lib/resty"
+  if [[ ! -f "${src}/mlcache.lua" ]]; then
+    echo "error: vendored lua-resty-mlcache missing at ${src}/mlcache.lua" >&2
+    exit 1
+  fi
+  mkdir -p "${dest_resty}/mlcache"
+  cp -a "${src}/mlcache.lua" "${dest_resty}/mlcache.lua"
+  cp -a "${src}/mlcache/." "${dest_resty}/mlcache/"
+  echo "installed resty.mlcache -> ${dest_resty}/"
+}
+
 STAGING_DIR=""
 INSTALL_ROOT=""
 
@@ -279,6 +345,7 @@ fi
 mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty" "${INSTALL_ROOT}/nginx/cache/athens" "${INSTALL_ROOT}/lib"
 
 bundle_hiredis_libs "${INSTALL_ROOT}/lib"
+bundle_maxminddb_libs "${INSTALL_ROOT}/lib"
 
 # Fallback PEMs required by ssl_certificate at nginx -t (real certs via Lua/SNI).
 ensure_script="${SCRIPT_DIR}/service/ensure-fallback-certs.sh"
@@ -287,6 +354,10 @@ ATHENS_CERT_DIR="${INSTALL_ROOT}/nginx/cert" bash "${INSTALL_ROOT}/ensure-fallba
 
 cp "${SCRIPT_DIR}"/config/*.conf "${INSTALL_ROOT}/nginx/conf/"
 cp -r "${SCRIPT_DIR}/config/lua/resty/." "${INSTALL_ROOT}/nginx/lua/resty/"
+install_lua_resty_mlcache "${INSTALL_ROOT}/nginx/lua/resty"
+# Also publish into OpenResty lualib path for installs where $prefix is the athens root.
+mkdir -p "${INSTALL_ROOT}/lualib/resty"
+install_lua_resty_mlcache "${INSTALL_ROOT}/lualib/resty"
 
 if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" != "1" ]] && [[ -f "${SERVICE_SRC}" ]]; then
     cp "${SERVICE_SRC}" "${SERVICE_DST}"

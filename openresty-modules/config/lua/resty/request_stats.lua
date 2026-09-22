@@ -1,5 +1,4 @@
 local ngx = ngx
-local geo_lookup = require "resty.geo_lookup"
 local site_resolver = require "resty.site_resolver"
 
 local _M = { _VERSION = "1.2.0" }
@@ -160,7 +159,13 @@ function _M.track_request()
     end
     stats_cache:incr("ua_req_count:" .. sid .. ":" .. ua, 1, 0)
 
-    local country, _, isp = geo_lookup.get(ip)
+    local country, isp = "-", "-"
+    local ok_geo, geo_lookup = pcall(require, "resty.geo_lookup")
+    if ok_geo and geo_lookup and geo_lookup.get then
+        local c, _, i = geo_lookup.get(ip)
+        country = c or "-"
+        isp = i or "-"
+    end
     stats_cache:incr("country_req_count:" .. sid .. ":" .. country, 1, 0)
 
     if #isp > 256 then

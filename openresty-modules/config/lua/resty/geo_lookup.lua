@@ -1,7 +1,10 @@
 -- Shared per-request geo lookup (stored in ngx.ctx).
 
-local maxminddb = require "resty.maxminddb"
 local ngx = ngx
+local ok_mm, maxminddb = pcall(require, "resty.maxminddb")
+if not ok_mm then
+    maxminddb = nil
+end
 
 local _M = { _VERSION = "1.0.0" }
 
@@ -15,7 +18,7 @@ function _M.get(ip)
     local city = "-"
     local isp = "-"
 
-    if ip ~= "" and maxminddb.initted and maxminddb.initted() then
+    if ip ~= "" and maxminddb and maxminddb.initted and maxminddb.initted() then
         local c = maxminddb.lookup_iso_code(ip)
         if c and c ~= "" then
             country = c

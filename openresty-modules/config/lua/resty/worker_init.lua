@@ -60,10 +60,16 @@ function _M.run()
 
     local ok_mm, maxminddb = pcall(require, "resty.maxminddb")
     if ok_mm and maxminddb and maxminddb.init then
-        local ok_geo, err_geo = maxminddb.init(GEO_DB_PATH)
-        if not ok_geo then
-            ngx.log(ngx.WARN, "maxminddb.init failed (temporary blacklist geo will be empty): ", tostring(err_geo))
+        if maxminddb.available and not maxminddb.available() then
+            ngx.log(ngx.WARN, "libmaxminddb unavailable: ", tostring(maxminddb.load_error and maxminddb.load_error()))
+        else
+            local ok_geo, err_geo = maxminddb.init(GEO_DB_PATH)
+            if not ok_geo then
+                ngx.log(ngx.WARN, "maxminddb.init failed (temporary blacklist geo will be empty): ", tostring(err_geo))
+            end
         end
+    else
+        ngx.log(ngx.WARN, "failed to require resty.maxminddb: ", tostring(maxminddb))
     end
 
     local ok_tb, temp_blacklist = pcall(require, "resty.temp_blacklist")

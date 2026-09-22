@@ -173,14 +173,26 @@ local MMDB_DATA_TYPE_FLOAT                          =   15
 
 local MMDB_MODE_MMAP				    =  1
 local MMDB_MODE_FOPEN                               =  2
--- copy from https://github.com/lilien1010/lua-resty-maxminddb/blob/f96633e2428f8f7bcc1e2a7a28b747b33233a8db/resty/maxminddb.lua#L136-L138
--- you should install the libmaxminddb to your system
-local maxm                                          = ffi.load('libmaxminddb')
+-- Soft-load: missing libmaxminddb must not break resty.request_stats / access phase.
+-- you should install the libmaxminddb to your system (or ship it under athens/lib)
+local maxm
+do
+  local ok, lib = pcall(ffi.load, 'libmaxminddb')
+  if ok then
+    maxm = lib
+  else
+    maxm = nil
+  end
+end
 --https://github.com/maxmind/libmaxminddb
-local mmdb                                          = ffi_new('MMDB_s')
+local mmdb                                          = maxm and ffi_new('MMDB_s') or nil
 local initted                                       = false
+local load_err                                      = maxm and nil or "libmaxminddb not found (ffi.load failed)"
 
 local function mmdb_strerror(rc)
+    if not maxm then
+        return load_err or "libmaxminddb unavailable"
+    end
     return ffi_str(maxm.MMDB_strerror(rc))
 end
 
@@ -189,6 +201,9 @@ local function gai_strerror(rc)
 end
 
 function _M.init(dbfile)
+  if not maxm or not mmdb then
+    return nil, load_err or "libmaxminddb unavailable"
+  end
   if not initted then
     local maxmind_ready   = maxm.MMDB_open(dbfile,MMDB_MODE_MMAP,mmdb)
 
@@ -205,6 +220,14 @@ end
 
 function _M.initted()
     return initted
+end
+
+function _M.available()
+    return maxm ~= nil
+end
+
+function _M.load_error()
+    return load_err
 end
 
 -- https://github.com/maxmind/libmaxminddb/blob/master/src/maxminddb.c#L1938

@@ -197,7 +197,17 @@ jobs:
             ldd "${nginx_bin}" | grep hiredis || true
             exit 1
           fi
-          echo "nginx hiredis linkage OK"
+          if [[ ! -e "${athens_root}/lib/libmaxminddb.so" && ! -e "${athens_root}/lib/libmaxminddb.so.0" ]]; then
+            echo "error: libmaxminddb missing under ${athens_root}/lib (geo FFI)" >&2
+            ls -la "${athens_root}/lib" || true
+            exit 1
+          fi
+          if [[ ! -f "${athens_root}/nginx/lua/resty/mlcache.lua" ]]; then
+            echo "error: resty.mlcache missing under ${athens_root}/nginx/lua/resty/" >&2
+            ls -la "${athens_root}/nginx/lua/resty" || true
+            exit 1
+          fi
+          echo "nginx hiredis + bundled libmaxminddb + resty.mlcache OK"
 
           # nginx -V lists configure args (e.g. --add-module=../ngx_purge/), not C symbol names.
           if ! echo "${nginx_v}" | grep -q 'ngx_purge'; then
