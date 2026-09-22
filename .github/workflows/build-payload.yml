@@ -182,9 +182,22 @@ jobs:
           fi
           echo "nginx prefix OK (/usr/local/share/dorian/athens)"
 
-          export LD_LIBRARY_PATH="${luajit_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+          export LD_LIBRARY_PATH="${athens_root}/lib:${luajit_lib}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
           nginx_v="$("${nginx_bin}" -V 2>&1)"
           echo "${nginx_v}" | head -3
+
+          if ! ldd "${nginx_bin}" | grep -q 'libhiredis'; then
+            echo "error: nginx binary does not link libhiredis (ngx_purge)" >&2
+            ldd "${nginx_bin}" || true
+            exit 1
+          fi
+          if ldd "${nginx_bin}" | grep -E 'libhiredis' | grep -q 'not found'; then
+            echo "error: libhiredis not found for nginx (expected under ${athens_root}/lib)" >&2
+            ls -la "${athens_root}/lib" || true
+            ldd "${nginx_bin}" | grep hiredis || true
+            exit 1
+          fi
+          echo "nginx hiredis linkage OK"
 
           # nginx -V lists configure args (e.g. --add-module=../ngx_purge/), not C symbol names.
           if ! echo "${nginx_v}" | grep -q 'ngx_purge'; then

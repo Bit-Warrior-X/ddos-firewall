@@ -158,6 +158,50 @@ build_redis_nginx_adapter() {
   fi
 }
 
+# ngx_purge links nginx against libhiredis.so.*; ship it in the payload so
+# runtime hosts do not need distro package libhiredis0.14.
+bundle_hiredis_libs() {
+  local dest_lib="${1:?dest lib dir}"
+  mkdir -p "${dest_lib}"
+
+  local candidates=(
+    /usr/lib/x86_64-linux-gnu/libhiredis.so.0.14
+    /lib/x86_64-linux-gnu/libhiredis.so.0.14
+    /usr/lib/x86_64-linux-gnu/libhiredis.so.1.1.0
+    /lib/x86_64-linux-gnu/libhiredis.so.1.1.0
+  )
+  local src=""
+  local c
+  for c in "${candidates[@]}"; do
+    if [[ -f "${c}" ]]; then
+      src="${c}"
+      break
+    fi
+  done
+  if [[ -z "${src}" ]]; then
+    src="$(ldconfig -p 2>/dev/null | awk '/libhiredis\\.so/{print $NF; exit}')" || true
+  fi
+  if [[ -z "${src}" || ! -f "${src}" ]]; then
+    echo "error: libhiredis shared library not found (install libhiredis0.14 / libhiredis-dev)" >&2
+    exit 1
+  fi
+
+  local real
+  real="$(readlink -f "${src}")"
+  local base
+  base="$(basename "${real}")"
+  cp -a "${real}" "${dest_lib}/${base}"
+
+  # Preserve SONAME symlink expected by the nginx NEEDED entry.
+  local soname
+  soname="$(objdump -p "${real}" 2>/dev/null | awk '/SONAME/{print $2; exit}')" || true
+  if [[ -n "${soname}" && "${soname}" != "${base}" ]]; then
+    ln -sfn "${base}" "${dest_lib}/${soname}"
+  fi
+  ln -sfn "${base}" "${dest_lib}/libhiredis.so"
+  echo "bundled hiredis: ${real} -> ${dest_lib}/"
+}
+
 STAGING_DIR=""
 INSTALL_ROOT=""
 
@@ -171,7 +215,7 @@ if [[ "${SKIP_RECOMPILE}" == "1" ]]; then
 else
   apply_nginx_patches
 
-  OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib"
+  OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib -Wl,-rpath,${INSTALL_PREFIX}/lib -Wl,-rpath,${INSTALL_PREFIX}/luajit/lib"
   OPENRESTY_CC_OPT="-I${LIB_REDIS_ADAPTER}/include"
   if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
     OPENRESTY_LD_OPT="${OPENRESTY_LD_OPT} -Wl,-rpath,${LIB_REDIS_ADAPTER}/lib"
@@ -232,7 +276,9 @@ else
   fi
 fi
 
-mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty" "${INSTALL_ROOT}/nginx/cache/athens"
+mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty" "${INSTALL_ROOT}/nginx/cache/athens" "${INSTALL_ROOT}/lib"
+
+bundle_hiredis_libs "${INSTALL_ROOT}/lib"
 
 cp "${SCRIPT_DIR}"/config/*.conf "${INSTALL_ROOT}/nginx/conf/"
 cp -r "${SCRIPT_DIR}/config/lua/resty/." "${INSTALL_ROOT}/nginx/lua/resty/"
