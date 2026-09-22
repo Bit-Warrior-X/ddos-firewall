@@ -280,6 +280,11 @@ mkdir -p "${INSTALL_ROOT}/nginx/conf" "${INSTALL_ROOT}/nginx/lua/resty" "${INSTA
 
 bundle_hiredis_libs "${INSTALL_ROOT}/lib"
 
+# Fallback PEMs required by ssl_certificate at nginx -t (real certs via Lua/SNI).
+ensure_script="${SCRIPT_DIR}/service/ensure-fallback-certs.sh"
+install -m 755 "${ensure_script}" "${INSTALL_ROOT}/ensure-fallback-certs.sh"
+ATHENS_CERT_DIR="${INSTALL_ROOT}/nginx/cert" bash "${INSTALL_ROOT}/ensure-fallback-certs.sh"
+
 cp "${SCRIPT_DIR}"/config/*.conf "${INSTALL_ROOT}/nginx/conf/"
 cp -r "${SCRIPT_DIR}/config/lua/resty/." "${INSTALL_ROOT}/nginx/lua/resty/"
 
@@ -293,6 +298,8 @@ mkdir -p "${PAYLOAD_ATHENS_DIR}"
 cp -a "${INSTALL_ROOT}/." "${PAYLOAD_ATHENS_DIR}/"
 cp "${SERVICE_SRC}" "${PAYLOAD_ATHENS_DIR}/athens.service"
 cp "${SCRIPT_DIR}/athens-luajit.conf" "${PAYLOAD_ATHENS_DIR}/athens-luajit.conf"
+# Keep ensure script executable in payload root (copied via INSTALL_ROOT above).
+chmod 755 "${PAYLOAD_ATHENS_DIR}/ensure-fallback-certs.sh" 2>/dev/null || true
 
 rm -rf "${PAYLOAD_ATHENS_DIR}/bin"
 rm -rf "${PAYLOAD_ATHENS_DIR}/pod"

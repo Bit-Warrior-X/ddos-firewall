@@ -1,5 +1,7 @@
 # Builds angelos, sparta, athens per target OS, packs one tarball per matrix row, uploads on tag v*.
 #
+# Runs only on version tags (v*). Branch pushes and pull requests do not compile.
+#
 # Use the tarball whose os_slug matches the target host (see BUILD_INFO inside the archive).
 # Example: Ubuntu 22.04 → dorian-ddos-firewall-<version>-ubuntu-22.04-payload.tar.gz
 #
@@ -15,9 +17,7 @@ name: Build payload
 
 on:
   push:
-    branches: [main, master]
     tags: ["v*"]
-  pull_request:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

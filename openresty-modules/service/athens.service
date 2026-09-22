@@ -14,6 +14,8 @@ Environment="LICENSE_PATH=/usr/local/share/dorian/license/license.lic"
 # Bundled luajit + hiredis (ngx_purge). Avoids depending on distro libhiredis0.14.
 Environment="LD_LIBRARY_PATH=/usr/local/share/dorian/athens/lib:/usr/local/share/dorian/athens/luajit/lib"
 
+# ssl_certificate PEMs must exist at nginx -t time (SNI certs come from Redis later).
+ExecStartPre=/usr/local/share/dorian/athens/ensure-fallback-certs.sh
 ExecStartPre=/usr/local/share/dorian/athens/nginx/sbin/nginx -t -q
 ExecStart=/usr/local/share/dorian/athens/nginx/sbin/nginx -g "daemon off;"
 ExecReload=/usr/local/share/dorian/athens/nginx/sbin/nginx -s reload
