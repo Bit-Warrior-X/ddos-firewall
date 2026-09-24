@@ -414,6 +414,40 @@ class RedisClient:
         except Exception:
             return []
 
+    @staticmethod
+    def get_all_upstreamservers() -> List[Dict]:
+        """All upstream server entries from global + site-scoped Redis keys.
+
+        Keys: ``upstreamservers`` and ``upstreamservers:{site_id}``.
+        Each entry is typically ``{ "ip_port": "...", "description": "..." }``.
+        """
+        entries: List[Dict] = []
+        try:
+            rcli = RedisClient.get_client()
+            global_list = RedisClient.get_upstreamservers()
+            if isinstance(global_list, list):
+                entries.extend(e for e in global_list if isinstance(e, dict))
+
+            cursor: str = "0"
+            pattern = f"{RedisClient.UPSTREAMSERVERS_KEY}:*"
+            while True:
+                cursor, keys = rcli.scan(cursor=cursor, match=pattern, count=100)
+                for key in keys or []:
+                    try:
+                        val = rcli.get(key)
+                        if not val:
+                            continue
+                        parsed = json.loads(val)
+                        if isinstance(parsed, list):
+                            entries.extend(e for e in parsed if isinstance(e, dict))
+                    except Exception:
+                        continue
+                if cursor == 0 or cursor == "0":
+                    break
+        except Exception:
+            return entries
+        return entries
+
     CACHERULES_KEY = "cacherules"
 
     @staticmethod
@@ -952,4 +986,171 @@ class RedisClient:
             return True, deleted
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    def _get_json_key(rcli, key: str):
+        """GET key and json.loads; return None if missing/invalid."""
+        try:
+            val = rcli.get(key)
+        except Exception:
+            return None
+        if val is None or val == "":
+            return None
+        try:
+            return json.loads(val)
+        except Exception:
+            return None
+
+    @staticmethod
+    def get_all_temporaryblacklist() -> List[Dict]:
+        """SCAN temporaryblacklist:* and return parsed entry dicts."""
+        entries: List[Dict] = []
+        try:
+            rcli = RedisClient.get_client()
+            for key in RedisClient._scan_keys(rcli, RedisClient.TEMPORARYBLACKLIST_PREFIX + "*"):
+                parsed = RedisClient._get_json_key(rcli, key)
+                if isinstance(parsed, dict):
+                    entry = dict(parsed)
+                    entry["_redis_key"] = key if isinstance(key, str) else str(key)
+                    try:
+                        ttl = rcli.ttl(key)
+                        entry["_ttl_remaining"] = int(ttl) if ttl is not None else -1
+                    except Exception:
+                        entry["_ttl_remaining"] = -1
+                    entries.append(entry)
+        except Exception:
+            return entries
+        return entries
+
+    @staticmethod
+    def dump_l7_configure(include_ssl_pems: bool = False) -> Dict:
+        """
+        Snapshot L7 configure state from Redis for edge→backend sync.
+
+        Returns:
+          {
+            "edge": { listeningports, temporaryblacklist, acl_rules, acl_apply_rules, legacy_global },
+            "sites": { "<site_id>": { domain, domains, waf, cache, listening, upstreamservers, compress, ssl } },
+            "meta": { site_count, temporaryblacklist_count }
+          }
+        """
+        rcli = RedisClient.get_client()
+        sites: Dict[str, Dict] = {}
+
+        def _site(sid: str) -> Dict:
+            if sid not in sites:
+                sites[sid] = {
+                    "domain": "",
+                    "domains": [],
+                    "waf": {},
+                    "cache": [],
+                    "listening": {},
+                    "upstreamservers": [],
+                    "compress": {},
+                    "ssl": {},
+                }
+            return sites[sid]
+
+        # domain:{host} -> site_id
+        for key in RedisClient._scan_keys(rcli, "domain:*"):
+            try:
+                host = key.split(":", 1)[1] if isinstance(key, str) and ":" in key else ""
+                val = rcli.get(key)
+            except Exception:
+                continue
+            if not host or val is None:
+                continue
+            sid = str(val).strip()
+            if not sid:
+                continue
+            bucket = _site(sid)
+            if host not in bucket["domains"]:
+                bucket["domains"].append(host)
+
+        # site:{id}:domain primary hostname
+        for key in RedisClient._scan_keys(rcli, "site:*:domain"):
+            parts = key.split(":") if isinstance(key, str) else []
+            if len(parts) != 3 or parts[0] != "site" or parts[2] != "domain":
+                continue
+            sid = parts[1]
+            try:
+                domain = rcli.get(key)
+            except Exception:
+                continue
+            if domain:
+                _site(sid)["domain"] = str(domain).strip()
+
+        # waf:{site_id}:{rule_type}
+        for key in RedisClient._scan_keys(rcli, "waf:*"):
+            parts = key.split(":") if isinstance(key, str) else []
+            if len(parts) < 3:
+                continue
+            sid, rule_type = parts[1], parts[2]
+            parsed = RedisClient._get_json_key(rcli, key)
+            if parsed is not None:
+                _site(sid)["waf"][rule_type] = parsed
+
+        # cache / listening / upstreamservers / compress / ssl
+        for prefix, field in (
+            ("cache", "cache"),
+            ("listening", "listening"),
+            ("upstreamservers", "upstreamservers"),
+            ("compress", "compress"),
+            ("ssl", "ssl"),
+        ):
+            for key in RedisClient._scan_keys(rcli, f"{prefix}:*"):
+                parts = key.split(":") if isinstance(key, str) else []
+                if len(parts) != 2:
+                    continue
+                sid = parts[1]
+                parsed = RedisClient._get_json_key(rcli, key)
+                if parsed is None:
+                    continue
+                if field == "ssl" and isinstance(parsed, dict) and not include_ssl_pems:
+                    cert = parsed.get("ssl_cert") or ""
+                    key_pem = parsed.get("ssl_cert_key") or ""
+                    parsed = {
+                        "site_id": parsed.get("site_id"),
+                        "domain": parsed.get("domain") or "",
+                        "ssl_type": parsed.get("ssl_type") or "",
+                        "ssl_cert_present": bool(str(cert).strip()),
+                        "ssl_cert_key_present": bool(str(key_pem).strip()),
+                        "ssl_cert_len": len(str(cert)),
+                        "ssl_cert_key_len": len(str(key_pem)),
+                    }
+                _site(sid)[field] = parsed
+
+        # Fill primary domain from domains list when missing
+        for sid, bucket in sites.items():
+            if not bucket.get("domain") and bucket.get("domains"):
+                bucket["domain"] = sorted(bucket["domains"])[0]
+            bucket["domains"] = sorted(bucket.get("domains") or [])
+
+        edge = {
+            "listeningports": RedisClient.get_edge_listeningports(),
+            "temporaryblacklist": RedisClient.get_all_temporaryblacklist(),
+            "acl_rules": RedisClient.get_acl_rules(),
+            "acl_apply_rules": RedisClient.get_acl_apply_rules(),
+            "legacy_global": {
+                "whitelist": RedisClient.get_whitelist(),
+                "blacklist": RedisClient.get_blacklist(),
+                "geo": RedisClient.get_geo(),
+                "antiheader": RedisClient.get_antiheader(),
+                "intervalfreqlimit": RedisClient.get_intervalfreqlimit(),
+                "secondfreqlimit": RedisClient.get_secondfreqlimit(),
+                "responsefreq": RedisClient.get_responsefreq(),
+                "useragent": RedisClient.get_useragent(),
+                "upstreamservers": RedisClient.get_upstreamservers(),
+                "cacherules": RedisClient.get_cacherules(),
+            },
+        }
+
+        return {
+            "edge": edge,
+            "sites": sites,
+            "meta": {
+                "site_count": len(sites),
+                "temporaryblacklist_count": len(edge["temporaryblacklist"]),
+            },
+        }
 

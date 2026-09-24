@@ -44,6 +44,12 @@ CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
 # Temporary blacklist: notify backend when a new item is added to Redis (api_parser monitors Redis)
 TEMPORARY_BLACKLIST_NOTIFY_URL = f"{API_BASE_URL}/temporary_blacklist_added"
 
+# Edge → backend periodic sync of L4+L7 configure (SQLite, firewall.config, Redis)
+EDGE_CONFIG_REPORT_URL = f"{API_BASE_URL}/report_edge_configure"
+EDGE_L4_LISTS_REPORT_URL = EDGE_CONFIG_REPORT_URL
+EDGE_LIST_SYNC_INTERVAL = 60
+EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS = False
+
 # Redis configuration
 REDIS_SOCK = "/tmp/redis.sock"
 REDIS_DB = 0

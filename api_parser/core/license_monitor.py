@@ -10,6 +10,7 @@ from typing import Optional
 import config
 from core import license_check as license_check_mod
 from core.api_client import APIClient
+from core.backend_whitelist import ensure_backend_ips_whitelisted
 from core.license_check import LicenseInfo, get_license_info
 from utils.auth import get_token
 
@@ -90,7 +91,13 @@ def _enforce_service_access(info: LicenseInfo) -> None:
 
     if l4_allowed != _last_l4_allowed:
         if l4_allowed:
-            print("[LICENSE_MONITOR] L4 license type allowed; starting sparta")
+            print("[LICENSE_MONITOR] L4 license type allowed; whitelisting backends then starting sparta")
+            try:
+                # Populate white_ips before systemd start so Sparta load_config
+                # has origins in allowed_ips before XDP attach.
+                ensure_backend_ips_whitelisted(apply_live=False)
+            except Exception as exc:
+                print(f"[LICENSE_MONITOR] Backend whitelist inject failed: {exc}")
             _systemctl("start", config.SPARTA_SERVICE)
         else:
             print("[LICENSE_MONITOR] L4 license type not allowed; stopping sparta")
@@ -99,7 +106,16 @@ def _enforce_service_access(info: LicenseInfo) -> None:
 
     if l7_allowed != _last_l7_allowed:
         if l7_allowed:
-            print("[LICENSE_MONITOR] L7 license type allowed; starting athens")
+            print(
+                "[LICENSE_MONITOR] L7 license type allowed; "
+                "whitelisting origin IPs then starting athens"
+            )
+            try:
+                # Origins must be on L4 whitelist whenever L7 proxies to them,
+                # even if Sparta was already running before L7 was enabled.
+                ensure_backend_ips_whitelisted(apply_live=True)
+            except Exception as exc:
+                print(f"[LICENSE_MONITOR] Origin whitelist inject failed: {exc}")
             _systemctl("start", config.L7_SERVICE)
         else:
             print("[LICENSE_MONITOR] L7 license type not allowed; stopping athens")

@@ -12,6 +12,7 @@ import requests
 from flask import Blueprint, request, jsonify
 
 import config
+from core.backend_whitelist import ensure_backend_ips_whitelisted
 from core.redis_client import RedisClient
 from utils.auth import token_required, extract_token
 from utils.validators import validate_url
@@ -651,6 +652,11 @@ def l7_update_upstreamservers():
             "message": "Failed to write upstream servers to Redis.",
             "details": store_err or "Unknown error"
         }), 500
+
+    try:
+        ensure_backend_ips_whitelisted(apply_live=True)
+    except Exception as exc:
+        print(f"[L7] Backend whitelist after upstream update failed: {exc}", flush=True)
 
     return jsonify({
         "status": "success",
@@ -1869,6 +1875,11 @@ def l7_update_site():
             "message": "Failed to write upstream servers to Redis.",
             "details": err or "Unknown error",
         }), 500
+
+    try:
+        ensure_backend_ips_whitelisted(apply_live=True)
+    except Exception as exc:
+        print(f"[L7] Backend whitelist after site sync failed: {exc}", flush=True)
 
     ok, err = RedisClient.store_site_compress(site_id, redis_compress)
     if not ok:

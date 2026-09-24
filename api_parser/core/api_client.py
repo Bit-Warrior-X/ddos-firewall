@@ -94,3 +94,35 @@ class APIClient:
             )
             return False
 
+    @staticmethod
+    def report_edge_l4_lists(payload: Dict[str, Any]) -> bool:
+        """Deprecated alias — use report_edge_configure."""
+        return APIClient.report_edge_configure(payload)
+
+    @staticmethod
+    def report_edge_configure(payload: Dict[str, Any]) -> bool:
+        """Push full edge L4+L7 configure snapshot to the panel."""
+        headers = {"Content-Type": "application/json"}
+        url = getattr(
+            config,
+            "EDGE_CONFIG_REPORT_URL",
+            None,
+        ) or getattr(
+            config,
+            "EDGE_L4_LISTS_REPORT_URL",
+            f"{config.API_BASE_URL}/report_edge_configure",
+        )
+        try:
+            response = requests.post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30,
+                verify=False,
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            print(f"[EDGE_LIST_SYNC] report_edge_configure failed: {e}", flush=True)
+            return False
+

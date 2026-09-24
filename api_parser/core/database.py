@@ -180,6 +180,76 @@ class DatabaseManager:
         finally:
             if conn:
                 conn.close()
+
+    @staticmethod
+    def merge_whitelist(whitelist_data: List[Dict]) -> tuple:
+        """Insert whitelist IPs that are not already present (no table wipe)."""
+        conn = None
+        try:
+            conn = sqlite3.connect(config.FIREWALL_DB_NAME)
+            cursor = conn.cursor()
+            added = 0
+
+            for entry in whitelist_data or []:
+                ip = (entry.get("IP") or entry.get("ip") or "").strip()
+                if not ip:
+                    continue
+                reason = entry.get("Reason") or entry.get("reason") or ""
+                created = (
+                    entry.get("Created")
+                    or entry.get("created")
+                    or entry.get("created_at")
+                    or ""
+                )
+
+                cursor.execute(
+                    "SELECT 1 FROM white_ips WHERE ip = ? LIMIT 1",
+                    (ip,),
+                )
+                if cursor.fetchone():
+                    continue
+
+                cursor.execute(
+                    """
+                    INSERT INTO white_ips (ip, reason, created)
+                    VALUES (?, ?, ?)
+                    """,
+                    (ip, reason, created),
+                )
+                added += 1
+
+            conn.commit()
+            return True, f"Merged {added} white IP(s) ({len(whitelist_data or [])} candidates)"
+        except Exception as e:
+            return False, f"Error merging whitelist: {str(e)}"
+        finally:
+            if conn:
+                conn.close()
+
+    @staticmethod
+    def remove_blocked_ips(ips: List[str]) -> int:
+        """Delete matching IPs from blocked_ips. Returns rows deleted."""
+        cleaned = [str(ip).strip() for ip in (ips or []) if str(ip).strip()]
+        if not cleaned:
+            return 0
+
+        conn = None
+        try:
+            conn = sqlite3.connect(config.FIREWALL_DB_NAME)
+            cursor = conn.cursor()
+            deleted = 0
+            for ip in cleaned:
+                cursor.execute("DELETE FROM blocked_ips WHERE ip = ?", (ip,))
+                deleted += cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            conn.commit()
+            return deleted
+        except Exception:
+            if conn:
+                conn.rollback()
+            return 0
+        finally:
+            if conn:
+                conn.close()
     
     @staticmethod
     def get_blocklist(
@@ -213,6 +283,41 @@ class DatabaseManager:
         
         sql += " ORDER BY created DESC"
         
+        conn = sqlite3.connect(config.FIREWALL_DB_NAME, timeout=5)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        rows = [dict(r) for r in cursor.fetchall()]
+        conn.close()
+        return rows
+
+    @staticmethod
+    def get_whitelist(
+        filter_ip: Optional[str] = None,
+        filter_date: Optional[str] = None,
+    ) -> List[Dict]:
+        """Query white_ips with optional filters."""
+        sql = """
+            SELECT id, ip, reason, created, timestamp
+            FROM white_ips
+            WHERE 1=1
+        """
+        params = []
+
+        if filter_ip and filter_ip.lower() != "x":
+            sql += " AND ip = ?"
+            params.append(filter_ip.strip())
+
+        if filter_date and filter_date.lower() != "x":
+            try:
+                dt_str = DatabaseManager._normalize_datetime(filter_date)
+                sql += " AND created > ?"
+                params.append(dt_str)
+            except ValueError as e:
+                raise ValueError(f"Invalid date format: {e}")
+
+        sql += " ORDER BY created DESC"
+
         conn = sqlite3.connect(config.FIREWALL_DB_NAME, timeout=5)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()

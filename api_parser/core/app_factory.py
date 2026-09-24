@@ -10,6 +10,7 @@ from core.initializer import sync_l4_lists_and_start_firewall
 from core.listening_ports import sync_from_redis_on_startup
 from core.temporary_blacklist_monitor import start_temporary_blacklist_monitor
 from core.license_monitor import start_license_monitor
+from core.edge_list_sync import start_edge_list_sync
 import config
 
 def create_app() -> Flask:
@@ -52,6 +53,8 @@ def initialize_app():
     start_temporary_blacklist_monitor()
     # Validate license every LICENSE_CHECK_INTERVAL seconds
     start_license_monitor()
+    # Push edge L4+L7 configure (SQLite + firewall.config + Redis) to backend
+    start_edge_list_sync()
 
 def cleanup_on_exit():
     """Cleanup resources on application exit."""

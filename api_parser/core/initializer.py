@@ -3,6 +3,7 @@
 import config as app_config
 from utils.auth import get_token
 from core.api_client import APIClient
+from core.backend_whitelist import ensure_backend_ips_whitelisted
 from core.database import DatabaseManager
 from core.firewall import firewall_control
 
@@ -101,6 +102,13 @@ def sync_l4_lists_and_start_firewall():
                         print(f"[INIT] store_whitelist failed: {msg}", flush=True)
                 else:
                     print(f"[INIT] Unexpected whitelist payload type: {type(whitelist_data)}", flush=True)
+
+    # Always whitelist L7 upstream backends before XDP attach / restart.
+    # Must run after store_whitelist (which wipes white_ips) and before Sparta start.
+    try:
+        ensure_backend_ips_whitelisted(apply_live=True)
+    except Exception as exc:
+        print(f"[INIT] Backend whitelist inject failed: {exc}", flush=True)
 
     # Start L4 firewall via CLI, regardless of API sync success
     ok, fw_cfg = _read_firewall_config()

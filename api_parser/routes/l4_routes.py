@@ -7,6 +7,7 @@ from flask import Blueprint, request, jsonify, current_app
 from core.firewall import firewall_control, set_protection, execute_cli_command
 from core.database import DatabaseManager
 from core.api_client import APIClient
+from core.backend_whitelist import ensure_backend_ips_whitelisted
 from utils.auth import token_required
 import config
 
@@ -214,6 +215,14 @@ def firewall_main():
                 "message": f"Firewall {action} failed during whitelist storage",
                 "details": msg
             }), 500
+
+        # After Dorian whitelist replace, re-add L7 upstream backends before XDP attach.
+        try:
+            ensure_backend_ips_whitelisted(apply_live=True)
+        except Exception as exc:
+            current_app.logger.warning(
+                "Backend whitelist inject before firewall %s failed: %s", action, exc
+            )
     
     # Execute firewall command
     result = firewall_control(action, interface, attach_mode)
@@ -852,6 +861,10 @@ def l4_firewall_data():
              str(int(data["tcpConnectionLimitCnt"]))],
         )
     if restart_required:
+        try:
+            ensure_backend_ips_whitelisted(apply_live=True)
+        except Exception as exc:
+            current_app.logger.warning("Backend whitelist before restart failed: %s", exc)
         results["firewall_restart"] = firewall_control(
             "restart",
             data["dev"],

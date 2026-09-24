@@ -5,11 +5,16 @@ info:
     L7/L4 metrics exposed by Athens (OpenResty) on the internal stats server.
 
     - Base URL: `http://{edge}:9000`
-    - Interval: 60s buckets (except `/req-status`, which is ~10s live bandwidth)
+    - Interval: 60s buckets (except `/req-status`, which is ~10s live egress bandwidth)
     - L7 dimension and site metrics are keyed by `site_id` from Redis `domain:{host}`
     - Unmapped Hosts use `site_id` `0`
-    - Traffic fields are **bytes**; bandwidth fields are **bits/s** over the interval
-  version: 1.2.1
+    - Traffic fields are **bytes**; bandwidth fields are **bits/s**
+    - Default (no `timestamp`): last **completed** 60s history snapshot (stable counters)
+    - `?live=1`: in-progress current bucket (counters grow until the next flush)
+    - Site/domain `bandwidth_l7_tx`: live egress from **ngx_req_status** (Host → site_id sum)
+    - `bandwidth_l7_rx`: derived from interval byte counters (`bytes * 8 / interval`)
+    - Cache hit ratio from `$upstream_cache_status` (see `cache_*` fields)
+  version: 1.3.0
 
 servers:
   - url: http://{host}:9000
@@ -26,7 +31,7 @@ tags:
   - name: Dimensions
     description: Per-site breakdowns (IP, URL, UA, country, ISP, referer, domain)
   - name: Bandwidth
-    description: Live ngx_req_status bandwidth by Host
+    description: Live ngx_req_status egress bandwidth by Host (~10s)
   - name: L4
     description: Sparta eBPF traffic / attack counters
 
@@ -36,8 +41,9 @@ paths:
       tags: [Server]
       summary: Server-wide traffic snapshot
       description: |
-        Latest (or historical) edge-wide stats including NIC and summed L7 counters.
-        Without `timestamp`, returns the newest history bucket.
+        Edge-wide stats including NIC and summed L7 counters (and cache hit ratio).
+        Without `timestamp`, returns the newest **completed** 60s history bucket.
+        Does not support `?live=1` (unlike site/dimension endpoints).
       operationId: getServerTrafficStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
@@ -69,11 +75,18 @@ paths:
       summary: Per-site L7 traffic snapshot
       description: |
         Same L7 counters as server traffic, partitioned by `site_id`. No NIC fields.
-        Live (no `timestamp`) reads the current 60s window; with `timestamp` reads history.
+
+        - Without `timestamp` (default): last **completed** 60s history bucket
+          (`traffic_*` / counts are stable for that timestamp).
+          `bandwidth_l7_tx` is overlaid from live ngx_req_status (egress bits/s).
+        - `?live=1`: in-progress counters for the current open 60s bucket
+          (values grow until flush; timestamp is the bucket start).
+        - `?timestamp=N`: frozen history for that interval (no live bandwidth overlay).
       operationId: getSiteTrafficStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Site traffic stats
@@ -104,10 +117,18 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site domain (Host) request / traffic stats
+      description: |
+        Per-Host request counts and L7 byte totals under each `site_id`.
+
+        - Default (no `timestamp`): last completed history bucket;
+          `bandwidth_l7_tx` refreshed from live ngx_req_status per Host.
+        - `?live=1`: in-progress counters for the current bucket.
+        - `bandwidth_l7_rx`: `traffic_l7_rx * 8 / interval` (or elapsed seconds when `live=1`).
       operationId: getDomainRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Domain request stats
@@ -136,10 +157,13 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site client IP request counts
+      description: |
+        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getIpRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: IP request stats
@@ -168,10 +192,13 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site URL path request counts
+      description: |
+        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getUrlRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: URL request stats
@@ -200,10 +227,13 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site User-Agent request counts
+      description: |
+        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getUserAgentRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: User-Agent request stats
@@ -232,10 +262,13 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site country request / block counts
+      description: |
+        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getCountryRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Country request stats
@@ -264,10 +297,13 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site ISP request counts
+      description: |
+        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getIspRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: ISP request stats
@@ -296,10 +332,13 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site Referer request counts
+      description: |
+        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getRefererRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
+        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Referer request stats
@@ -327,10 +366,14 @@ paths:
   /req-status:
     get:
       tags: [Bandwidth]
-      summary: Live per-Host bandwidth (ngx_req_status)
+      summary: Live per-Host egress bandwidth (ngx_req_status)
       description: |
-        C-module live view keyed by `$host` (~10s). Not site-scoped; join Host → `site_id`
-        via `/domain_request_stats` or Redis `domain:{host}`.
+        C-module live view keyed by `$host` (~10s measure interval). Values are
+        **egress** bits/s toward the client (`connection->sent`).
+
+        Not site-scoped; Athens aggregates Host → `site_id` for
+        `/site_traffic_stats` and `/domain_request_stats` `bandwidth_l7_tx`.
+        Join Host → `site_id` via Redis `domain:{host}` when reading this endpoint directly.
       operationId: getReqStatus
       parameters:
         - name: domain
@@ -342,6 +385,7 @@ paths:
           in: query
           schema:
             type: string
+            example: host
           description: Filter by zone name (Athens uses `host`)
         - name: bandwidth
           in: query
@@ -412,7 +456,9 @@ components:
       name: timestamp
       in: query
       required: false
-      description: Unix epoch for a 60s history bucket (or Sparta L4 bucket)
+      description: |
+        Unix epoch for a completed 60s history bucket (or Sparta L4 bucket).
+        When set, returns frozen history (no live bandwidth overlay; `live` is ignored).
       schema:
         type: integer
         format: int64
@@ -428,6 +474,24 @@ components:
       schema:
         type: integer
         example: 12
+
+    Live:
+      name: live
+      in: query
+      required: false
+      description: |
+        When `1` / `true` and no `timestamp`: return in-progress counters for the
+        current open 60s bucket (values grow until the worker flush).
+        Default without `timestamp`: last completed history snapshot.
+        Accepted values: `1`, `true`, `True` (boolean `true` also works).
+      schema:
+        oneOf:
+          - type: boolean
+          - type: integer
+            enum: [0, 1]
+          - type: string
+            enum: ["0", "1", "true", "false"]
+        example: 1
 
   responses:
     TimestampList:
@@ -469,8 +533,8 @@ components:
 
   examples:
     ServerTrafficStatsExample:
-      summary: Latest server-wide bucket
-      description: Includes NIC + summed L7 counters for the edge.
+      summary: Last completed server-wide 60s bucket
+      description: Includes NIC + summed L7 counters and cache hit ratio for the edge.
       value:
         timestamp: 1723900800
         traffic_nic_rx: 1572864000
@@ -521,7 +585,7 @@ components:
         http3_count: 205
 
     SiteTrafficStatsAllExample:
-      summary: All sites (live or historical)
+      summary: All sites (default = last completed + live egress bandwidth)
       value:
         timestamp: 1723900800
         site_traffic_stats:
@@ -535,6 +599,10 @@ components:
             blocked_request_count: 180
             ip_count: 2100
             blocked_ip_count: 22
+            cache_hit_count: 7200
+            cache_miss_count: 1600
+            cache_bypass_count: 380
+            cache_hit_ratio: 0.818
             code200: 9100
             code206: 60
             code301: 40
@@ -574,6 +642,10 @@ components:
             blocked_request_count: 40
             ip_count: 35
             blocked_ip_count: 12
+            cache_hit_count: 10
+            cache_miss_count: 40
+            cache_bypass_count: 5
+            cache_hit_ratio: 0.2
             code200: 70
             code206: 0
             code301: 0
@@ -620,6 +692,10 @@ components:
             blocked_request_count: 180
             ip_count: 2100
             blocked_ip_count: 22
+            cache_hit_count: 7200
+            cache_miss_count: 1600
+            cache_bypass_count: 380
+            cache_hit_ratio: 0.818
             code200: 9100
             code403: 120
             code404: 200
@@ -629,7 +705,7 @@ components:
             http2_count: 4800
 
     DomainRequestStatsExample:
-      summary: Domains for one site
+      summary: Domains for one site (bandwidth_l7_tx from ngx_req_status)
       value:
         timestamp: 1723900800
         site_id: 12
@@ -749,7 +825,7 @@ components:
             request_count: 4200
 
     ReqStatusExample:
-      summary: Live Host bandwidth (~10s)
+      summary: Live Host egress bandwidth (~10s)
       value:
         timestamp: 1723900860
         data:
@@ -799,10 +875,15 @@ components:
           description: Response bytes sent
         bandwidth_l7_rx:
           type: number
-          description: Request bits/s over the 60s interval
+          description: >
+            Request bits/s derived from traffic_l7_rx
+            (`bytes * 8 / interval`, or elapsed seconds when `live=1`)
         bandwidth_l7_tx:
           type: number
-          description: Response bits/s over the 60s interval
+          description: >
+            Response egress bits/s. On site/domain default (no timestamp) responses,
+            refreshed from ngx_req_status (~10s). Otherwise
+            `traffic_l7_tx * 8 / interval` (or elapsed when `live=1`).
         request_count:
           type: integer
         response_count:
@@ -959,8 +1040,12 @@ components:
           type: number
         bandwidth_l7_rx:
           type: number
+          description: Derived from traffic_l7_rx (`bytes * 8 / interval`)
         bandwidth_l7_tx:
           type: number
+          description: >
+            Live egress bits/s from ngx_req_status for this Host when serving
+            the latest completed bucket; otherwise derived from traffic_l7_tx.
 
     DomainRequestStatsResponse:
       type: object
@@ -1142,7 +1227,7 @@ components:
           oneOf:
             - type: integer
             - type: string
-          description: Live bandwidth in bits/s (~10s window)
+          description: Live egress bandwidth in bits/s (~10s window, connection->sent)
         active:
           type: integer
           description: In-flight requests for this Host

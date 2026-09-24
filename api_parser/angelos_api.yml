@@ -6,7 +6,7 @@ info:
     server. The Dorian **back-end** calls these endpoints directly; the Vue
     front-end never talks to angelos.
 
-    **Base URL:** `http://{edge-server-ip}:5000`
+    **Base URL (inbound):** `http://{edge-server-ip}:5000`
 
     **Transport**
 
@@ -28,25 +28,179 @@ info:
     - `/API/L4/*` — Layer 4 firewall whitelist/blacklist and config (same agent
       port by default; paths configurable in Dorian `config.json`)
 
+    **Edge → panel sync (outbound)**
+
+    Angelos also **POSTs** configure snapshots to the Dorian panel (not served by
+    the edge). See tag **Edge → Panel** and path `/report_edge_configure`.
+    Interval defaults to 60s (`EDGE_LIST_SYNC_INTERVAL`).
+
     This spec is derived from Dorian back-end callers in `internal/api/l7_site_push.go`,
     `internal/api/handlers.go`, and `internal/api/agent_client.go`.
-  version: 1.0.0
+  version: 1.1.0
 
 servers:
   - url: http://{edgeServerIp}:5000
-    description: Edge server running angelos
+    description: Edge server running angelos (inbound — panel calls agent)
     variables:
       edgeServerIp:
         default: 203.0.113.10
         description: Public IP of the protected edge node
+  - url: https://panel.dorian.center/api
+    description: Dorian panel API (outbound — angelos calls panel)
 
 tags:
   - name: L7 WAF
   - name: L7 Traffic
   - name: L7 Cache
   - name: L4 Firewall
+  - name: Edge → Panel
+    description: |
+      Outbound reports from angelos to the Dorian panel. These paths are hosted
+      by the **panel**, not by the edge agent.
 
 paths:
+  /report_edge_configure:
+    post:
+      servers:
+        - url: https://panel.dorian.center/api
+          description: Dorian panel API (angelos → panel)
+      tags: [Edge → Panel]
+      summary: Edge L4+L7 configure snapshot (periodic)
+      description: |
+        Angelos background worker (`edge_list_sync`) POSTs a full configure
+        snapshot every `EDGE_LIST_SYNC_INTERVAL` seconds (default **60**).
+
+        **Sources on the edge**
+
+        - **L4 SQLite** (`firewall_control.db`): `white_ips`, `blocked_ips`
+        - **L4 file**: `firewall.config` (XDP thresholds, device, geo, …)
+        - **L7 Redis**: per-site `domain` / `waf` / `cache` / `listening` /
+          `upstreamservers` / `compress` / `ssl`, edge `listeningports`,
+          `temporaryblacklist:*`, legacy ACL globals
+        - **L7 file**: `server_default_ports.conf` (derived listen lines)
+
+        SSL PEMs are **redacted by default** (`EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS=false`);
+        the report then includes presence/length fields only.
+
+        Panel should upsert / reconcile its DB from this payload so edge-local
+        whitelist/blacklist and Redis config stay in sync with the backend.
+      operationId: reportEdgeConfigure
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeConfigureReport"
+            example:
+              token: edge-auth-token
+              command: report_edge_configure
+              reported_at: 1742800000
+              include_ssl_pems: false
+              whitelist_count: 2
+              blocklist_count: 1
+              site_count: 1
+              temporaryblacklist_count: 0
+              whitelist:
+                - ip: 203.0.113.50
+                  reason: L7 upstream backend
+                  created: "2026-03-24 02:00:00"
+              blocklist:
+                - ip: 198.51.100.10
+                  type: L4
+                  duration: 3600
+                  reason: syn_flood
+                  created: "2026-03-24 02:10:00"
+              l4:
+                firewall_config:
+                  dev: eth0
+                  attach_mode: native
+                  syn_valid: "1"
+                  syn_threshold: "100000"
+                  ack_valid: "1"
+                  ack_threshold: "300000"
+                firewall_config_error: null
+                whitelist:
+                  - ip: 203.0.113.50
+                    reason: L7 upstream backend
+                    created: "2026-03-24 02:00:00"
+                blocklist:
+                  - ip: 198.51.100.10
+                    type: L4
+                    duration: 3600
+                    reason: syn_flood
+                    created: "2026-03-24 02:10:00"
+              l7:
+                edge:
+                  listeningports:
+                    - id: 1
+                      serverId: 1033
+                      port: 80
+                      protocol: http
+                      status: ENABLE
+                  temporaryblacklist: []
+                  acl_rules: []
+                  acl_apply_rules: []
+                  legacy_global:
+                    whitelist: {}
+                    blacklist: {}
+                    upstreamservers: []
+                    cacherules: []
+                sites:
+                  "55":
+                    domain: www.example.com
+                    domains:
+                      - www.example.com
+                      - example.com
+                    waf:
+                      whitelist:
+                        id: 1
+                        rules: []
+                      blacklist:
+                        id: 1
+                        rules: []
+                    cache: []
+                    listening:
+                      http_ports:
+                        - port: 80
+                          protocol: http
+                      https_ports:
+                        - port: 443
+                          protocol: https
+                    upstreamservers:
+                      - ip_port: "198.51.100.20:443"
+                        description: Primary origin
+                    compress:
+                      css: true
+                      html: true
+                      js: true
+                    ssl:
+                      site_id: 55
+                      domain: www.example.com
+                      ssl_type: custom
+                      ssl_cert_present: true
+                      ssl_cert_key_present: true
+                      ssl_cert_len: 1820
+                      ssl_cert_key_len: 1670
+                files:
+                  server_default_ports_conf: |
+                    listen 80 reuseport;
+                    listen 443 ssl reuseport;
+      responses:
+        "200":
+          description: Snapshot accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+        "4XX":
+          description: Invalid token or payload
+        "5XX":
+          description: Panel failed to persist snapshot
+
   /API/L7/l7_update_whitelist:
     post:
       tags: [L7 WAF]
@@ -1905,3 +2059,184 @@ components:
             type: array
             items:
               type: string
+
+    EdgeL4IpWhitelistEntry:
+      type: object
+      required: [ip]
+      properties:
+        ip:
+          type: string
+          example: 203.0.113.50
+        reason:
+          type: string
+        created:
+          type: string
+          description: UTC timestamp string from SQLite
+
+    EdgeL4IpBlocklistEntry:
+      type: object
+      required: [ip]
+      properties:
+        ip:
+          type: string
+        type:
+          type: string
+          example: L4
+        duration:
+          type: integer
+          description: Seconds; `-1` means permanent / unknown
+        reason:
+          type: string
+        created:
+          type: string
+
+    EdgeL4Configure:
+      type: object
+      properties:
+        firewall_config:
+          type: object
+          additionalProperties:
+            type: string
+          description: Parsed key=value map from Sparta `firewall.config`
+        firewall_config_error:
+          type: string
+          nullable: true
+          description: Set when `firewall.config` could not be read
+        whitelist:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeL4IpWhitelistEntry"
+        blocklist:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeL4IpBlocklistEntry"
+
+    EdgeL7SiteConfigure:
+      type: object
+      properties:
+        domain:
+          type: string
+          description: Primary hostname (`site:{id}:domain`)
+        domains:
+          type: array
+          items:
+            type: string
+          description: All Hosts mapped via `domain:{host}`
+        waf:
+          type: object
+          additionalProperties: true
+          description: |
+            Keys are WAF rule types (`whitelist`, `blacklist`, `geo`, `anticc`,
+            `antiheader`, `intervalfreqlimit`, `secondfreqlimit`, `responsefreq`,
+            `useragent`). Values are Redis JSON payloads.
+        cache:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        listening:
+          type: object
+          additionalProperties: true
+        upstreamservers:
+          type: array
+          items:
+            type: object
+            properties:
+              ip_port:
+                type: string
+              description:
+                type: string
+        compress:
+          type: object
+          additionalProperties: true
+        ssl:
+          type: object
+          additionalProperties: true
+          description: |
+            When `include_ssl_pems` is false, PEMs are replaced with
+            `ssl_cert_present` / `ssl_cert_key_present` and length fields.
+
+    EdgeL7Configure:
+      type: object
+      properties:
+        edge:
+          type: object
+          properties:
+            listeningports:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+            temporaryblacklist:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+            acl_rules:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+            acl_apply_rules:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+            legacy_global:
+              type: object
+              additionalProperties: true
+              description: Legacy non-site Redis keys (`whitelist`, `cacherules`, …)
+        sites:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/EdgeL7SiteConfigure"
+          description: Map of site_id (string) → site configure
+        files:
+          type: object
+          properties:
+            server_default_ports_conf:
+              type: string
+              nullable: true
+              description: Contents of Athens `server_default_ports.conf`
+
+    EdgeConfigureReport:
+      type: object
+      required: [token, command, reported_at, l4, l7]
+      description: |
+        Full edge configure snapshot posted by angelos to the panel every minute.
+      properties:
+        token:
+          type: string
+          description: Edge auth token (same as other panel APIs)
+        command:
+          type: string
+          enum: [report_edge_configure]
+        reported_at:
+          type: integer
+          format: int64
+          description: Unix epoch seconds when the snapshot was built
+        include_ssl_pems:
+          type: boolean
+          description: Whether `l7.sites.*.ssl` contains full PEM material
+        whitelist:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeL4IpWhitelistEntry"
+          description: Flat copy of `l4.whitelist` (convenience)
+        blocklist:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeL4IpBlocklistEntry"
+          description: Flat copy of `l4.blocklist` (convenience)
+        whitelist_count:
+          type: integer
+        blocklist_count:
+          type: integer
+        site_count:
+          type: integer
+        temporaryblacklist_count:
+          type: integer
+        l4:
+          $ref: "#/components/schemas/EdgeL4Configure"
+        l7:
+          $ref: "#/components/schemas/EdgeL7Configure"
