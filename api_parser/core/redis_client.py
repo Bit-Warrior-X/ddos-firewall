@@ -1122,9 +1122,14 @@ class RedisClient:
 
         # Fill primary domain from domains list when missing
         for sid, bucket in sites.items():
-            if not bucket.get("domain") and bucket.get("domains"):
-                bucket["domain"] = sorted(bucket["domains"])[0]
-            bucket["domains"] = sorted(bucket.get("domains") or [])
+            domains_list = bucket.get("domains")
+            if not isinstance(domains_list, list):
+                domains_list = []
+            domains_sorted = list(domains_list)
+            domains_sorted.sort()
+            if not bucket.get("domain") and domains_sorted:
+                bucket["domain"] = domains_sorted[0]
+            bucket["domains"] = domains_sorted
 
         edge = {
             "listeningports": RedisClient.get_edge_listeningports(),

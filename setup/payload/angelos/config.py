@@ -46,8 +46,10 @@ TEMPORARY_BLACKLIST_NOTIFY_URL = f"{API_BASE_URL}/temporary_blacklist_added"
 
 # Edge → backend periodic sync of L4+L7 configure (SQLite, firewall.config, Redis)
 EDGE_CONFIG_REPORT_URL = f"{API_BASE_URL}/report_edge_configure"
+# Back-compat alias
 EDGE_L4_LISTS_REPORT_URL = EDGE_CONFIG_REPORT_URL
 EDGE_LIST_SYNC_INTERVAL = 60
+# Include full SSL PEM material in reports (large); default redacts to presence/length only
 EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS = False
 
 # Redis configuration
