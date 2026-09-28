@@ -65,3 +65,14 @@ DEFAULT_ACL_RULE_PRIORITY = 100
 # GeoIP City/Country DB for L4->L7 temp blacklist enrichment (override if your .mmdb lives elsewhere)
 GEOIP_MMDB_PATH = "/usr/local/openresty/nginx/lua/geoip2/dbip-full-2026-02.mmdb"
 
+# Always L4-whitelisted before Sparta starts (see core/backend_whitelist.py).
+# Real panel backend address: panel.dorian.center is behind Cloudflare, so its
+# DNS does not return the IP that calls this agent on :5000.
+PANEL_BACKEND_IPS = ("192.142.44.202",)
+# Resolved via DNS at whitelist time.
+GEODB_DOWNLOAD_HOSTS = (
+    "download.maxmind.com",
+    "download.db-ip.com",
+)
+L4_INFRA_WHITELIST_IPS = ()
+
