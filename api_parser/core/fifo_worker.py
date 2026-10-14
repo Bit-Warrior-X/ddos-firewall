@@ -93,6 +93,7 @@ def process_command(cmd: Dict[str, str]) -> None:
     try:
         if cmd['command'] == 'report_license':
             payload = {
+                'time': str(cmd.get('time', 'unknown')),
                 'command': 'report_license',
                 'data': str(cmd.get('data', 'unknown')),
                 'token': token
@@ -100,6 +101,7 @@ def process_command(cmd: Dict[str, str]) -> None:
             APIClient.send_report_xdp(payload)
         elif cmd['command'] == 'report_protection':
             payload = {
+                'time': str(cmd.get('time', 'unknown')),
                 'command': 'report_protection',
                 'data': str(cmd.get('data', 'unknown')),
                 'token': token
@@ -107,6 +109,7 @@ def process_command(cmd: Dict[str, str]) -> None:
             APIClient.send_report_xdp(payload)
         elif cmd['command'] == 'report_attack':
             payload = {
+                'time': str(cmd.get('time', 'unknown')),
                 'command': 'report_attack',
                 'data': str(cmd.get('data', 'unknown')),
                 'token': token
@@ -114,6 +117,7 @@ def process_command(cmd: Dict[str, str]) -> None:
             APIClient.send_report_xdp(payload)
         elif cmd['command'] == 'report_block_ip':
             payload = {
+                'time': str(cmd.get('time', 'unknown')),
                 'command': 'report_block_ip',
                 'ip': str(cmd.get('ip', 'unknown')),
                 'ttl': str(cmd.get('ttl', 'unknown')),

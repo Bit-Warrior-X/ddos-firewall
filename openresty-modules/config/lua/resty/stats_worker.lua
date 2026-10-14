@@ -6,40 +6,172 @@ local _M = { _VERSION = "1.0.0" }
 local FIREWALL_CONFIG_PATH = "/usr/local/share/dorian/sparta/firewall.config"
 local STATS_INTERVAL = 60
 
-local nic_dev
-local last_nic_rx_bytes
-local last_nic_tx_bytes
-
 local STATUS_CODES = { 200, 206, 301, 302, 400, 403, 404, 444, 499, 500, 501, 502, 503, 504, 904, 929, 978 }
 local HTTP_METHODS = { "get", "post", "delete", "put", "head", "patch", "options", "others" }
 
-local function detect_nic_dev()
-    if nic_dev then
-        return nic_dev
-    end
+local function valid_dev_name(dev)
+    return type(dev) == "string" and dev:match("^[%w%._%-]+$") ~= nil
+end
 
-    local f, err = io.open(FIREWALL_CONFIG_PATH, "r")
+local function iface_exists(dev)
+    if not valid_dev_name(dev) then
+        return false
+    end
+    local f = io.open("/sys/class/net/" .. dev .. "/statistics/rx_bytes", "r")
     if not f then
-        ngx.log(ngx.WARN, "failed to open firewall.config: ", tostring(err))
+        return false
+    end
+    f:close()
+    return true
+end
+
+local function iface_up(dev)
+    if not valid_dev_name(dev) then
+        return false
+    end
+    local f = io.open("/sys/class/net/" .. dev .. "/operstate", "r")
+    if not f then
+        return false
+    end
+    local state = (f:read("*l") or ""):lower()
+    f:close()
+    return state == "up" or state == "unknown"
+end
+
+local function is_bond_slave(dev)
+    if not valid_dev_name(dev) then
+        return false
+    end
+    local f = io.open("/sys/class/net/" .. dev .. "/bonding_slave/state", "r")
+    if not f then
+        return false
+    end
+    f:close()
+    return true
+end
+
+local function bond_master_of(slave)
+    local f = io.open("/proc/net/dev", "r")
+    if not f then
         return nil
     end
-
+    local ifaces = {}
     for line in f:lines() do
-        local dev = line:match("^%s*dev%s*=%s*(%S+)")
-        if dev then
-            nic_dev = dev
+        local name = line:match("^%s*([^:%s]+):")
+        if name and name ~= "lo" then
+            ifaces[#ifaces + 1] = name
+        end
+    end
+    f:close()
+
+    for _, iface in ipairs(ifaces) do
+        if valid_dev_name(iface) then
+            local slaves = io.open("/sys/class/net/" .. iface .. "/bonding/slaves", "r")
+            if slaves then
+                local text = slaves:read("*a") or ""
+                slaves:close()
+                for name in text:gmatch("%S+") do
+                    if name == slave then
+                        return iface
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function default_route_dev()
+    local f = io.open("/proc/net/route", "r")
+    if not f then
+        return nil
+    end
+    local best, best_metric
+    for line in f:lines() do
+        local iface, dest, metric = line:match("^(%S+)%s+(%x+)%s+%x+%s+%x+%s+%d+%s+%d+%s+(%d+)")
+        if iface and dest == "00000000" and iface ~= "lo" and valid_dev_name(iface) then
+            metric = tonumber(metric) or 0
+            if not best or metric < best_metric then
+                best = iface
+                best_metric = metric
+            end
+        end
+    end
+    f:close()
+    return best
+end
+
+local function read_configured_dev()
+    local f, err = io.open(FIREWALL_CONFIG_PATH, "r")
+    if not f then
+        return nil, "failed to open firewall.config: " .. tostring(err)
+    end
+
+    local dev
+    for line in f:lines() do
+        local raw = line:match("^%s*dev%s*=%s*(%S+)")
+        if raw then
+            dev = raw
             break
         end
     end
     f:close()
 
-    if not nic_dev then
-        ngx.log(ngx.WARN, "no dev=... found in firewall.config")
-    else
-        ngx.log(ngx.INFO, "detected NIC dev from firewall.config: ", nic_dev)
+    if not dev then
+        return nil, "no dev=... found in firewall.config"
+    end
+    if not valid_dev_name(dev) then
+        return nil, "invalid dev name in firewall.config"
+    end
+    return dev
+end
+
+--- Prefer an up firewall dev. A bond slave is reported via its master so member
+--- counters are not mistaken for host throughput. A down dev falls back to the
+--- default-route interface (the NIC that is actually carrying traffic).
+local function resolve_nic_dev()
+    local configured, err = read_configured_dev()
+    if configured then
+        if is_bond_slave(configured) then
+            local master = bond_master_of(configured)
+            if master and iface_up(master) then
+                return configured, master, "firewall dev is a bond slave"
+            end
+        end
+        if iface_up(configured) then
+            return configured, configured, nil
+        end
     end
 
-    return nic_dev
+    local route_dev = default_route_dev()
+    if route_dev and iface_up(route_dev) then
+        local reason = err
+        if configured then
+            reason = "firewall dev " .. configured .. " is down"
+        end
+        return configured, route_dev, reason
+    end
+
+    if configured and iface_exists(configured) then
+        return configured, configured, nil
+    end
+    return configured, nil, err or "no usable NIC"
+end
+
+local function note_nic_choice(stats_cache, configured, chosen, reason)
+    if not stats_cache or not chosen then
+        return
+    end
+    local marker = chosen .. "|" .. (reason or "")
+    if stats_cache:get("nic_dev_logged") == marker then
+        return
+    end
+    stats_cache:set("nic_dev_logged", marker)
+    if reason then
+        ngx.log(ngx.WARN, "NIC stats using ", chosen, " (", reason, "); firewall.config dev=", tostring(configured))
+    else
+        ngx.log(ngx.INFO, "NIC stats using ", chosen)
+    end
 end
 
 local function read_nic_bytes(dev)
@@ -221,43 +353,60 @@ local function collect_stats(premature)
     local stats_cache = ngx.shared.stats_cache
     local stats_history = ngx.shared.stats_history
 
-    local lock_key = "collect_stats_lock"
-    local lock_ttl = 2
-    local ok_lock = stats_cache:add(lock_key, 1, lock_ttl)
-    if not ok_lock then
-        return
-    end
-
     local current_time = ngx.now()
     local interval = STATS_INTERVAL
     local timestamp = math.floor(current_time / interval) * interval
 
+    -- One collector per interval. A 2s lock let a later worker overwrite the
+    -- snapshot; with a worker-local NIC baseline that second write was 0.
+    local ok_lock = stats_cache:add("collect_stats_bucket:" .. timestamp, 1, interval * 2)
+    if not ok_lock then
+        return
+    end
+
     local nic_rx_delta = 0
     local nic_tx_delta = 0
+    local nic_elapsed = interval
 
-    local dev = detect_nic_dev()
+    local configured, dev, reason = resolve_nic_dev()
     if dev then
+        note_nic_choice(stats_cache, configured, dev, reason)
         local cur_rx, cur_tx = read_nic_bytes(dev)
         if cur_rx and cur_tx then
-            if last_nic_rx_bytes and last_nic_tx_bytes then
-                if cur_rx >= last_nic_rx_bytes then
-                    nic_rx_delta = cur_rx - last_nic_rx_bytes
+            local prev_dev = stats_cache:get("last_nic_dev")
+            local prev_rx = tonumber(stats_cache:get("last_nic_rx_bytes"))
+            local prev_tx = tonumber(stats_cache:get("last_nic_tx_bytes"))
+            local prev_ts = tonumber(stats_cache:get("nic_sample_ts"))
+            -- Baseline lives in shared memory: any worker may win the bucket lock.
+            if prev_dev == dev and prev_rx and prev_tx then
+                if cur_rx >= prev_rx then
+                    nic_rx_delta = cur_rx - prev_rx
                 end
-                if cur_tx >= last_nic_tx_bytes then
-                    nic_tx_delta = cur_tx - last_nic_tx_bytes
+                if cur_tx >= prev_tx then
+                    nic_tx_delta = cur_tx - prev_tx
+                end
+                if prev_ts and current_time > prev_ts then
+                    local elapsed = current_time - prev_ts
+                    if elapsed >= 1 then
+                        nic_elapsed = elapsed
+                    end
                 end
             end
-            last_nic_rx_bytes = cur_rx
-            last_nic_tx_bytes = cur_tx
+            stats_cache:set("last_nic_rx_bytes", cur_rx)
+            stats_cache:set("last_nic_tx_bytes", cur_tx)
+            stats_cache:set("last_nic_dev", dev)
+            stats_cache:set("nic_sample_ts", current_time)
         end
+    elseif reason then
+        ngx.log(ngx.WARN, "NIC stats unavailable: ", reason)
     end
 
     local bandwidth_l7_rx_total = tonumber(stats_cache:get("bandwidth_l7_rx")) or 0
     local bandwidth_l7_tx_total = tonumber(stats_cache:get("bandwidth_l7_tx")) or 0
     local bandwidth_l7_rx_per_interval = bandwidth_l7_rx_total * 8 / interval
     local bandwidth_l7_tx_per_interval = bandwidth_l7_tx_total * 8 / interval
-    local bandwidth_nic_rx_per_interval = nic_rx_delta * 8 / interval
-    local bandwidth_nic_tx_per_interval = nic_tx_delta * 8 / interval
+    local bandwidth_nic_rx_per_interval = nic_rx_delta * 8 / nic_elapsed
+    local bandwidth_nic_tx_per_interval = nic_tx_delta * 8 / nic_elapsed
 
     local stats = {
         timestamp = timestamp,
@@ -405,11 +554,42 @@ local function collect_stats(premature)
     end
 end
 
+local function seed_nic_baseline()
+    local stats_cache = ngx.shared.stats_cache
+    if not stats_cache then
+        return
+    end
+    -- Seed once so the first 60s sample has a previous counter to subtract.
+    if not stats_cache:add("nic_baseline_seed_lock", 1, 10) then
+        return
+    end
+    if stats_cache:get("nic_sample_ts") then
+        return
+    end
+    local configured, dev, reason = resolve_nic_dev()
+    if not dev then
+        if reason then
+            ngx.log(ngx.WARN, "NIC stats unavailable: ", reason)
+        end
+        return
+    end
+    local rx, tx = read_nic_bytes(dev)
+    if not rx or not tx then
+        return
+    end
+    note_nic_choice(stats_cache, configured, dev, reason)
+    stats_cache:set("last_nic_rx_bytes", rx)
+    stats_cache:set("last_nic_tx_bytes", tx)
+    stats_cache:set("last_nic_dev", dev)
+    stats_cache:set("nic_sample_ts", ngx.now())
+end
+
 function _M.start()
     local stats_cache = ngx.shared.stats_cache
     if stats_cache then
         stats_cache:set("STATS_INTERVAL", STATS_INTERVAL)
     end
+    seed_nic_baseline()
 
     local ok, err = ngx.timer.every(STATS_INTERVAL, collect_stats)
     if not ok then

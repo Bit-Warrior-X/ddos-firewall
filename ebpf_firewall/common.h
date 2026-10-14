@@ -137,6 +137,8 @@
 
 #define EVENT_TCP_SOCKET_ATTACK_FIXED_BLOCK            100
 
+#define EVENT_TCP_CONNECTION_LIMIT_REACHED            110
+
 /* ---- Fixed IP ring buffer type codes ---- */
 #define FIXED_IP_RING_BUF_SYN                      1
 #define FIXED_IP_RING_BUF_ACK                      2

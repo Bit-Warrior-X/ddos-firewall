@@ -272,7 +272,9 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
          inet_ntop(AF_INET, &in, src_str, sizeof(src_str));
          LOG_C("TCP connection limit reached [%s] -> %u (limit=%u)\n",
                src_str, con_count, limit);
- 
+        
+        print_firewall_status(NULL, EVENT_TCP_CONNECTION_LIMIT_REACHED, sip);
+
          struct timespec ts;
          if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
              __u64 now = (__u64)ts.tv_sec * 1000000000ULL + (__u64)ts.tv_nsec;

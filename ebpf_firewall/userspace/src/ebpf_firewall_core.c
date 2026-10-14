@@ -532,10 +532,10 @@ static void * global_traffic_stats_check_worker(void * arg) {
         else
             aggregate.allowed_traffic = 0;
 
-        LOG_T("TRAFFIC: TOTAL:%llu ALLOWED:%llu BLOCKED:%llu SYN:%llu ACK:%llu RST:%llu TCP:%llu UDP:%llu ICMP:%llu GRE:%llu OTHER:%llu\n",
-            aggregate.total_traffic, aggregate.allowed_traffic, aggregate.blocked_traffic,
-            aggregate.syn, aggregate.ack, aggregate.rst,
-            aggregate.tcp, aggregate.udp, aggregate.icmp, aggregate.gre, aggregate.other);
+        //LOG_T("TRAFFIC: TOTAL:%llu ALLOWED:%llu BLOCKED:%llu SYN:%llu ACK:%llu RST:%llu TCP:%llu UDP:%llu ICMP:%llu GRE:%llu OTHER:%llu\n",
+        //    aggregate.total_traffic, aggregate.allowed_traffic, aggregate.blocked_traffic,
+        //    aggregate.syn, aggregate.ack, aggregate.rst,
+        //    aggregate.tcp, aggregate.udp, aggregate.icmp, aggregate.gre, aggregate.other);
     
         memcpy(&global_traffic_stats[index], &aggregate, sizeof (struct traffic_stats_config));
         global_traffic_stats[index].timestamp = time(NULL);
@@ -973,20 +973,33 @@ static void * global_attack_check_worker(void * arg) {
             bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
         }
 
-        LOG_T("STATS: SYN:%llu/%llu ACK:%llu/%llu RST:%llu/%llu PSH:%llu FIN:%llu URG:%llu SYN+ACK:%llu/%llu FIN+ACK:%llu RST+ACK:%llu PSH+ACK:%llu/%llu ICMP:%llu/%llu UDP:%llu/%llu GRE:%llu/%llu\n",
-                aggregate.syn, total_syn_cnt,
-                aggregate.ack, total_ack_cnt,
-                aggregate.rst, total_rst_cnt,
-                aggregate.psh,
-                aggregate.fin,
-                aggregate.urg,
-				aggregate.syn_ack, total_handshake_cnt,
-                aggregate.rst_ack,
-                aggregate.fin_ack,
-                aggregate.psh_ack, total_stomp_cnt,
-                aggregate.icmp, total_icmp_cnt,
-                aggregate.udp, total_udp_cnt,
-                aggregate.gre, total_gre_cnt);
+        LOG_T(
+            "SYN:%5llu/%-5llu "
+            "ACK:%5llu/%-5llu "
+            "RST:%4llu/%-4llu "
+            "PSH:%4llu "
+            "FIN:%4llu "
+            "URG:%4llu "
+            "SYN+ACK:%5llu/%-5llu "
+            "FIN+ACK:%4llu "
+            "RST+ACK:%4llu "
+            "PSH+ACK:%4llu/%-4llu "
+            "ICMP:%4llu/%-4llu "
+            "UDP:%5llu/%-5llu "
+            "GRE:%llu/%llu\n",
+            aggregate.syn,  total_syn_cnt,
+            aggregate.ack,  total_ack_cnt,
+            aggregate.rst,  total_rst_cnt,
+            aggregate.psh,
+            aggregate.fin,
+            aggregate.urg,
+            aggregate.syn_ack, total_handshake_cnt,
+            aggregate.fin_ack,
+            aggregate.rst_ack,
+            aggregate.psh_ack, total_stomp_cnt,
+            aggregate.icmp, total_icmp_cnt,
+            aggregate.udp,  total_udp_cnt,
+            aggregate.gre,  total_gre_cnt);
         
         memcpy(&global_receive_stats, &aggregate, sizeof (struct stats_config));
         

@@ -158,6 +158,8 @@ clean:
 
 install: all
 	@echo ">> Installing eBPF firewall to $(INSTALL_DIR)"
-	@sudo mkdir -p $(INSTALL_DIR)
+	@sudo mkdir -p $(INSTALL_DIR)/bin
 	@sudo cp -r $(BUILD_DIR)/* $(INSTALL_DIR)/
+	@sudo install -m 755 scripts/set-firewall-dev.sh $(INSTALL_DIR)/bin/set-firewall-dev.sh
+	@sudo $(INSTALL_DIR)/bin/set-firewall-dev.sh $(INSTALL_DIR)/firewall.config
 	@echo "Installation complete. Files copied to $(INSTALL_DIR)"

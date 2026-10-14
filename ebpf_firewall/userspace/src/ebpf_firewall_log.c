@@ -76,6 +76,18 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
     char src[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &srcip, src, sizeof(src));
     char temp[1024];
+
+    time_t rawtime;
+    struct tm tm_info;
+    char time_buf[32];
+
+    time(&rawtime);
+    localtime_r(&rawtime, &tm_info);
+
+    if (strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_info) == 0) {
+        strcpy(time_buf, "0000-00-00 00:00:00");
+    }
+
 #if 0
     if (reason == EVENT_IP_BLOCK_END) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
@@ -87,180 +99,204 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
 #endif
     if (reason == EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START\n\n"); 
+                                "data:EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END\n\n"); 
+                                "data:EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_TCP_SYN_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_SYN_ATTACK_BURST_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_SYN_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_TCP_SYN_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_SYN_ATTACK_FIXED_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_SYN_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
-
-
-
-
     else if (reason == EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START\n\n"); 
+                                "data:EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END\n\n"); 
+                                "data:EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_TCP_ACK_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_ACK_ATTACK_BURST_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_ACK_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_TCP_ACK_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_ACK_ATTACK_FIXED_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_ACK_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     
 
 
     else if (reason == EVENT_TCP_RST_ATTACK_PROTECION_MODE_START) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_TCP_RST_ATTACK_PROTECION_MODE_START\n\n"); 
+                                "data:EVENT_TCP_RST_ATTACK_PROTECION_MODE_START\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_TCP_RST_ATTACK_PROTECION_MODE_END) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_TCP_RST_ATTACK_PROTECION_MODE_END\n\n"); 
+                                "data:EVENT_TCP_RST_ATTACK_PROTECION_MODE_END\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_TCP_RST_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_RST_ATTACK_BURST_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_RST_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_TCP_RST_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_RST_ATTACK_FIXED_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_RST_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
 
 
 
     else if (reason == EVENT_ICMP_ATTACK_PROTECION_MODE_START) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_ICMP_ATTACK_PROTECION_MODE_START\n\n"); 
+                                "data:EVENT_ICMP_ATTACK_PROTECION_MODE_START\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_ICMP_ATTACK_PROTECION_MODE_END) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_ICMP_ATTACK_PROTECION_MODE_END\n\n"); 
+                                "data:EVENT_ICMP_ATTACK_PROTECION_MODE_END\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_ICMP_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_ICMP_ATTACK_BURST_BLOCK\n\n",
+                                "attack_type:EVENT_ICMP_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }
     else if (reason == EVENT_ICMP_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_ICMP_ATTACK_FIXED_BLOCK\n\n",
+                                "attack_type:EVENT_ICMP_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
                                 src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
     }   
 
 
     else if (reason == EVENT_UDP_ATTACK_PROTECION_MODE_START) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_UDP_ATTACK_PROTECION_MODE_START\n\n"); 
+                                "data:EVENT_UDP_ATTACK_PROTECION_MODE_START\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_UDP_ATTACK_PROTECION_MODE_END) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_UDP_ATTACK_PROTECION_MODE_END\n\n"); 
+                                "data:EVENT_UDP_ATTACK_PROTECION_MODE_END\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_UDP_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_UDP_ATTACK_BURST_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_UDP_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_UDP_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_UDP_ATTACK_FIXED_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_UDP_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
 
 
     else if (reason == EVENT_GRE_ATTACK_PROTECION_MODE_START) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_GRE_ATTACK_PROTECION_MODE_START\n\n"); 
+                                "data:EVENT_GRE_ATTACK_PROTECION_MODE_START\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_GRE_ATTACK_PROTECION_MODE_END) {
         snprintf(temp, 1024,    "command:report_protection\n"
-                                "data:EVENT_GRE_ATTACK_PROTECION_MODE_END\n\n"); 
+                                "data:EVENT_GRE_ATTACK_PROTECION_MODE_END\n"
+                                "time:%s\n\n", time_buf); 
     }
     else if (reason == EVENT_GRE_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_GRE_ATTACK_BURST_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_GRE_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_GRE_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_GRE_ATTACK_FIXED_BLOCK\n\n",
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_GRE_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     
     else if (reason == EVENT_IP_FRAG_MIDDLE_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_IP_FRAG_MIDDLE_BLOCK\n", 
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_IP_FRAG_MIDDLE_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
 
     else if (reason == EVENT_TCP_STOMP_ATTACK_BURST_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_STOMP_ATTACK_BURST_BLOCK\n", 
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_STOMP_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_TCP_STOMP_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_STOMP_ATTACK_FIXED_BLOCK\n", 
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_STOMP_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
 
     else if (reason == EVENT_TCP_SOCKET_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_SOCKET_ATTACK_FIXED_BLOCK\n", 
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_SOCKET_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
 
 
@@ -268,16 +304,26 @@ void build_block_ip_message(int reason, __u32 srcip, char * build_message, size_
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_HANDSHAKE_ATTACK_BURST_BLOCK\n", 
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_HANDSHAKE_ATTACK_BURST_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }
     else if (reason == EVENT_TCP_HANDSHAKE_ATTACK_FIXED_BLOCK) {
         snprintf(temp, 1024,    "command:report_block_ip\n"
                                 "ip:%s\n"
                                 "ttl:%llds\n"
-                                "attack_type:EVENT_TCP_HANDSHAKE_ATTACK_FIXED_BLOCK\n", 
-                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS); 
+                                "attack_type:EVENT_TCP_HANDSHAKE_ATTACK_FIXED_BLOCK\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
     }   
+    else if (reason == EVENT_TCP_CONNECTION_LIMIT_REACHED) {
+        snprintf(temp, 1024,    "command:report_block_ip\n"
+                                "ip:%s\n"
+                                "ttl:%llds\n"
+                                "attack_type:EVENT_TCP_CONNECTION_LIMIT_REACHED\n"
+                                "time:%s\n\n", 
+                                src, global_fw_config.g_config.black_ip_duration / ONE_SECOND_NS, time_buf); 
+    }
     snprintf(build_message, build_message_size, "%s", temp);
 
     return;
@@ -386,5 +432,9 @@ void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip) {
     } else if (reason == EVENT_TCP_HANDSHAKE_ATTACK_FIXED_BLOCK) {
         LOG_C("EVENT_TCP_HANDSHAKE_ATTACK_FIXED_BLOCK %s\n", src);
         append_block_ip_to_sqlite(src, 0, "Attacking in tcp handshake attack fixed threshold mode");
+    }
+    else if (reason == EVENT_TCP_CONNECTION_LIMIT_REACHED) {
+        LOG_C("EVENT_TCP_CONNECTION_LIMIT_REACHED %s\n", src);
+        append_block_ip_to_sqlite(src, 0, "TCP connection limit reached");
     }
 }

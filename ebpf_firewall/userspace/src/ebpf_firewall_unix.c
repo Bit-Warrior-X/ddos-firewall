@@ -458,10 +458,10 @@ static void handle_health_check(int cfd, char **argv, int argc) {
 
 //l4_cli GET_BLOCKLIST auto 1.1.2.4 '2025-8-12 12:30:29'
 static void handle_getblocklist(int cfd, char **argv, int argc) {
-    LOG_D("handle_getblocklist: %s\n", argv[0]);
-    for (int i = 1; i < argc; i++) {
-        LOG_D("argv[%d]: %s\n", i, argv[i]);
-    }
+    //LOG_D("handle_getblocklist: %s\n", argv[0]);
+    //for (int i = 1; i < argc; i++) {
+        //LOG_D("argv[%d]: %s\n", i, argv[i]);
+    //}
     if (argc != 4) { reply(cfd, "failed\nUsage failed\n"); return; }
 
     int ret = -1;
@@ -478,10 +478,10 @@ static void handle_getblocklist(int cfd, char **argv, int argc) {
 }
 
 static void handle_getmachineid(int cfd, char **argv, int argc) {
-    LOG_D("handle_getmachineid: %s\n", argv[0]);
-    for (int i = 1; i < argc; i++) {
-        LOG_D("argv[%d]: %s\n", i, argv[i]);
-    }
+    //LOG_D("handle_getmachineid: %s\n", argv[0]);
+    //for (int i = 1; i < argc; i++) {
+        //LOG_D("argv[%d]: %s\n", i, argv[i]);
+    //}
     if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
 
     int ret = -1;
@@ -497,10 +497,10 @@ static void handle_getmachineid(int cfd, char **argv, int argc) {
 }
 
 static void handle_traffic_timestamps(int cfd, char **argv, int argc) {
-    LOG_D("handle_traffic_timestamps: %s\n", argv[0]);
-    for (int i = 1; i < argc; i++) {
-        LOG_D("argv[%d]: %s\n", i, argv[i]);
-    }
+    //LOG_D("handle_traffic_timestamps: %s\n", argv[0]);
+    //for (int i = 1; i < argc; i++) {
+        //LOG_D("argv[%d]: %s\n", i, argv[i]);
+    //}
     if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
 
     char data[1000000] = {0};
@@ -540,10 +540,10 @@ static void handle_traffic_timestamps(int cfd, char **argv, int argc) {
 }
 
 static void handle_traffic_stats(int cfd, char **argv, int argc) {
-    LOG_D("handle_traffic_stats: %s\n", argv[0]);
-    for (int i = 1; i < argc; i++) {
-        LOG_D("argv[%d]: %s\n", i, argv[i]);
-    }
+    //LOG_D("handle_traffic_stats: %s\n", argv[0]);
+    //for (int i = 1; i < argc; i++) {
+        //LOG_D("argv[%d]: %s\n", i, argv[i]);
+    //}
     if (argc != 2) { reply(cfd, "failed\nUsage failed\n"); return; }
     int ret = -1;
     int timestamp = atoi(argv[1]);

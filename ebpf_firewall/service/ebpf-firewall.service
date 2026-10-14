@@ -10,6 +10,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/usr/local/share/dorian/sparta/
+ExecStartPre=/usr/local/share/dorian/sparta/bin/set-firewall-dev.sh
 ExecStart=/usr/local/share/dorian/sparta/bin/sparta_user
 Restart=on-failure
 RestartSec=1

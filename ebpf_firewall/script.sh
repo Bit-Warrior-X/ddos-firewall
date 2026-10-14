@@ -67,6 +67,7 @@ stage_sparta_payload() {
     echo "Prometheus exporter binary not built; skipping copy."
   fi
   cp -f "${SCRIPT_DIR}/build/sparta_user" "${PAYLOAD_SPARTA_DIR}/bin/"
+  install -m 755 "${SCRIPT_DIR}/scripts/set-firewall-dev.sh" "${PAYLOAD_SPARTA_DIR}/bin/set-firewall-dev.sh"
   cp -f "${SCRIPT_DIR}/build/firewall.config" "${PAYLOAD_SPARTA_DIR}/"
   cp -f "${SCRIPT_DIR}/build/sparta_kernel.o" "${PAYLOAD_SPARTA_DIR}/"
   cp -f "${SCRIPT_DIR}/service/ebpf-firewall.service" "${PAYLOAD_SPARTA_DIR}/service/${SPARTA_SERVICE}"

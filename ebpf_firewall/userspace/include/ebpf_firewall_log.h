@@ -61,7 +61,7 @@ void func_print(int id, const char* fmt, ...);
 #  define LOG_N(x, args...) func_print(6, "NOTICE  %-*.*s:%04u   "x""ANSI_COLOR_RESET, 30, 80, __FILE__, __LINE__, ##args)
 #  define LOG_I(x, args...) func_print(7, "INFO    %-*.*s:%04u   "x""ANSI_COLOR_RESET, 30, 80, __FILE__, __LINE__, ##args)
 #  define LOG_D(x, args...) func_print(8, "DEBUG   %-*.*s:%04u   "x""ANSI_COLOR_RESET, 30, 80, __FILE__, __LINE__, ##args)
-#  define LOG_T(x, args...) func_print(9, "TRACE   %-*.*s:%04u   "x""ANSI_COLOR_RESET, 30, 80, __FILE__, __LINE__, ##args)
+#  define LOG_T(x, args...) func_print(9, ""x""ANSI_COLOR_RESET, ##args)
 #else
 #  define LOG_G(x, args...) func_print(1, "EMERGE  %-*.*s:%04u   "x, 30, 80, __FILE__, __LINE__, ##args)
 #  define LOG_A(x, args...) func_print(2, "ALERT   %-*.*s:%04u   "x, 30, 80, __FILE__, __LINE__, ##args)
@@ -71,7 +71,7 @@ void func_print(int id, const char* fmt, ...);
 #  define LOG_N(x, args...) func_print(6, "NOTICE  %-*.*s:%04u   "x, 30, 80, __FILE__, __LINE__, ##args)
 #  define LOG_I(x, args...) func_print(7, "INFO    %-*.*s:%04u   "x, 30, 80, __FILE__, __LINE__, ##args)
 #  define LOG_D(x, args...) func_print(8, "DEBUG   %-*.*s:%04u   "x, 30, 80, __FILE__, __LINE__, ##args)
-#  define LOG_T(x, args...) func_print(9, "TRACE   %-*.*s:%04u   "x, 30, 80, __FILE__, __LINE__, ##args)
+#  define LOG_T(x, args...) func_print(9, ""x, ##args)
 #endif
 
 void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip);
