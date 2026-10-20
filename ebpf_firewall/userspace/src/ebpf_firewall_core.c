@@ -268,8 +268,7 @@ struct stats_config global_receive_stats = {0};
 struct stats_config global_passed_stats = {0};
 struct fixed_ip_pkt_stats global_max_ip_pkt_stats = {0};
 
-// one day is 1440 minutes
-struct traffic_stats_config global_traffic_stats[1441] = {0};
+struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS] = {0};
 
 int exiting = 0;
 char **process_argv = NULL;
@@ -488,6 +487,35 @@ static inline __u64 now_ns(void)
     return (__u64)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+/* Counters only move forward. A drop means the map was cleared; keep the new value. */
+static __u64 traffic_counter_delta(__u64 now, __u64 *prev)
+{
+    __u64 delta = (now >= *prev) ? (now - *prev) : now;
+    *prev = now;
+    return delta;
+}
+
+/* Bytes over elapsed_ns, expressed as bytes per one second. */
+static __u64 traffic_per_second(__u64 bytes, __u64 elapsed_ns)
+{
+    if (elapsed_ns == 0)
+        return bytes;
+    return (__u64)((long double)bytes * (long double)ONE_SECOND_NS / (long double)elapsed_ns + 0.5L);
+}
+
+/* Sleep until the next whole wall-clock second; returns that second. */
+static time_t sleep_until_next_second(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    struct timespec target = { .tv_sec = now.tv_sec + 1, .tv_nsec = 0 };
+    while (clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &target, NULL) == EINTR) {
+        if (exiting)
+            break;
+    }
+    return target.tv_sec;
+}
+
 static void * global_traffic_stats_check_worker(void * arg) {
     struct bpf_object *obj = (struct bpf_object*)arg;
     int map_fd = bpf_object__find_map_fd_by_name(obj, "global_income_pkt_traffic");
@@ -496,61 +524,106 @@ static void * global_traffic_stats_check_worker(void * arg) {
         return NULL;
     }
 
+    struct bpf_map_info info = {};
+    __u32 info_len = sizeof(info);
+    if (bpf_obj_get_info_by_fd(map_fd, &info, &info_len)) {
+        LOG_E("bpf_obj_get_info_by_fd %s\n", strerror(errno));
+        return NULL;
+    }
+
+    int nr = bpf_percpu_nr_cpus();
+    size_t stride = bpf_percpu_stride(info.value_size);
+    size_t buf_sz = stride * (size_t)nr;
+    void *raw = calloc(1, buf_sz);
+    if (!raw)
+        return NULL;
+
+    /*
+     * The map is a cumulative per-CPU counter. Sampling is current - previous,
+     * so an increment that lands during the read stays in the map for the next
+     * second instead of being wiped by a zeroing update.
+     *
+     * Reads happen on whole wall-clock seconds, and each delta is divided by the
+     * monotonic time that really passed. If the thread wakes late and misses
+     * seconds, the bytes are spread over every missed second instead of one
+     * doubled sample followed by a missing timestamp.
+     */
+    struct traffic_stats_config baseline = {0};
+    int have_baseline = 0;
     int index = 0;
+    __u32 key = 0;
+    time_t prev_label = 0;
+    __u64 prev_mono = 0;
+
+    while (!exiting && !have_baseline) {
+        time_t label = sleep_until_next_second();
+        if (bpf_map_lookup_elem(map_fd, &key, raw) == 0) {
+            traffic_stats_config_sum_percpu(raw, stride, nr, &baseline);
+            prev_mono = now_ns();
+            prev_label = label;
+            have_baseline = 1;
+            break;
+        }
+        LOG_E("bpf_map_lookup_elem global_income_pkt_traffic: %s\n", strerror(errno));
+    }
+
     while (!exiting) {
-        sleep(1);
-	    struct bpf_map_info info = {};
-	    __u32 info_len = sizeof(info);
+        time_t label = sleep_until_next_second();
 
-	    if (bpf_obj_get_info_by_fd(map_fd, &info, &info_len)) {
-	        LOG_E("bpf_obj_get_info_by_fd %s\n", strerror(errno));
-	        goto cleanup;
-	    }
+        if (bpf_map_lookup_elem(map_fd, &key, raw)) {
+            LOG_E("bpf_map_lookup_elem global_income_pkt_traffic: %s\n", strerror(errno));
+            continue;
+        }
+        __u64 mono = now_ns();
 
-	    int nr = bpf_percpu_nr_cpus();
-	    size_t stride = bpf_percpu_stride(info.value_size);
-	    size_t buf_sz = stride * (size_t)nr;
+        struct traffic_stats_config current = {0};
+        traffic_stats_config_sum_percpu(raw, stride, nr, &current);
 
-	    void *raw = calloc(1, buf_sz);
-	    if (!raw) {
-	        goto cleanup;
-	    }
+        struct traffic_stats_config delta = {0};
+        delta.total_traffic = traffic_counter_delta(current.total_traffic, &baseline.total_traffic);
+        delta.blocked_traffic = traffic_counter_delta(current.blocked_traffic, &baseline.blocked_traffic);
+        delta.syn = traffic_counter_delta(current.syn, &baseline.syn);
+        delta.ack = traffic_counter_delta(current.ack, &baseline.ack);
+        delta.rst = traffic_counter_delta(current.rst, &baseline.rst);
+        delta.tcp = traffic_counter_delta(current.tcp, &baseline.tcp);
+        delta.udp = traffic_counter_delta(current.udp, &baseline.udp);
+        delta.icmp = traffic_counter_delta(current.icmp, &baseline.icmp);
+        delta.gre = traffic_counter_delta(current.gre, &baseline.gre);
+        delta.other = traffic_counter_delta(current.other, &baseline.other);
 
-	    __u32 key = 0;
-	    struct traffic_stats_config aggregate = {0};
-	    if (bpf_map_lookup_elem(map_fd, &key, raw)) {
-	        LOG_E( "bpf_map_lookup_elem");
-	        free(raw);
-	        goto cleanup;
-	    }
+        __u64 elapsed = mono - prev_mono;
+        prev_mono = mono;
 
-	    traffic_stats_config_sum_percpu(raw, stride, nr, &aggregate);
+        /* Wall clock stepped backward, or jumped far ahead: keep the rate, write one slot. */
+        long seconds = (long)(label - prev_label);
+        if (seconds < 1 || seconds > 300)
+            seconds = 1;
+        prev_label = label;
 
-        /* Derived allowed = total - blocked; clamp if counters disagree (e.g. reset race, future BPF paths). */
-        if (aggregate.blocked_traffic <= aggregate.total_traffic)
-            aggregate.allowed_traffic = aggregate.total_traffic - aggregate.blocked_traffic;
+        struct traffic_stats_config sample = {0};
+        sample.total_traffic = traffic_per_second(delta.total_traffic, elapsed);
+        sample.blocked_traffic = traffic_per_second(delta.blocked_traffic, elapsed);
+        sample.syn = traffic_per_second(delta.syn, elapsed);
+        sample.ack = traffic_per_second(delta.ack, elapsed);
+        sample.rst = traffic_per_second(delta.rst, elapsed);
+        sample.tcp = traffic_per_second(delta.tcp, elapsed);
+        sample.udp = traffic_per_second(delta.udp, elapsed);
+        sample.icmp = traffic_per_second(delta.icmp, elapsed);
+        sample.gre = traffic_per_second(delta.gre, elapsed);
+        sample.other = traffic_per_second(delta.other, elapsed);
+        if (sample.blocked_traffic <= sample.total_traffic)
+            sample.allowed_traffic = sample.total_traffic - sample.blocked_traffic;
         else
-            aggregate.allowed_traffic = 0;
+            sample.allowed_traffic = 0;
 
-        //LOG_T("TRAFFIC: TOTAL:%llu ALLOWED:%llu BLOCKED:%llu SYN:%llu ACK:%llu RST:%llu TCP:%llu UDP:%llu ICMP:%llu GRE:%llu OTHER:%llu\n",
-        //    aggregate.total_traffic, aggregate.allowed_traffic, aggregate.blocked_traffic,
-        //    aggregate.syn, aggregate.ack, aggregate.rst,
-        //    aggregate.tcp, aggregate.udp, aggregate.icmp, aggregate.gre, aggregate.other);
-    
-        memcpy(&global_traffic_stats[index], &aggregate, sizeof (struct traffic_stats_config));
-        global_traffic_stats[index].timestamp = time(NULL);
-        index++;
-        index = (index % 1440);
+        for (long s = seconds - 1; s >= 0; s--) {
+            sample.timestamp = (__u64)(label - s);
+            memcpy(&global_traffic_stats[index], &sample, sizeof(sample));
+            index = (index + 1) % TRAFFIC_STATS_SLOTS;
+        }
+    }
 
-	    memset(raw, 0, buf_sz);
-	    if (bpf_map_update_elem(map_fd, &key, raw, 0)) {
-	        LOG_E( "bpf_map_update_elem");
-	        free(raw);
-	        goto cleanup;
-	    }
-	    free(raw);
-	}
-cleanup:
+    free(raw);
     return NULL;
 }
 
@@ -635,6 +708,11 @@ static void * global_attack_check_worker(void * arg) {
     int global_handshake_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_handshake_pkt_counter");
     if (global_handshake_pkt_counter_map_fd < 0) {
         LOG_E( "Failed to find global_handshake_pkt_counter eBPF map\n");
+        goto cleanup;
+    }
+    int global_psh_ack_filtered_map_fd = bpf_object__find_map_fd_by_name(obj, "global_psh_ack_filtered");
+    if (global_psh_ack_filtered_map_fd < 0) {
+        LOG_E( "Failed to find global_psh_ack_filtered eBPF map\n");
         goto cleanup;
     }
 
@@ -771,6 +849,20 @@ static void * global_attack_check_worker(void * arg) {
             goto cleanup;
         }
 
+        __u64 total_psh_ack_filtered = 0;
+        if (bpf_map_lookup_elem(global_psh_ack_filtered_map_fd, &key, values)) {
+            LOG_E( "bpf_map_lookup_elem");
+            goto cleanup;
+        }
+        for (int cpu = 0; cpu < nr; cpu++) {
+            total_psh_ack_filtered += values[cpu];
+        }
+        memset(values, 0, vsize);
+        if (bpf_map_update_elem(global_psh_ack_filtered_map_fd, &key, values, 0)) {
+            LOG_E( "bpf_map_update_elem");
+            goto cleanup;
+        }
+
         struct bpf_map_info info = {};
         __u32 info_len = sizeof(info);
 
@@ -820,14 +912,17 @@ static void * global_attack_check_worker(void * arg) {
                 if (now >= global_attack_stats_val->syn_protect_expire) {
                     global_attack_stats_val->syn_protect_expire = now + global_fw_config.g_syn_config.syn_protect_duration;
                     //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
-                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START, 0);
+
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->syn_attack = syn_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->syn_protect_expire) {
                     //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
-                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->syn_attack = syn_attack;
                     need_to_update = true;
                 }
@@ -841,14 +936,16 @@ static void * global_attack_check_worker(void * arg) {
                 if (now >= global_attack_stats_val->ack_protect_expire) {
                     global_attack_stats_val->ack_protect_expire = now + global_fw_config.g_ack_config.ack_protect_duration;
                     //LOG_D("Send backend to now is %lld, ack_protect_expire %lld\n", now, global_attack_stats_val->ack_protect_expire);
-                    print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->ack_attack = ack_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->ack_protect_expire) {
                     //LOG_D("Send backend to now is %lld, ack_protect_expire %lld\n", now, global_attack_stats_val->ack_protect_expire);
-                    print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->ack_attack = ack_attack;
                     need_to_update = true;
                 }
@@ -861,13 +958,15 @@ static void * global_attack_check_worker(void * arg) {
             if (rst_attack == true) {
                 if (now >= global_attack_stats_val->rst_protect_expire) {
                     global_attack_stats_val->rst_protect_expire = now + global_fw_config.g_rst_config.rst_protect_duration;
-                    print_firewall_status(tm_info, EVENT_TCP_RST_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_TCP_RST_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->rst_attack = rst_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->rst_protect_expire) {
-                    print_firewall_status(tm_info, EVENT_TCP_RST_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_TCP_RST_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->rst_attack = rst_attack;
                     need_to_update = true;
                 }
@@ -880,13 +979,15 @@ static void * global_attack_check_worker(void * arg) {
             if (icmp_attack == true) {
                 if (now >= global_attack_stats_val->icmp_protect_expire) {
                     global_attack_stats_val->icmp_protect_expire = now + global_fw_config.g_icmp_config.icmp_protect_duration;
-                    print_firewall_status(tm_info, EVENT_ICMP_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_ICMP_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->icmp_attack = icmp_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->icmp_protect_expire) {
-                    print_firewall_status(tm_info, EVENT_ICMP_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_ICMP_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->icmp_attack = icmp_attack;
                     need_to_update = true;
                 }
@@ -899,13 +1000,15 @@ static void * global_attack_check_worker(void * arg) {
             if (udp_attack == true) {
                 if (now >= global_attack_stats_val->udp_protect_expire) {
                     global_attack_stats_val->udp_protect_expire = now + global_fw_config.g_udp_config.udp_protect_duration;
-                    print_firewall_status(tm_info, EVENT_UDP_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_UDP_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->udp_attack = udp_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->udp_protect_expire) {
-                    print_firewall_status(tm_info, EVENT_UDP_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_UDP_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->udp_attack = udp_attack;
                     need_to_update = true;
                 }
@@ -918,51 +1021,87 @@ static void * global_attack_check_worker(void * arg) {
             if (gre_attack == true) {
                 if (now >= global_attack_stats_val->gre_protect_expire) {
                     global_attack_stats_val->gre_protect_expire = now + global_fw_config.g_gre_config.gre_protect_duration;
-                    print_firewall_status(tm_info, EVENT_GRE_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_GRE_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->gre_attack = gre_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->gre_protect_expire) {
-                    print_firewall_status(tm_info, EVENT_GRE_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_GRE_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->gre_attack = gre_attack;
                     need_to_update = true;
                 }
             }
         }
 
-        if (total_stomp_cnt >= global_fw_config.g_stomp_config.stomp_threshold) stomp_attack = true;
-        else stomp_attack = false;
+        /* PSH+ACK flag rate opens the flood. STOMP vs HANDSHAKE counts only
+         * choose which defense it is. A flat flood can leave most packets out
+         * of both program counters; the larger of those two counters wins,
+         * and a tie is STOMP. SYN+ACK still uses the handshake counter alone
+         * when PSH+ACK itself is under the gate. */
+        {
+            __u8 stomp_on = global_fw_config.g_stomp_config.valid != 0;
+            __u8 handshake_on = global_fw_config.g_handshake_config.valid != 0;
+            __u32 psh_gate = 0;
+            int have_gate = 0;
+
+            if (stomp_on) {
+                psh_gate = global_fw_config.g_stomp_config.stomp_threshold;
+                have_gate = 1;
+            }
+            if (handshake_on) {
+                __u32 handshake_gate = global_fw_config.g_handshake_config.handshake_threshold;
+                if (!have_gate || handshake_gate < psh_gate)
+                    psh_gate = handshake_gate;
+                have_gate = 1;
+            }
+
+            if (have_gate && aggregate.psh_ack >= psh_gate) {
+                if (handshake_on && total_handshake_cnt > total_stomp_cnt)
+                    handshake_attack = true;
+                else if (stomp_on)
+                    stomp_attack = true;
+                else
+                    handshake_attack = true;
+            } else if (handshake_on &&
+                       total_handshake_cnt >= global_fw_config.g_handshake_config.handshake_threshold) {
+                handshake_attack = true;
+            }
+        }
         if (stomp_attack != global_attack_stats_val->stomp_attack) {
             if (stomp_attack == true) {
                 if (now >= global_attack_stats_val->stomp_protect_expire) {
                     global_attack_stats_val->stomp_protect_expire = now + global_fw_config.g_stomp_config.stomp_protect_duration;
-                    print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->stomp_attack = stomp_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->stomp_protect_expire) {
-                    print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->stomp_attack = stomp_attack;
                     need_to_update = true;
                 }
             }
         }
 
-        if (total_handshake_cnt >= global_fw_config.g_handshake_config.handshake_threshold) handshake_attack = true;
-        else handshake_attack = false;
         if (handshake_attack != global_attack_stats_val->handshake_attack) {
             if (handshake_attack == true) {
                 if (now >= global_attack_stats_val->handshake_protect_expire) {
                     global_attack_stats_val->handshake_protect_expire = now + global_fw_config.g_handshake_config.handshake_protect_duration;
-                    print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_START, 0);
+                    if (global_attack_stats_val->global_req_id == 0)
+                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->handshake_attack = handshake_attack;
                     need_to_update = true;
                 }
             } else {
                 if (now >= global_attack_stats_val->handshake_protect_expire) {
-                    print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_END, 0);
+                    print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_END, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->handshake_attack = handshake_attack;
                     need_to_update = true;
                 }
@@ -980,10 +1119,12 @@ static void * global_attack_check_worker(void * arg) {
             "PSH:%4llu "
             "FIN:%4llu "
             "URG:%4llu "
-            "SYN+ACK:%5llu/%-5llu "
+            "SYN+ACK:%5llu "
             "FIN+ACK:%4llu "
             "RST+ACK:%4llu "
-            "PSH+ACK:%4llu/%-4llu "
+            "PSH+ACK:%4llu/%-5llu "
+            "STOMP:%5llu "
+            "HANDSHAKE:%5llu "
             "ICMP:%4llu/%-4llu "
             "UDP:%5llu/%-5llu "
             "GRE:%llu/%llu\n",
@@ -993,10 +1134,12 @@ static void * global_attack_check_worker(void * arg) {
             aggregate.psh,
             aggregate.fin,
             aggregate.urg,
-            aggregate.syn_ack, total_handshake_cnt,
+            aggregate.syn_ack,
             aggregate.fin_ack,
             aggregate.rst_ack,
-            aggregate.psh_ack, total_stomp_cnt,
+            aggregate.psh_ack, total_psh_ack_filtered,
+            total_stomp_cnt,
+            total_handshake_cnt,
             aggregate.icmp, total_icmp_cnt,
             aggregate.udp,  total_udp_cnt,
             aggregate.gre,  total_gre_cnt);
@@ -1024,100 +1167,6 @@ cleanup:
     if (values) free (values);
     return NULL;
 }
-
-
-
-
-static void * global_attack_syn_check_worker(void * arg) {
-
-    int nr = bpf_percpu_nr_cpus();
-    size_t vsize = sizeof(__u64) * (size_t)nr;
-    __u64 *values = calloc((size_t)nr, sizeof(__u64));
-
-    if (!values)
-        goto cleanup; 
-
-    struct bpf_object *obj = (struct bpf_object*)arg;
-
-    int global_syn_pkt_counter_map_fd;
-
-    int bss_map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
-    if (bss_map_fd < 0) {
-        LOG_E("ERROR: finding .bss map fd: %d\n", bss_map_fd);
-        goto cleanup;
-    }
-    
-    global_syn_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_syn_pkt_counter");
-    if (global_syn_pkt_counter_map_fd < 0) {
-        LOG_E( "Failed to find global_syn_pkt_counter eBPF map\n");
-        goto cleanup;
-    }
-
-    while (!exiting) {
-        __u32 key = 0;
-        time_t now = time(NULL);     /* current epoch seconds */
-        
-        struct global_attack_stats * global_attack_stats_val =&global_fw_config.g_attack_stats;
-        
-        __u64 total_syn_cnt = 0;
-        if (bpf_map_lookup_elem(global_syn_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_syn_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_syn_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
-        time_t rawtime;
-        struct tm *tm_info;
-        time(&rawtime);
-        tm_info = localtime(&rawtime);
-
-        __u8 need_to_update = false;
-        __u8 syn_attack = false;
-
-        if (total_syn_cnt >= 10) syn_attack = true;
-        else syn_attack = false;
-
-        if (syn_attack != global_attack_stats_val->syn_attack) {
-            if (syn_attack == true) {
-                if (now >= global_attack_stats_val->syn_protect_expire) {
-                    global_attack_stats_val->syn_protect_expire = now + global_fw_config.g_syn_config.syn_protect_duration;
-                    //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
-                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START, 0);
-                    global_attack_stats_val->syn_attack = syn_attack;
-                    need_to_update = true;
-                }
-            } else {
-                if (now >= global_attack_stats_val->syn_protect_expire) {
-                    //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
-                    print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_END, 0);
-                    global_attack_stats_val->syn_attack = syn_attack;
-                    need_to_update = true;
-                }
-            }
-        }
-        
-        if (need_to_update == true) {
-            bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
-        }
-
-        //LOG_T("STATS: SYN:%llu/%llu\n",
-        //        aggregate.syn, total_syn_cnt,
-        //        total_syn_cnt);
-
-        usleep (1000);
-    }
-
-cleanup:
-    if (values) free (values);
-    return NULL;
-}
-
 
 static void *blocked_ips_duration_check_worker(void *arg) {
     struct bpf_object *obj = (struct bpf_object*)arg;
@@ -1192,7 +1241,7 @@ static void *blocked_ips_duration_check_worker(void *arg) {
         // Second pass: Delete expired keys
         for (size_t i = 0; i < delete_count; i++) {
             __u32 ip = *(__u32 *)keys_to_delete[i];
-            print_firewall_status(tm_info, EVENT_IP_BLOCK_END, ip);
+            print_firewall_status(tm_info, EVENT_IP_BLOCK_END, ip, 0);
             bpf_map_delete_elem(blocked_ips_fd, keys_to_delete[i]);
             free(keys_to_delete[i]);
         }
@@ -1225,7 +1274,7 @@ static int ringbuf_handle_event(void *ctx, void *data, size_t size)
         return -1;
     }
 
-    print_firewall_status(&tm_info, e->reason, e->srcip);
+    print_firewall_status(&tm_info, e->reason, e->srcip, e->req_id);
     return 0;
 }
 
@@ -1345,7 +1394,7 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
                     expected_pps = (__u64)((double)e->pkt_count / ((double)((__u64)e->duration)/ ONE_SECOND_NS));
                     if (global_max_ip_pkt_stats.normal_handshake < expected_pps) global_max_ip_pkt_stats.normal_handshake = expected_pps;
                 } else {
-                    expected_pps = (__u64)((double)global_fw_config.g_syn_config.syn_fixed_check_duration / e->duration * e->pkt_count / ((double)global_fw_config.g_syn_config.syn_fixed_check_duration / ONE_SECOND_NS));
+                    expected_pps = (__u64)((double)global_fw_config.g_handshake_config.handshake_fixed_check_duration / e->duration * e->pkt_count / ((double)global_fw_config.g_handshake_config.handshake_fixed_check_duration / ONE_SECOND_NS));
                     if (global_max_ip_pkt_stats.attack_handshake < expected_pps) global_max_ip_pkt_stats.attack_handshake = expected_pps;
                 }
                 break;
@@ -1545,52 +1594,85 @@ static void * license_check_worker(void * arg)
     }
 }
 
-static void * send_check_blocklist_worker(void * arg)
+static int attack_episode_active(const struct global_attack_stats *stats)
 {
-    int err;
-    
+    return stats->syn_attack || stats->ack_attack || stats->rst_attack ||
+           stats->icmp_attack || stats->udp_attack || stats->gre_attack ||
+           stats->stomp_attack || stats->handshake_attack;
+}
+
+static void format_report_time(char *time_buf, size_t time_buf_size)
+{
+    time_t rawtime;
+    struct tm tm_info;
+
+    time(&rawtime);
+    localtime_r(&rawtime, &tm_info);
+    if (strftime(time_buf, time_buf_size, "%Y-%m-%d %H:%M:%S", &tm_info) == 0)
+        snprintf(time_buf, time_buf_size, "0000-00-00 00:00:00");
+}
+
+static void * report_attack_status_worker(void * arg)
+{
     int signal_sent = 0;
-    // Wait until terminated.
+
+    (void)arg;
     while (!exiting) {
-        struct global_attack_stats * g_attack_stats = &global_fw_config.g_attack_stats;
+        struct global_attack_stats *g_attack_stats = &global_fw_config.g_attack_stats;
+        int active = attack_episode_active(g_attack_stats);
+        char message[1024];
+        char time_buf[32];
+        __u64 req_id;
 
-        if ((g_attack_stats->syn_attack || 
-            g_attack_stats->ack_attack || 
-            g_attack_stats->rst_attack ||
-            g_attack_stats->icmp_attack ||
-            g_attack_stats->udp_attack ||
-            g_attack_stats->gre_attack) && signal_sent == 0) {
-                //const char * message = "command:check_blocklist\nstatus:start\n";
-                const char * message = "command:report_attack\ndata:attack_start\n";
-                send_message_to_api_parser(message);
-                signal_sent = 1;
-                LOG_D("Send backend to start checking blocklist %d %d %d %d %d %d\n", g_attack_stats->syn_attack, 
-                                                g_attack_stats->ack_attack,
-                                                g_attack_stats->rst_attack,
-                                                g_attack_stats->icmp_attack,
-                                                g_attack_stats->udp_attack,
-                                                g_attack_stats->gre_attack);
+        if (active && signal_sent == 0) {
+            if (g_attack_stats->global_req_id == 0)
+                g_attack_stats->global_req_id = generate_attack_req_id();
+            req_id = g_attack_stats->global_req_id;
+
+            format_report_time(time_buf, sizeof(time_buf));
+            snprintf(message, sizeof(message),
+                     "command:report_attack\ndata:attack_start\nreq_id:%llu\ntime:%s\n",
+                     (unsigned long long)req_id,
+                     time_buf);
+            send_message_to_api_parser(message);
+            signal_sent = 1;
+            LOG_D("Send report attack status req_id=%llu syn=%d ack=%d rst=%d icmp=%d udp=%d gre=%d stomp=%d handshake=%d\n",
+                  (unsigned long long)req_id,
+                  g_attack_stats->syn_attack,
+                  g_attack_stats->ack_attack,
+                  g_attack_stats->rst_attack,
+                  g_attack_stats->icmp_attack,
+                  g_attack_stats->udp_attack,
+                  g_attack_stats->gre_attack,
+                  g_attack_stats->stomp_attack,
+                  g_attack_stats->handshake_attack);
+        } else if (!active && signal_sent == 1) {
+            req_id = g_attack_stats->global_req_id;
+
+            format_report_time(time_buf, sizeof(time_buf));
+            snprintf(message, sizeof(message),
+                     "command:report_attack\ndata:attack_stop\nreq_id:%llu\ntime:%s\n",
+                     (unsigned long long)req_id,
+                     time_buf);
+            send_message_to_api_parser(message);
+            /* A new episode may have started after the snapshot above. */
+            if (!attack_episode_active(g_attack_stats) &&
+                g_attack_stats->global_req_id == req_id)
+                g_attack_stats->global_req_id = 0;
+            signal_sent = 0;
+            LOG_D("Send report attack status req_id=%llu syn=%d ack=%d rst=%d icmp=%d udp=%d gre=%d stomp=%d handshake=%d\n",
+                  (unsigned long long)req_id,
+                  g_attack_stats->syn_attack,
+                  g_attack_stats->ack_attack,
+                  g_attack_stats->rst_attack,
+                  g_attack_stats->icmp_attack,
+                  g_attack_stats->udp_attack,
+                  g_attack_stats->gre_attack,
+                  g_attack_stats->stomp_attack,
+                  g_attack_stats->handshake_attack);
         }
 
-        if ((g_attack_stats->syn_attack == 0 && 
-            g_attack_stats->ack_attack == 0 && 
-            g_attack_stats->rst_attack == 0 &&
-            g_attack_stats->icmp_attack == 0  &&
-            g_attack_stats->udp_attack == 0 &&
-            g_attack_stats->gre_attack == 0) && signal_sent == 1) {
-                //const char * message = "command:check_blocklist\nstatus:stop\n";
-                const char * message = "command:report_attack\ndata:attack_stop\n";
-                send_message_to_api_parser(message);
-                signal_sent = 0;
-                LOG_D("Send backend to stop checking blocklist %d %d %d %d %d %d\n", g_attack_stats->syn_attack, 
-                                                g_attack_stats->ack_attack,
-                                                g_attack_stats->rst_attack,
-                                                g_attack_stats->icmp_attack,
-                                                g_attack_stats->udp_attack,
-                                                g_attack_stats->gre_attack);
-        }
-
-        sleep(1);
+        usleep(100000);
     }
 
     return NULL;
@@ -1602,11 +1684,13 @@ int main(int argc, char **argv) {
 
     struct bpf_program *prog_main, *prog_parse_syn, *prog_parse_ack, *prog_parse_rst,
                        *prog_parse_icmp, *prog_parse_udp, *prog_parse_gre,
-                       *prog_parse_stomp, *prog_parse_tcp_socket, *prog_parse_handshake;
+                       *prog_parse_stomp, *prog_parse_tcp_socket, *prog_parse_handshake,
+                       *prog_parse_psh_ack;
 
     int attach_id = -1, prog_main_fd, prog_parse_syn_fd, prog_parse_ack_fd,
         prog_parse_rst_fd, prog_parse_icmp_fd, prog_parse_udp_fd, prog_parse_gre_fd,
-        prog_parse_stomp_fd, prog_parse_tcp_socket_fd, prog_parse_handshake_fd;
+        prog_parse_stomp_fd, prog_parse_tcp_socket_fd, prog_parse_handshake_fd,
+        prog_parse_psh_ack_fd;
 
     int prog_array_map_fd;
     int tcp_established_map_fd, tcp_connection_map_fd, blocked_ips_map_fd;
@@ -1714,10 +1798,12 @@ int main(int argc, char **argv) {
     prog_parse_stomp = bpf_object__find_program_by_name(obj, "xdp_parse_stomp");    
     prog_parse_tcp_socket = bpf_object__find_program_by_name(obj, "xdp_parse_tcp_socket");
     prog_parse_handshake = bpf_object__find_program_by_name(obj, "xdp_parse_handshake");
+    prog_parse_psh_ack = bpf_object__find_program_by_name(obj, "xdp_parse_psh_ack");
 
     if (!prog_main || !prog_parse_syn || !prog_parse_ack || !prog_parse_rst ||
         !prog_parse_icmp || !prog_parse_udp || !prog_parse_gre ||
-        !prog_parse_stomp || !prog_parse_tcp_socket || !prog_parse_handshake) {
+        !prog_parse_stomp || !prog_parse_tcp_socket || !prog_parse_handshake ||
+        !prog_parse_psh_ack) {
         LOG_E("ERROR: could not find all program sections\n");
         goto cleanup;
     }
@@ -1733,6 +1819,7 @@ int main(int argc, char **argv) {
     prog_parse_stomp_fd = bpf_program__fd(prog_parse_stomp);
     prog_parse_tcp_socket_fd = bpf_program__fd(prog_parse_tcp_socket);
     prog_parse_handshake_fd = bpf_program__fd(prog_parse_handshake);
+    prog_parse_psh_ack_fd = bpf_program__fd(prog_parse_psh_ack);
 
 
     // Find the prog_array map (declared as "prog_array" in our BPF program).
@@ -1746,7 +1833,7 @@ int main(int argc, char **argv) {
     // Update the prog_array map:
     // Key 0 -> xdp_parse_syn; Key 1 -> xdp_parse_ack.
     // Key 2 -> xdp_parse_rst; Key 3 -> xdp_parse_icmp. Key 4 -> xdp_parse_udp. Key 5 -> xdp_parse_gre.
-    int key0 = 0, key1 = 1, key2 = 2, key3 = 3, key4 = 4, key5 = 5, key6 = 6, key7 = 7, key8 = 8;
+    int key0 = 0, key1 = 1, key2 = 2, key3 = 3, key4 = 4, key5 = 5, key6 = 6, key7 = 7, key8 = 8, key9 = 9;
     
     err = bpf_map_update_elem(prog_array_map_fd, &key0, &prog_parse_syn_fd, 0);
     if (err) {
@@ -1778,9 +1865,9 @@ int main(int argc, char **argv) {
         LOG_E( "ERROR: updating prog_array key 5 failed: %d\n", err);
         goto cleanup;
     }
-    err = bpf_map_update_elem(prog_array_map_fd, &key6, &prog_parse_stomp_fd, 0);
+    err = bpf_map_update_elem(prog_array_map_fd, &key6, &prog_parse_psh_ack_fd, 0);
     if (err) {
-        LOG_E("ERROR: updating prog_array key 6 (stomp) failed: %d\n", err);
+        LOG_E("ERROR: updating prog_array key 6 (psh_ack) failed: %d\n", err);
         goto cleanup;
     }
     err = bpf_map_update_elem(prog_array_map_fd, &key7, &prog_parse_tcp_socket_fd, 0);
@@ -1791,6 +1878,11 @@ int main(int argc, char **argv) {
     err = bpf_map_update_elem(prog_array_map_fd, &key8, &prog_parse_handshake_fd, 0);
     if (err) {
         LOG_E("ERROR: updating prog_array key 8 (handshake) failed: %d\n", err);
+        goto cleanup;
+    }
+    err = bpf_map_update_elem(prog_array_map_fd, &key9, &prog_parse_stomp_fd, 0);
+    if (err) {
+        LOG_E("ERROR: updating prog_array key 9 (stomp) failed: %d\n", err);
         goto cleanup;
     }
 
@@ -1873,12 +1965,6 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
-    pthread_t global_syn_attack_ch_thr;
-    if (pthread_create(&global_syn_attack_ch_thr, NULL, global_attack_syn_check_worker, obj) != 0) {
-        LOG_E("pthread_create for global_attack_syn_check_thr %s\n", strerror(errno));
-        goto cleanup;
-    }
-
     pthread_t global_traffic_stats_check_thr;
     if (pthread_create(&global_traffic_stats_check_thr, NULL, global_traffic_stats_check_worker, obj) != 0) {
         LOG_E("pthread_create for global_traffic_stats_check_thr %s\n", strerror(errno));
@@ -1897,13 +1983,12 @@ int main(int argc, char **argv) {
     }
 
     // Let's skip this logic right now
-#if 0
+
     pthread_t send_check_blocklist_thr;
-    if (pthread_create(&send_check_blocklist_thr, NULL, send_check_blocklist_worker, NULL) != 0) {
+    if (pthread_create(&send_check_blocklist_thr, NULL, report_attack_status_worker, NULL) != 0) {
         LOG_E("pthread_create for send_check_blocklist_thr %s\n", strerror(errno));
         goto cleanup;
     }
-#endif
 
     pthread_t license_check_thr;
     if (pthread_create(&license_check_thr, NULL, license_check_worker, NULL) != 0) {
@@ -2387,6 +2472,10 @@ int clear_fw() {
     fd = bpf_object__find_map_fd_by_name(obj, "global_stomp_pkt_counter");
     if (fd >= 0) clear_pkt_counter_map(fd);
     LOG_D("global_stomp_pkt_counter is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "global_psh_ack_filtered");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("global_psh_ack_filtered is cleared\n");
 
     fd = bpf_object__find_map_fd_by_name(obj, "stomp_counter_fixed");
     if (fd >= 0) clear_batch_map(fd);
@@ -2904,8 +2993,9 @@ int tcp_syn_set(int valid,
     global_fw_config.g_syn_config.burst_pkt_threshold = burst_pkt;
     global_fw_config.g_syn_config.burst_count_threshold = burst_counter;
     global_fw_config.g_syn_config.syn_fixed_threshold = fixed_threshold;
-    global_fw_config.g_syn_config.syn_fixed_check_duration = fixed_duration;
-    global_fw_config.g_syn_config.challenge_timeout = challenge_timeout;
+    /* CLI sends seconds. The kernel compares this to bpf_ktime nanoseconds. */
+    global_fw_config.g_syn_config.syn_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
+    global_fw_config.g_syn_config.challenge_timeout = (__u64)challenge_timeout * ONE_SECOND_NS;
     global_fw_config.g_syn_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_syn_config.burst_count_threshold);
     global_fw_config.g_syn_config.syn_protect_duration = protection_duration;
 
@@ -2945,7 +3035,7 @@ int tcp_ack_set(int valid,
     global_fw_config.g_ack_config.burst_pkt_threshold = burst_pkt;
     global_fw_config.g_ack_config.burst_count_threshold = burst_counter;
     global_fw_config.g_ack_config.ack_fixed_threshold = fixed_threshold;
-    global_fw_config.g_ack_config.ack_fixed_check_duration = fixed_duration;
+    global_fw_config.g_ack_config.ack_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
     global_fw_config.g_ack_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_ack_config.burst_count_threshold);
     global_fw_config.g_ack_config.ack_protect_duration = protection_duration;
 
@@ -2986,7 +3076,7 @@ int tcp_rst_set(int valid,
     global_fw_config.g_rst_config.burst_pkt_threshold = burst_pkt;
     global_fw_config.g_rst_config.burst_count_threshold = burst_counter;
     global_fw_config.g_rst_config.rst_fixed_threshold = fixed_threshold;
-    global_fw_config.g_rst_config.rst_fixed_check_duration = fixed_duration;
+    global_fw_config.g_rst_config.rst_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
     global_fw_config.g_rst_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_rst_config.burst_count_threshold);
     global_fw_config.g_rst_config.rst_protect_duration = protection_duration;
 
@@ -2995,6 +3085,74 @@ int tcp_rst_set(int valid,
         return -1;
     }
     
+    return 0;
+}
+
+int tcp_stomp_set(int valid,
+                int threshold,
+                int burst_pkt,
+                int burst_counter,
+                int fixed_threshold,
+                int fixed_duration,
+                int protection_duration)
+{
+    int key = 0;
+    int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
+
+    LOG_D("STOMP command is received (%d:%d:%d:%d:%d:%d)\n", valid, threshold, burst_pkt, burst_counter, fixed_threshold, fixed_duration);
+
+    if (map_fd < 0) {
+        LOG_E( "ERROR: finding .bss map fd: %d\n", map_fd);
+        return -1;
+    }
+
+    if (burst_counter == 0) {
+        LOG_E( "ERROR: burst count is zero\n");
+        return -1;
+    }
+
+    global_fw_config.g_stomp_config.valid = valid;
+    global_fw_config.g_stomp_config.stomp_threshold = threshold;
+    global_fw_config.g_stomp_config.burst_pkt_threshold = burst_pkt;
+    global_fw_config.g_stomp_config.burst_count_threshold = burst_counter;
+    global_fw_config.g_stomp_config.stomp_fixed_threshold = fixed_threshold;
+    global_fw_config.g_stomp_config.stomp_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
+    global_fw_config.g_stomp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_stomp_config.burst_count_threshold);
+    global_fw_config.g_stomp_config.stomp_protect_duration = protection_duration;
+
+    if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
+        LOG_E("bpf_map_update_elem");
+        return -1;
+    }
+
+    return 0;
+}
+
+int tcp_socket_set(int valid,
+                int fin_threshold,
+                int fixed_threshold,
+                int fixed_duration)
+{
+    int key = 0;
+    int map_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
+
+    LOG_D("SOCKET command is received (%d:%d:%d:%d)\n", valid, fin_threshold, fixed_threshold, fixed_duration);
+
+    if (map_fd < 0) {
+        LOG_E( "ERROR: finding .bss map fd: %d\n", map_fd);
+        return -1;
+    }
+
+    global_fw_config.g_socket_config.valid = valid;
+    global_fw_config.g_socket_config.socket_fin_threshold = fin_threshold;
+    global_fw_config.g_socket_config.socket_fixed_threshold = fixed_threshold;
+    global_fw_config.g_socket_config.socket_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
+
+    if(bpf_map_update_elem(map_fd, &key, &global_fw_config, BPF_ANY)) {
+        LOG_E("bpf_map_update_elem");
+        return -1;
+    }
+
     return 0;
 }
 
@@ -3026,7 +3184,7 @@ int icmp_set(int valid,
     global_fw_config.g_icmp_config.burst_pkt_threshold = burst_pkt;
     global_fw_config.g_icmp_config.burst_count_threshold = burst_counter;
     global_fw_config.g_icmp_config.icmp_fixed_threshold = fixed_threshold;
-    global_fw_config.g_icmp_config.icmp_fixed_check_duration = fixed_duration;
+    global_fw_config.g_icmp_config.icmp_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
     global_fw_config.g_icmp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_icmp_config.burst_count_threshold);
     global_fw_config.g_icmp_config.icmp_protect_duration = protection_duration;
 
@@ -3066,7 +3224,7 @@ int udp_set(int valid,
     global_fw_config.g_udp_config.burst_pkt_threshold = burst_pkt;
     global_fw_config.g_udp_config.burst_count_threshold = burst_counter;
     global_fw_config.g_udp_config.udp_fixed_threshold = fixed_threshold;
-    global_fw_config.g_udp_config.udp_fixed_check_duration = fixed_duration;
+    global_fw_config.g_udp_config.udp_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
     global_fw_config.g_udp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_udp_config.burst_count_threshold);
     global_fw_config.g_udp_config.udp_protect_duration = protection_duration;
 
@@ -3106,7 +3264,7 @@ int gre_set(int valid,
     global_fw_config.g_gre_config.burst_pkt_threshold = burst_pkt;
     global_fw_config.g_gre_config.burst_count_threshold = burst_counter;
     global_fw_config.g_gre_config.gre_fixed_threshold = fixed_threshold;
-    global_fw_config.g_gre_config.gre_fixed_check_duration = fixed_duration;
+    global_fw_config.g_gre_config.gre_fixed_check_duration = (__u64)fixed_duration * ONE_SECOND_NS;
     global_fw_config.g_gre_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_gre_config.burst_count_threshold);
     global_fw_config.g_gre_config.gre_protect_duration = protection_duration;
 

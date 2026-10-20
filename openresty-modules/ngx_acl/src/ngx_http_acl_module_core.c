@@ -1873,6 +1873,7 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
             ctx->waiting_more_body = NGX_HTTP_ACL_FALSE;
             
             ctx->matched = NGX_HTTP_ACL_FALSE;
+            ctx->matched_priority = -1;
             ctx->checked = NGX_HTTP_ACL_FALSE;
             ctx->register_content_handler = 0;
 
@@ -1905,6 +1906,7 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
     }
 
     server_acl_rule_p = main_conf->server_acl_rule;
+    ctx->matched_priority = -1;
 
     //if (robust_mutex_lock(&main_conf->robust_server_acl_mutex, r->connection->log) != NGX_OK) {
     //    return ret;
@@ -1926,6 +1928,7 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
 
                     ngx_http_acl_dp(r, "ngx_acl : Current request is matched with rule.");
                     dump_acl_rule(acl_rule_p, r->connection->log);
+                    ctx->matched_priority = acl_rule_p->priority;
 
                     if (acl_rule_p->action == ACTION_DROP) {
                         ret = ACL_RETURN_DROP;
@@ -1967,6 +1970,14 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
     
     ngx_http_acl_dp_func_end(r);
     return ret;
+}
+
+ngx_int_t ngx_http_acl_matched_priority(ngx_http_request_t* r) {
+    ngx_http_acl_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_acl_module);
+    if (ctx == NULL) {
+        return -1;
+    }
+    return ctx->matched_priority;
 }
 
 void ngx_http_acl_handler_cleanup(void *data) {

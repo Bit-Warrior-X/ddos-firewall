@@ -31,6 +31,8 @@ static void usage(void) {
 "  TCP_SYN <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> <challenge_timeout>: Set tcp syn parameters.\n"
 "  TCP_ACK <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set tcp ack parameters.\n"
 "  TCP_RST <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set tcp rst parameters.\n"
+"  TCP_STOMP <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set tcp stomp (PSH+ACK) parameters.\n"
+"  TCP_SOCKET <status> <fin_threshold> <fixed_threshold> <fixed_duration> : Set tcp socket (unusual flag) parameters.\n"
 "  ICMP <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set icmp parameters.\n"
 "  UDP <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set udp parameters.\n"
 "  GRE <status> <threshold> <burst_pkt> <burst_counter> <fixed_threshold> <fixed_duration> : Set gre parameters.\n"
@@ -91,6 +93,30 @@ typedef struct {
     int rst_fixed_threshold;
     int rst_fixed_check_duration;
     int rst_protection_duration;
+
+    // STOMP section (PSH+ACK)
+    int stomp_valid;
+    int stomp_threshold;
+    int stomp_burst_pkt;
+    int stomp_burst_count_per_sec;
+    int stomp_fixed_threshold;
+    int stomp_fixed_check_duration;
+    int stomp_protection_duration;
+
+    // HandShake section (preserved on rewrite; no live command yet)
+    int handshake_valid;
+    int handshake_threshold;
+    int handshake_burst_pkt;
+    int handshake_burst_count_per_sec;
+    int handshake_fixed_threshold;
+    int handshake_fixed_check_duration;
+    int handshake_protection_duration;
+
+    /* SOCKET: unusual TCP flags. No burst and no global attack mode. */
+    int socket_valid;
+    int socket_fin_threshold;
+    int socket_fixed_threshold;
+    int socket_fixed_check_duration;
     
     // ICMP section
     int icmp_valid;
@@ -137,6 +163,9 @@ typedef struct {
     char syn_comment[MAX_COMMENT_LENGTH];
     char ack_comment[MAX_COMMENT_LENGTH];
     char rst_comment[MAX_COMMENT_LENGTH];
+    char stomp_comment[MAX_COMMENT_LENGTH];
+    char handshake_comment[MAX_COMMENT_LENGTH];
+    char socket_comment[MAX_COMMENT_LENGTH];
     char icmp_comment[MAX_COMMENT_LENGTH];
     char udp_comment[MAX_COMMENT_LENGTH];
     char gre_comment[MAX_COMMENT_LENGTH];
@@ -191,6 +220,18 @@ int parse_config(const char *filename, FirewallConfig *config) {
         if (strstr(line, "GLOBAL") != NULL) {
             strncpy(config->global_comment, line, MAX_COMMENT_LENGTH);
             strcpy(current_section, "GLOBAL");
+            continue;
+        } else if (strstr(line, "SOCKET") != NULL) {
+            strncpy(config->socket_comment, line, MAX_COMMENT_LENGTH);
+            strcpy(current_section, "SOCKET");
+            continue;
+        } else if (strstr(line, "STOMP") != NULL) {
+            strncpy(config->stomp_comment, line, MAX_COMMENT_LENGTH);
+            strcpy(current_section, "STOMP");
+            continue;
+        } else if (strstr(line, "HandShake") != NULL || strstr(line, "Handshake") != NULL) {
+            strncpy(config->handshake_comment, line, MAX_COMMENT_LENGTH);
+            strcpy(current_section, "HANDSHAKE");
             continue;
         } else if (strstr(line, "SYN") != NULL) {
             strncpy(config->syn_comment, line, MAX_COMMENT_LENGTH);
@@ -301,6 +342,51 @@ int parse_config(const char *filename, FirewallConfig *config) {
                 config->rst_fixed_check_duration = atoi(value);
             } else if (strcmp(key, "rst_protection_duration") == 0) {
                 config->rst_protection_duration = atoi(value);
+            }
+        }
+        else if (strcmp(current_section, "STOMP") == 0) {
+            if (strcmp(key, "stomp_valid") == 0) {
+                config->stomp_valid = atoi(value);
+            } else if (strcmp(key, "stomp_threshold") == 0) {
+                config->stomp_threshold = atoi(value);
+            } else if (strcmp(key, "stomp_burst_pkt") == 0) {
+                config->stomp_burst_pkt = atoi(value);
+            } else if (strcmp(key, "stomp_burst_count_per_sec") == 0) {
+                config->stomp_burst_count_per_sec = atoi(value);
+            } else if (strcmp(key, "stomp_fixed_threshold") == 0) {
+                config->stomp_fixed_threshold = atoi(value);
+            } else if (strcmp(key, "stomp_fixed_check_duration") == 0) {
+                config->stomp_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "stomp_protection_duration") == 0) {
+                config->stomp_protection_duration = atoi(value);
+            }
+        }
+        else if (strcmp(current_section, "HANDSHAKE") == 0) {
+            if (strcmp(key, "handshake_valid") == 0) {
+                config->handshake_valid = atoi(value);
+            } else if (strcmp(key, "handshake_threshold") == 0) {
+                config->handshake_threshold = atoi(value);
+            } else if (strcmp(key, "handshake_burst_pkt") == 0) {
+                config->handshake_burst_pkt = atoi(value);
+            } else if (strcmp(key, "handshake_burst_count_per_sec") == 0) {
+                config->handshake_burst_count_per_sec = atoi(value);
+            } else if (strcmp(key, "handshake_fixed_threshold") == 0) {
+                config->handshake_fixed_threshold = atoi(value);
+            } else if (strcmp(key, "handshake_fixed_check_duration") == 0) {
+                config->handshake_fixed_check_duration = atoi(value);
+            } else if (strcmp(key, "handshake_protection_duration") == 0) {
+                config->handshake_protection_duration = atoi(value);
+            }
+        }
+        else if (strcmp(current_section, "SOCKET") == 0) {
+            if (strcmp(key, "socket_valid") == 0) {
+                config->socket_valid = atoi(value);
+            } else if (strcmp(key, "socket_fin_threshold") == 0) {
+                config->socket_fin_threshold = atoi(value);
+            } else if (strcmp(key, "socket_fixed_threshold") == 0) {
+                config->socket_fixed_threshold = atoi(value);
+            } else if (strcmp(key, "socket_fixed_check_duration") == 0) {
+                config->socket_fixed_check_duration = atoi(value);
             }
         }
         else if (strcmp(current_section, "ICMP") == 0) {
@@ -437,6 +523,40 @@ int write_config(const char *filename, const FirewallConfig *config) {
     fprintf(file, "rst_fixed_threshold = %d\n", config->rst_fixed_threshold);
     fprintf(file, "rst_fixed_check_duration = %d\n", config->rst_fixed_check_duration);
     fprintf(file, "rst_protection_duration = %d\n", config->rst_protection_duration);
+
+    // Write STOMP section
+    if (config->stomp_comment[0] == '\0')
+        fprintf(file, "\n#------------------STOMP------------------------\n");
+    else
+        fprintf(file, "%s\n", config->stomp_comment);
+    fprintf(file, "stomp_valid = %d\n", config->stomp_valid);
+    fprintf(file, "stomp_threshold = %d\n", config->stomp_threshold);
+    fprintf(file, "stomp_burst_pkt = %d\n", config->stomp_burst_pkt);
+    fprintf(file, "stomp_burst_count_per_sec = %d\n", config->stomp_burst_count_per_sec);
+    fprintf(file, "stomp_fixed_threshold = %d\n", config->stomp_fixed_threshold);
+    fprintf(file, "stomp_fixed_check_duration = %d\n", config->stomp_fixed_check_duration);
+    fprintf(file, "stomp_protection_duration = %d\n", config->stomp_protection_duration);
+
+    if (config->handshake_comment[0] == '\0')
+        fprintf(file, "\n#------------------HandShake--------------------\n");
+    else
+        fprintf(file, "%s\n", config->handshake_comment);
+    fprintf(file, "handshake_valid = %d\n", config->handshake_valid);
+    fprintf(file, "handshake_threshold = %d\n", config->handshake_threshold);
+    fprintf(file, "handshake_burst_pkt = %d\n", config->handshake_burst_pkt);
+    fprintf(file, "handshake_burst_count_per_sec = %d\n", config->handshake_burst_count_per_sec);
+    fprintf(file, "handshake_fixed_threshold = %d\n", config->handshake_fixed_threshold);
+    fprintf(file, "handshake_fixed_check_duration = %d\n", config->handshake_fixed_check_duration);
+    fprintf(file, "handshake_protection_duration = %d\n", config->handshake_protection_duration);
+
+    if (config->socket_comment[0] == '\0')
+        fprintf(file, "\n#------------------SOCKET------------------------\n");
+    else
+        fprintf(file, "%s\n", config->socket_comment);
+    fprintf(file, "socket_valid = %d\n", config->socket_valid);
+    fprintf(file, "socket_fin_threshold = %d\n", config->socket_fin_threshold);
+    fprintf(file, "socket_fixed_threshold = %d\n", config->socket_fixed_threshold);
+    fprintf(file, "socket_fixed_check_duration = %d\n", config->socket_fixed_check_duration);
     
     // Write ICMP section
     fprintf(file, "%s\n", config->icmp_comment);
@@ -657,6 +777,39 @@ int main(int argc, char *argv[]) {
         config.rst_fixed_threshold = atoi(argv[6]);
         config.rst_fixed_check_duration = atoi(argv[7]);
         config.rst_protection_duration = atoi(argv[8]);
+
+        if (write_config(CONFIG_PATH, &config) != 0) {
+            fprintf(stderr, "failed\nFirewall config update failed\n");
+            return EXIT_FAILURE;
+        }
+    } else if (strncmp(argv[1], "TCP_STOMP", strlen("TCP_STOMP")) == 0) {
+        if (argc != 9) usage();
+
+        int valid = 0;
+        if (strncmp(argv[2], "on", 2) == 0) valid = 1;
+        else valid = 0;
+        config.stomp_valid = valid;
+        config.stomp_threshold = atoi(argv[3]);
+        config.stomp_burst_pkt = atoi(argv[4]);
+        config.stomp_burst_count_per_sec = atoi(argv[5]);
+        config.stomp_fixed_threshold = atoi(argv[6]);
+        config.stomp_fixed_check_duration = atoi(argv[7]);
+        config.stomp_protection_duration = atoi(argv[8]);
+
+        if (write_config(CONFIG_PATH, &config) != 0) {
+            fprintf(stderr, "failed\nFirewall config update failed\n");
+            return EXIT_FAILURE;
+        }
+    } else if (strncmp(argv[1], "TCP_SOCKET", strlen("TCP_SOCKET")) == 0) {
+        if (argc != 6) usage();
+
+        int valid = 0;
+        if (strncmp(argv[2], "on", 2) == 0) valid = 1;
+        else valid = 0;
+        config.socket_valid = valid;
+        config.socket_fin_threshold = atoi(argv[3]);
+        config.socket_fixed_threshold = atoi(argv[4]);
+        config.socket_fixed_check_duration = atoi(argv[5]);
 
         if (write_config(CONFIG_PATH, &config) != 0) {
             fprintf(stderr, "failed\nFirewall config update failed\n");

@@ -4,7 +4,7 @@ import csv
 import os
 import tempfile
 from flask import Blueprint, request, jsonify, current_app
-from core.firewall import firewall_control, set_protection, execute_cli_command
+from core.firewall import firewall_control, set_protection, set_socket_protection, execute_cli_command
 from core.database import DatabaseManager
 from core.api_client import APIClient
 from core.backend_whitelist import ensure_backend_ips_whitelisted
@@ -345,6 +345,63 @@ def tcp_rst():
     if result['status'] == 'error':
         return jsonify({"status": "error", "message": result['message']}), 400
     
+    return jsonify({"status": "success", "message": result['message']})
+
+@l4_bp.route('/tcp_stomp', methods=['POST'])
+@token_required
+def tcp_stomp():
+    """TCP STOMP (PSH+ACK) protection."""
+    data = request.json
+    required_fields = ['status', 'threshold', 'burst_pkt', 'burst_counter',
+                      'fixed_threshold', 'fixed_duration', 'protection_duration']
+
+    for field in required_fields:
+        if field not in data:
+            return jsonify({"status": "error", "message": f"Missing '{field}' parameter"}), 400
+
+    try:
+        result = set_protection(
+            'TCP_STOMP',
+            data['status'],
+            int(data['threshold']),
+            int(data['burst_pkt']),
+            int(data['burst_counter']),
+            int(data['fixed_threshold']),
+            int(data['fixed_duration']),
+            int(data['protection_duration'])
+        )
+    except (ValueError, TypeError) as e:
+        return jsonify({"status": "error", "message": f"Invalid parameter type: {str(e)}"}), 400
+
+    if result['status'] == 'error':
+        return jsonify({"status": "error", "message": result['message']}), 400
+
+    return jsonify({"status": "success", "message": result['message']})
+
+@l4_bp.route('/tcp_socket', methods=['POST'])
+@token_required
+def tcp_socket():
+    """TCP SOCKET defense for unusual flag combinations."""
+    data = request.json
+    required_fields = ['status', 'fin_threshold', 'fixed_threshold', 'fixed_duration']
+
+    for field in required_fields:
+        if field not in data:
+            return jsonify({"status": "error", "message": f"Missing '{field}' parameter"}), 400
+
+    try:
+        result = set_socket_protection(
+            data['status'],
+            int(data['fin_threshold']),
+            int(data['fixed_threshold']),
+            int(data['fixed_duration'])
+        )
+    except (ValueError, TypeError) as e:
+        return jsonify({"status": "error", "message": f"Invalid parameter type: {str(e)}"}), 400
+
+    if result['status'] == 'error':
+        return jsonify({"status": "error", "message": result['message']}), 400
+
     return jsonify({"status": "success", "message": result['message']})
 
 @l4_bp.route('/icmp', methods=['POST'])
@@ -734,6 +791,26 @@ def l4_firewall_data():
             "tcp_connection_limit_check": _normalize_bool_int(data["tcpConnectionLimitCheck"]),
             "tcp_connection_limit_cnt": int(data["tcpConnectionLimitCnt"]),
         }
+        stomp_fields = (
+            "stompValid", "stompThreshold", "stompBurstPkt", "stompBurstCountPerSec",
+            "stompFixedThreshold", "stompFixedCheckDuration", "stompProtectionDuration",
+        )
+        if all(field in data for field in stomp_fields):
+            updates["stomp_valid"] = _normalize_bool_int(data["stompValid"])
+            updates["stomp_threshold"] = int(data["stompThreshold"])
+            updates["stomp_burst_pkt"] = int(data["stompBurstPkt"])
+            updates["stomp_burst_count_per_sec"] = int(data["stompBurstCountPerSec"])
+            updates["stomp_fixed_threshold"] = int(data["stompFixedThreshold"])
+            updates["stomp_fixed_check_duration"] = int(data["stompFixedCheckDuration"])
+            updates["stomp_protection_duration"] = int(data["stompProtectionDuration"])
+        socket_fields = (
+            "socketValid", "socketFinThreshold", "socketFixedThreshold", "socketFixedCheckDuration",
+        )
+        if all(field in data for field in socket_fields):
+            updates["socket_valid"] = _normalize_bool_int(data["socketValid"])
+            updates["socket_fin_threshold"] = int(data["socketFinThreshold"])
+            updates["socket_fixed_threshold"] = int(data["socketFixedThreshold"])
+            updates["socket_fixed_check_duration"] = int(data["socketFixedCheckDuration"])
     except (ValueError, TypeError) as exc:
         return jsonify({"status": "error", "message": f"Invalid parameter type: {exc}"}), 400
 
@@ -757,6 +834,8 @@ def l4_firewall_data():
     syn_changed = any(key.startswith("syn_") or key == "challenge_timeout" for key in changed_updates)
     ack_changed = any(key.startswith("ack_") for key in changed_updates)
     rst_changed = any(key.startswith("rst_") for key in changed_updates)
+    stomp_changed = any(key.startswith("stomp_") for key in changed_updates)
+    socket_changed = any(key.startswith("socket_") for key in changed_updates)
     icmp_changed = any(key.startswith("icmp_") for key in changed_updates)
     udp_changed = any(key.startswith("udp_") for key in changed_updates)
     gre_changed = any(key.startswith("gre_") for key in changed_updates)
@@ -802,6 +881,24 @@ def l4_firewall_data():
             int(data["rstFixedThreshold"]),
             int(data["rstFixedCheckDuration"]),
             int(data["rstProtectionDuration"]),
+        )
+    if stomp_changed:
+        results["tcp_stomp"] = set_protection(
+            "TCP_STOMP",
+            _normalize_status(data["stompValid"]),
+            int(data["stompThreshold"]),
+            int(data["stompBurstPkt"]),
+            int(data["stompBurstCountPerSec"]),
+            int(data["stompFixedThreshold"]),
+            int(data["stompFixedCheckDuration"]),
+            int(data["stompProtectionDuration"]),
+        )
+    if socket_changed:
+        results["tcp_socket"] = set_socket_protection(
+            _normalize_status(data["socketValid"]),
+            int(data["socketFinThreshold"]),
+            int(data["socketFixedThreshold"]),
+            int(data["socketFixedCheckDuration"]),
         )
     if icmp_changed:
         results["icmp"] = set_protection(

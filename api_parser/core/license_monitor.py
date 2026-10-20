@@ -43,8 +43,10 @@ def _report_license_failure(reason: str) -> None:
         "token": token,
     }
     try:
-        APIClient.send_report_xdp(payload)
-        print(f"[LICENSE_MONITOR] Reported license failure to backend: {reason}")
+        if APIClient.send_report_xdp(payload):
+            print(f"[LICENSE_MONITOR] Reported license failure to backend: {reason}")
+        else:
+            print(f"[LICENSE_MONITOR] Backend did not accept license failure report: {reason}")
     except Exception as exc:
         print(f"[LICENSE_MONITOR] Failed to report license failure ({reason}): {exc}")
 

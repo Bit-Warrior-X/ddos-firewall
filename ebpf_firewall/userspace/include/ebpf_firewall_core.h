@@ -41,7 +41,20 @@ int tcp_rst_set(int valid,
                 int burst_counter,
                 int fixed_threshold,
                 int fixed_duration,
-                int protection_duration);                
+                int protection_duration);
+
+int tcp_stomp_set(int valid,
+                int threshold,
+                int burst_pkt,
+                int burst_counter,
+                int fixed_threshold,
+                int fixed_duration,
+                int protection_duration);
+
+int tcp_socket_set(int valid,
+                int fin_threshold,
+                int fixed_threshold,
+                int fixed_duration);
 
 int icmp_set(int valid, 
                 int threshold,

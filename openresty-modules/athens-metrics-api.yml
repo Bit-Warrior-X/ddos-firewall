@@ -5,15 +5,41 @@ info:
     L7/L4 metrics exposed by Athens (OpenResty) on the internal stats server.
 
     - Base URL: `http://{edge}:9000`
-    - Interval: 60s buckets (except `/req-status`, which is ~10s live egress bandwidth)
+    - Interval: 60s buckets (except `/req-status`, which is ~10s live bandwidth)
     - L7 dimension and site metrics are keyed by `site_id` from Redis `domain:{host}`
     - Unmapped Hosts use `site_id` `0`
-    - Traffic fields are **bytes**; bandwidth fields are **bits/s**
-    - Default (no `timestamp`): last **completed** 60s history snapshot (stable counters)
-    - `?live=1`: in-progress current bucket (counters grow until the next flush)
-    - Site/domain `bandwidth_l7_tx`: live egress from **ngx_req_status** (Host → site_id sum)
-    - `bandwidth_l7_rx`: derived from interval byte counters (`bytes * 8 / interval`)
-    - Cache hit ratio from `$upstream_cache_status` (see `cache_*` fields)
+    - Traffic fields are **bytes**; bandwidth fields are **bits/s** over the interval
+    - `/…/timestamps` lists **closed** buckets only; the bucket being filled is never listed
+
+    ### Required access-log variables (1.3.0)
+    Cache, performance, firewall and log-export data is derived from these nginx variables,
+    which must be captured for every request:
+    `$upstream_cache_status`, `$request_time`, `$upstream_response_time`,
+    `$upstream_status`, `$upstream_bytes_received`, `$sent_http_content_type`,
+    `$request_id`, plus the WAF rule type / rule id set by the Lua layer when it blocks.
+
+    ### Cache status mapping
+    | `$upstream_cache_status` | Counter | Counts as cached |
+    |---|---|---|
+    | `HIT` | `cache_hit_count` | yes |
+    | `STALE` | `cache_stale_count` | yes |
+    | `UPDATING` | `cache_updating_count` | yes |
+    | `REVALIDATED` | `cache_revalidated_count` | yes |
+    | `MISS` | `cache_miss_count` | no |
+    | `EXPIRED` | `cache_expired_count` | no |
+    | `BYPASS` | `cache_bypass_count` | no |
+    | empty / `-` (no cache zone, proxied) | `cache_dynamic_count` | no |
+
+    Blocked requests are excluded from cache counters, so per bucket:
+    `sum(cache_*_count) = request_count - blocked_request_count`.
+
+    ### Latency histograms
+    `edge_latency_hist` and `origin_latency_hist` are arrays of **11 non-cumulative counts**
+    using these upper bounds in milliseconds (bucket `i` counts values `<= bound[i]`
+    and `> bound[i-1]`):
+    `[10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf]`.
+    The backend merges histograms across buckets and edges to compute p50 / p95 / p99,
+    so percentiles must not be pre-computed on the edge.
   version: 1.3.0
 
 servers:
@@ -31,9 +57,15 @@ tags:
   - name: Dimensions
     description: Per-site breakdowns (IP, URL, UA, country, ISP, referer, domain)
   - name: Bandwidth
-    description: Live ngx_req_status egress bandwidth by Host (~10s)
+    description: Live ngx_req_status bandwidth by Host
   - name: L4
     description: Sparta eBPF traffic / attack counters
+  - name: Cache
+    description: Per-site cache breakdowns (content type, missed URLs)
+  - name: Security
+    description: Per-site L7 blocks broken down by WAF rule type
+  - name: Logs
+    description: Raw access / security log records retained on the edge
 
 paths:
   /server_traffic_stats:
@@ -41,9 +73,10 @@ paths:
       tags: [Server]
       summary: Server-wide traffic snapshot
       description: |
-        Edge-wide stats including NIC and summed L7 counters (and cache hit ratio).
-        Without `timestamp`, returns the newest **completed** 60s history bucket.
-        Does not support `?live=1` (unlike site/dimension endpoints).
+        Latest (or historical) edge-wide stats including NIC and summed L7 counters.
+        Without `timestamp`, returns the newest **closed** history bucket (never the
+        60s window still being filled). The backend fetches every bucket listed by
+        `/server_traffic_stats/timestamps`, so history must be kept for at least 1 hour.
       operationId: getServerTrafficStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
@@ -75,18 +108,11 @@ paths:
       summary: Per-site L7 traffic snapshot
       description: |
         Same L7 counters as server traffic, partitioned by `site_id`. No NIC fields.
-
-        - Without `timestamp` (default): last **completed** 60s history bucket
-          (`traffic_*` / counts are stable for that timestamp).
-          `bandwidth_l7_tx` is overlaid from live ngx_req_status (egress bits/s).
-        - `?live=1`: in-progress counters for the current open 60s bucket
-          (values grow until flush; timestamp is the bucket start).
-        - `?timestamp=N`: frozen history for that interval (no live bandwidth overlay).
+        Live (no `timestamp`) reads the current 60s window; with `timestamp` reads history.
       operationId: getSiteTrafficStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Site traffic stats
@@ -117,18 +143,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site domain (Host) request / traffic stats
-      description: |
-        Per-Host request counts and L7 byte totals under each `site_id`.
-
-        - Default (no `timestamp`): last completed history bucket;
-          `bandwidth_l7_tx` refreshed from live ngx_req_status per Host.
-        - `?live=1`: in-progress counters for the current bucket.
-        - `bandwidth_l7_rx`: `traffic_l7_rx * 8 / interval` (or elapsed seconds when `live=1`).
       operationId: getDomainRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Domain request stats
@@ -157,13 +175,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site client IP request counts
-      description: |
-        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getIpRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: IP request stats
@@ -192,13 +207,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site URL path request counts
-      description: |
-        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getUrlRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: URL request stats
@@ -227,13 +239,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site User-Agent request counts
-      description: |
-        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getUserAgentRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: User-Agent request stats
@@ -262,13 +271,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site country request / block counts
-      description: |
-        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getCountryRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Country request stats
@@ -297,13 +303,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site ISP request counts
-      description: |
-        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getIspRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: ISP request stats
@@ -332,13 +335,10 @@ paths:
     get:
       tags: [Dimensions]
       summary: Per-site Referer request counts
-      description: |
-        Default: last completed history. `?live=1`: in-progress current bucket.
       operationId: getRefererRequestStats
       parameters:
         - $ref: '#/components/parameters/Timestamp'
         - $ref: '#/components/parameters/SiteId'
-        - $ref: '#/components/parameters/Live'
       responses:
         '200':
           description: Referer request stats
@@ -363,17 +363,209 @@ paths:
         '200':
           $ref: '#/components/responses/TimestampList'
 
+  /content_type_request_stats:
+    get:
+      tags: [Cache]
+      summary: Per-site requests / bytes / cache hits by content type family
+      description: |
+        Grouped by the family of `$sent_http_content_type` (see `ContentTypeFamily`).
+        Blocked requests are excluded.
+      operationId: getContentTypeRequestStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Content type request stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContentTypeRequestStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/ContentTypeRequestStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /content_type_request_stats/timestamps:
+    get:
+      tags: [Cache]
+      summary: Available content_type_request_stats timestamps
+      operationId: getContentTypeRequestStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /cache_miss_url_stats:
+    get:
+      tags: [Cache]
+      summary: Per-site URLs most often fetched from origin
+      description: |
+        Top 100 URL paths per site per bucket, ordered by `miss_count` descending.
+        A miss is `MISS` or `EXPIRED`. Query strings are stripped, as in `/url_request_stats`.
+      operationId: getCacheMissUrlStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Cache miss URL stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CacheMissUrlStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/CacheMissUrlStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /cache_miss_url_stats/timestamps:
+    get:
+      tags: [Cache]
+      summary: Available cache_miss_url_stats timestamps
+      operationId: getCacheMissUrlStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /block_reason_stats:
+    get:
+      tags: [Security]
+      summary: Per-site blocked requests by WAF rule type
+      description: |
+        Every blocked request is attributed to exactly one `rule_type` (the rule that
+        made the final decision), so per site and bucket:
+        `sum(request_count) = blocked_request_count` in `/site_traffic_stats`.
+      operationId: getBlockReasonStats
+      parameters:
+        - $ref: '#/components/parameters/Timestamp'
+        - $ref: '#/components/parameters/SiteId'
+      responses:
+        '200':
+          description: Block reason stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlockReasonStatsResponse'
+              examples:
+                sample:
+                  $ref: '#/components/examples/BlockReasonStatsExample'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Error'
+
+  /block_reason_stats/timestamps:
+    get:
+      tags: [Security]
+      summary: Available block_reason_stats timestamps
+      operationId: getBlockReasonStatsTimestamps
+      responses:
+        '200':
+          $ref: '#/components/responses/TimestampList'
+
+  /access_logs:
+    get:
+      tags: [Logs]
+      summary: Stream raw access / security log records
+      description: |
+        Streams one JSON object per line (NDJSON), oldest first, for `[start, end)`.
+        The edge must retain at least **7 days** of records.
+
+        - `type=access`: every request
+        - `type=security`: only blocked requests (`blocked: true`)
+
+        Results are paged: when more records exist than `limit`, the response sets
+        `X-Next-Cursor`; pass it back as `cursor` with the same filters to continue.
+        An absent header means the range is complete.
+      operationId: getAccessLogs
+      parameters:
+        - name: start
+          in: query
+          required: true
+          description: Range start, Unix epoch seconds (inclusive)
+          schema:
+            type: integer
+            format: int64
+            example: 1723900800
+        - name: end
+          in: query
+          required: true
+          description: Range end, Unix epoch seconds (exclusive)
+          schema:
+            type: integer
+            format: int64
+            example: 1723904400
+        - $ref: '#/components/parameters/SiteId'
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [access, security]
+            default: access
+        - name: limit
+          in: query
+          required: false
+          description: Max records in this page
+          schema:
+            type: integer
+            default: 50000
+            maximum: 200000
+        - name: cursor
+          in: query
+          required: false
+          description: Opaque value from a previous `X-Next-Cursor` header
+          schema:
+            type: string
+      responses:
+        '200':
+          description: NDJSON stream of log records
+          headers:
+            X-Next-Cursor:
+              description: Present when more records remain
+              schema:
+                type: string
+            X-Retention-Start:
+              description: Oldest retained record, Unix epoch seconds
+              schema:
+                type: integer
+                format: int64
+          content:
+            application/x-ndjson:
+              schema:
+                $ref: '#/components/schemas/AccessLogRecord'
+              examples:
+                sample:
+                  $ref: '#/components/examples/AccessLogRecordExample'
+        '400':
+          $ref: '#/components/responses/Error'
+        '416':
+          description: Requested range is older than retention
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                expired:
+                  summary: Outside retention
+                  value:
+                    error: "Range starts before retained logs (1723300000)"
+        '500':
+          $ref: '#/components/responses/Error'
+
   /req-status:
     get:
       tags: [Bandwidth]
-      summary: Live per-Host egress bandwidth (ngx_req_status)
+      summary: Live per-Host bandwidth (ngx_req_status)
       description: |
-        C-module live view keyed by `$host` (~10s measure interval). Values are
-        **egress** bits/s toward the client (`connection->sent`).
-
-        Not site-scoped; Athens aggregates Host → `site_id` for
-        `/site_traffic_stats` and `/domain_request_stats` `bandwidth_l7_tx`.
-        Join Host → `site_id` via Redis `domain:{host}` when reading this endpoint directly.
+        C-module live view keyed by `$host` (~10s). Not site-scoped; join Host → `site_id`
+        via `/domain_request_stats` or Redis `domain:{host}`.
       operationId: getReqStatus
       parameters:
         - name: domain
@@ -385,19 +577,18 @@ paths:
           in: query
           schema:
             type: string
-            example: host
           description: Filter by zone name (Athens uses `host`)
         - name: bandwidth
           in: query
           schema:
             type: string
-            enum: [true, false]
+            enum: ['true', 'false']
           description: If `true`, only non-zero bandwidth rows
         - name: active
           in: query
           schema:
             type: string
-            enum: [true, false]
+            enum: ['true', 'false']
           description: If `true`, only currently active rows
       responses:
         '200':
@@ -456,9 +647,7 @@ components:
       name: timestamp
       in: query
       required: false
-      description: |
-        Unix epoch for a completed 60s history bucket (or Sparta L4 bucket).
-        When set, returns frozen history (no live bandwidth overlay; `live` is ignored).
+      description: Unix epoch for a 60s history bucket (or Sparta L4 bucket)
       schema:
         type: integer
         format: int64
@@ -475,27 +664,9 @@ components:
         type: integer
         example: 12
 
-    Live:
-      name: live
-      in: query
-      required: false
-      description: |
-        When `1` / `true` and no `timestamp`: return in-progress counters for the
-        current open 60s bucket (values grow until the worker flush).
-        Default without `timestamp`: last completed history snapshot.
-        Accepted values: `1`, `true`, `True` (boolean `true` also works).
-      schema:
-        oneOf:
-          - type: boolean
-          - type: integer
-            enum: [0, 1]
-          - type: string
-            enum: ["0", "1", "true", "false"]
-        example: 1
-
   responses:
     TimestampList:
-      description: Sorted list of available history timestamps
+      description: Sorted list of available history timestamps (closed buckets only)
       content:
         application/json:
           schema:
@@ -533,8 +704,8 @@ components:
 
   examples:
     ServerTrafficStatsExample:
-      summary: Last completed server-wide 60s bucket
-      description: Includes NIC + summed L7 counters and cache hit ratio for the edge.
+      summary: Latest server-wide bucket
+      description: Includes NIC + summed L7 counters for the edge.
       value:
         timestamp: 1723900800
         traffic_nic_rx: 1572864000
@@ -550,10 +721,6 @@ components:
         blocked_request_count: 312
         ip_count: 4210
         blocked_ip_count: 48
-        cache_hit_count: 8200
-        cache_miss_count: 1800
-        cache_bypass_count: 420
-        cache_hit_ratio: 0.82
         code200: 16200
         code206: 120
         code301: 80
@@ -583,9 +750,31 @@ components:
         http1_1_count: 9800
         http2_count: 8400
         http3_count: 205
+        cache_hit_count: 11800
+        cache_stale_count: 40
+        cache_updating_count: 25
+        cache_revalidated_count: 300
+        cache_miss_count: 3100
+        cache_expired_count: 420
+        cache_bypass_count: 260
+        cache_dynamic_count: 2163
+        cache_hit_ratio: 0.6718
+        traffic_cached_tx: 167772160
+        origin_request_count: 6243
+        traffic_origin_rx: 46137344
+        origin_code2xx: 5896
+        origin_code3xx: 90
+        origin_code4xx: 210
+        origin_code5xx: 31
+        origin_timeout_count: 12
+        origin_error_count: 4
+        edge_latency_hist: [6200, 4100, 2900, 1900, 1300, 900, 500, 210, 60, 25, 13]
+        edge_latency_sum_ms: 1985400
+        origin_latency_hist: [120, 600, 1400, 2000, 1100, 600, 280, 100, 28, 10, 5]
+        origin_latency_sum_ms: 1203600
 
     SiteTrafficStatsAllExample:
-      summary: All sites (default = last completed + live egress bandwidth)
+      summary: All sites (live or historical)
       value:
         timestamp: 1723900800
         site_traffic_stats:
@@ -599,10 +788,6 @@ components:
             blocked_request_count: 180
             ip_count: 2100
             blocked_ip_count: 22
-            cache_hit_count: 7200
-            cache_miss_count: 1600
-            cache_bypass_count: 380
-            cache_hit_ratio: 0.818
             code200: 9100
             code206: 60
             code301: 40
@@ -632,6 +817,28 @@ components:
             http1_1_count: 5200
             http2_count: 4800
             http3_count: 240
+            cache_hit_count: 6900
+            cache_stale_count: 20
+            cache_updating_count: 10
+            cache_revalidated_count: 150
+            cache_miss_count: 1500
+            cache_expired_count: 200
+            cache_bypass_count: 120
+            cache_dynamic_count: 1160
+            cache_hit_ratio: 0.7038
+            traffic_cached_tx: 100663296
+            origin_request_count: 3130
+            traffic_origin_rx: 23068672
+            origin_code2xx: 2960
+            origin_code3xx: 40
+            origin_code4xx: 110
+            origin_code5xx: 14
+            origin_timeout_count: 5
+            origin_error_count: 1
+            edge_latency_hist: [3600, 2300, 1600, 1000, 700, 470, 240, 100, 30, 12, 8]
+            edge_latency_sum_ms: 1048200
+            origin_latency_hist: [60, 300, 700, 1000, 560, 300, 140, 50, 12, 5, 3]
+            origin_latency_sum_ms: 603400
           - site_id: 0
             traffic_l7_rx: 1048576
             traffic_l7_tx: 2097152
@@ -642,10 +849,6 @@ components:
             blocked_request_count: 40
             ip_count: 35
             blocked_ip_count: 12
-            cache_hit_count: 10
-            cache_miss_count: 40
-            cache_bypass_count: 5
-            cache_hit_ratio: 0.2
             code200: 70
             code206: 0
             code301: 0
@@ -692,10 +895,6 @@ components:
             blocked_request_count: 180
             ip_count: 2100
             blocked_ip_count: 22
-            cache_hit_count: 7200
-            cache_miss_count: 1600
-            cache_bypass_count: 380
-            cache_hit_ratio: 0.818
             code200: 9100
             code403: 120
             code404: 200
@@ -705,7 +904,7 @@ components:
             http2_count: 4800
 
     DomainRequestStatsExample:
-      summary: Domains for one site (bandwidth_l7_tx from ngx_req_status)
+      summary: Domains for one site
       value:
         timestamp: 1723900800
         site_id: 12
@@ -824,8 +1023,100 @@ components:
             referer: "-"
             request_count: 4200
 
+    ContentTypeRequestStatsExample:
+      summary: Content type families for one site
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        content_type_request_stats:
+          - site_id: 12
+            content_type: image
+            request_count: 4200
+            traffic_l7_tx: 62914560
+            cached_request_count: 3900
+            traffic_cached_tx: 58720256
+          - site_id: 12
+            content_type: html
+            request_count: 2600
+            traffic_l7_tx: 15728640
+            cached_request_count: 900
+            traffic_cached_tx: 5242880
+          - site_id: 12
+            content_type: json
+            request_count: 1900
+            traffic_l7_tx: 4194304
+            cached_request_count: 120
+            traffic_cached_tx: 262144
+
+    CacheMissUrlStatsExample:
+      summary: Most-missed URLs for one site
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        cache_miss_url_stats:
+          - site_id: 12
+            domain: www.example.com
+            url: /products/list
+            miss_count: 310
+            request_count: 420
+          - site_id: 12
+            domain: www.example.com
+            url: /static/hero.webp
+            miss_count: 85
+            request_count: 1900
+
+    BlockReasonStatsExample:
+      summary: Blocks by rule type for one site
+      value:
+        timestamp: 1723900800
+        site_id: 12
+        block_reason_stats:
+          - site_id: 12
+            rule_type: anti-cc
+            rule_id: "41"
+            request_count: 96
+            ip_count: 9
+          - site_id: 12
+            rule_type: geo
+            rule_id: "17"
+            request_count: 52
+            ip_count: 8
+          - site_id: 12
+            rule_type: blacklist
+            rule_id: "3"
+            request_count: 32
+            ip_count: 5
+
+    AccessLogRecordExample:
+      summary: One NDJSON line (`type=access`)
+      value:
+        time: "2024-08-17T13:20:01.482Z"
+        request_id: 5f2c9a0d81e44b7a9c1d0e3f6a7b8c9d
+        site_id: 12
+        client_ip: 203.0.113.10
+        country_iso: US
+        method: GET
+        scheme: https
+        host: www.example.com
+        uri: /static/hero.webp?v=3
+        protocol: HTTP/2.0
+        status: 200
+        bytes_sent: 48213
+        request_length: 512
+        referer: https://www.example.com/
+        user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+        content_type: image/webp
+        cache_status: HIT
+        request_time_ms: 3
+        upstream_status: null
+        upstream_response_time_ms: null
+        upstream_bytes_received: 0
+        blocked: false
+        rule_type: null
+        rule_id: null
+
     ReqStatusExample:
-      summary: Live Host egress bandwidth (~10s)
+      summary: Live Host bandwidth (~10s)
       value:
         timestamp: 1723900860
         data:
@@ -875,15 +1166,10 @@ components:
           description: Response bytes sent
         bandwidth_l7_rx:
           type: number
-          description: >
-            Request bits/s derived from traffic_l7_rx
-            (`bytes * 8 / interval`, or elapsed seconds when `live=1`)
+          description: Request bits/s over the 60s interval
         bandwidth_l7_tx:
           type: number
-          description: >
-            Response egress bits/s. On site/domain default (no timestamp) responses,
-            refreshed from ngx_req_status (~10s). Otherwise
-            `traffic_l7_tx * 8 / interval` (or elapsed when `live=1`).
+          description: Response bits/s over the 60s interval
         request_count:
           type: integer
         response_count:
@@ -897,25 +1183,6 @@ components:
         blocked_ip_count:
           type: integer
           description: Unique blocked IPs in the interval
-        cache_hit_count:
-          type: integer
-          description: >
-            Responses served from proxy cache (HIT, STALE, UPDATING, REVALIDATED)
-        cache_miss_count:
-          type: integer
-          description: >
-            Cacheable responses that fetched origin (MISS, EXPIRED)
-        cache_bypass_count:
-          type: integer
-          description: Responses with upstream_cache_status BYPASS
-        cache_hit_ratio:
-          type: number
-          format: float
-          minimum: 0
-          maximum: 1
-          description: >
-            cache_hit_count / (cache_hit_count + cache_miss_count);
-            0 when there were no cacheable hit/miss responses
         code200:
           type: integer
         code206:
@@ -974,9 +1241,95 @@ components:
           type: integer
         http3_count:
           type: integer
+        cache_hit_count:
+          type: integer
+          description: '`$upstream_cache_status` = `HIT`'
+        cache_stale_count:
+          type: integer
+          description: '`STALE` (served stale while origin unavailable)'
+        cache_updating_count:
+          type: integer
+          description: '`UPDATING` (served stale while refreshing)'
+        cache_revalidated_count:
+          type: integer
+          description: '`REVALIDATED` (conditional request to origin returned 304)'
+        cache_miss_count:
+          type: integer
+          description: '`MISS`'
+        cache_expired_count:
+          type: integer
+          description: '`EXPIRED` (cached copy too old, refetched)'
+        cache_bypass_count:
+          type: integer
+          description: '`BYPASS` (`proxy_cache_bypass` matched)'
+        cache_dynamic_count:
+          type: integer
+          description: |
+            Not blocked, empty / `-` cache status (no cache zone for the location).
+            All eight cache counters sum to `request_count - blocked_request_count`.
+        cache_hit_ratio:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: |
+            (hit + stale + updating + revalidated) / (request_count - blocked_request_count).
+            Informational only; the backend recomputes ratios from the counters.
+        traffic_cached_tx:
+          type: number
+          description: Response bytes for cached statuses (HIT, STALE, UPDATING, REVALIDATED)
+        origin_request_count:
+          type: integer
+          description: |
+            Requests that contacted origin (`$upstream_addr` set), counting retries
+            once. Equals the sum of `origin_code*`, `origin_timeout_count` and
+            `origin_error_count`, and the sum of `origin_latency_hist`.
+        traffic_origin_rx:
+          type: number
+          description: Bytes received from origin (`$upstream_bytes_received`)
+        origin_code2xx:
+          type: integer
+          description: Origin responded with 2xx (final `$upstream_status`)
+        origin_code3xx:
+          type: integer
+        origin_code4xx:
+          type: integer
+        origin_code5xx:
+          type: integer
+          description: Origin itself responded with 5xx (excludes timeouts / connect errors)
+        origin_timeout_count:
+          type: integer
+          description: No response from origin within `proxy_connect_timeout` / `proxy_read_timeout`
+        origin_error_count:
+          type: integer
+          description: Connection refused / reset / DNS or TLS failure before a response
+        edge_latency_hist:
+          $ref: '#/components/schemas/LatencyHistogram'
+        edge_latency_sum_ms:
+          type: number
+          description: Sum of `$request_time` in ms for requests in `edge_latency_hist`
+        origin_latency_hist:
+          $ref: '#/components/schemas/LatencyHistogram'
+        origin_latency_sum_ms:
+          type: number
+          description: Sum of `$upstream_response_time` in ms (comma-separated attempts summed)
       additionalProperties:
         type: number
         description: Extra `codeNNN` counters may appear when seen
+
+    LatencyHistogram:
+      type: array
+      description: |
+        11 non-cumulative counts for upper bounds
+        `[10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, +Inf]` ms.
+        `edge_latency_hist` covers non-blocked requests (`$request_time`, time to last
+        byte sent to the client); `origin_latency_hist` covers `origin_request_count`
+        (`$upstream_response_time`, attempts summed). Omit or send all zeros when empty.
+      minItems: 11
+      maxItems: 11
+      items:
+        type: integer
+        minimum: 0
+      example: [3600, 2300, 1600, 1000, 700, 470, 240, 100, 30, 12, 8]
 
     ServerTrafficStats:
       allOf:
@@ -1040,12 +1393,8 @@ components:
           type: number
         bandwidth_l7_rx:
           type: number
-          description: Derived from traffic_l7_rx (`bytes * 8 / interval`)
         bandwidth_l7_tx:
           type: number
-          description: >
-            Live egress bits/s from ngx_req_status for this Host when serving
-            the latest completed bucket; otherwise derived from traffic_l7_tx.
 
     DomainRequestStatsResponse:
       type: object
@@ -1214,6 +1563,221 @@ components:
           items:
             $ref: '#/components/schemas/RefererRequestItem'
 
+    ContentTypeFamily:
+      type: string
+      description: |
+        Family of `$sent_http_content_type` (parameters such as `; charset=` dropped):
+        `html` text/html · `css` text/css · `js` */javascript, */ecmascript ·
+        `json` */json, *+json · `image` image/* · `video` video/*, application/vnd.apple.mpegurl,
+        application/dash+xml · `audio` audio/* · `font` font/*, application/font-* ·
+        `document` application/pdf, application/xml, text/xml, text/plain ·
+        `binary` application/octet-stream, application/zip, application/wasm · `other` anything else or missing
+      enum: [html, css, js, json, image, video, audio, font, document, binary, other]
+
+    ContentTypeRequestItem:
+      type: object
+      required: [site_id, content_type, request_count, traffic_l7_tx]
+      properties:
+        site_id:
+          type: integer
+        content_type:
+          $ref: '#/components/schemas/ContentTypeFamily'
+        request_count:
+          type: integer
+        traffic_l7_tx:
+          type: number
+          description: Response bytes sent
+        cached_request_count:
+          type: integer
+          description: Requests with HIT, STALE, UPDATING or REVALIDATED
+        traffic_cached_tx:
+          type: number
+          description: Response bytes for those cached requests
+
+    ContentTypeRequestStatsResponse:
+      type: object
+      required: [timestamp, content_type_request_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        content_type_request_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContentTypeRequestItem'
+
+    CacheMissUrlItem:
+      type: object
+      required: [site_id, domain, url, miss_count, request_count]
+      properties:
+        site_id:
+          type: integer
+        domain:
+          type: string
+          description: Request Host
+        url:
+          type: string
+          description: Path without query string
+        miss_count:
+          type: integer
+          description: Requests with `MISS` or `EXPIRED`
+        request_count:
+          type: integer
+          description: All non-blocked requests for this Host + path
+
+    CacheMissUrlStatsResponse:
+      type: object
+      required: [timestamp, cache_miss_url_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        cache_miss_url_stats:
+          type: array
+          maxItems: 100
+          description: Per site, top 100 by `miss_count`
+          items:
+            $ref: '#/components/schemas/CacheMissUrlItem'
+
+    WafRuleType:
+      type: string
+      description: |
+        Rule that made the final block decision:
+        `blacklist` IP / CIDR deny list ·
+        `geo` country / region rule ·
+        `anti-cc` CC / challenge protection ·
+        `second-freq-limit` per-second request rate limit ·
+        `interval-freq-limit` per-interval request rate limit ·
+        `user-agent` User-Agent rule ·
+        `anti-header` header / method / protocol rule ·
+        `response-freq` too many error responses (e.g. 404 flood) ·
+        `ip-reputation` threat-intel / reputation list ·
+        `temporary-block` IP still inside a temporary ban from an earlier hit ·
+        `other` any block not covered above
+      enum:
+        - blacklist
+        - geo
+        - anti-cc
+        - second-freq-limit
+        - interval-freq-limit
+        - user-agent
+        - anti-header
+        - response-freq
+        - ip-reputation
+        - temporary-block
+        - other
+
+    BlockReasonItem:
+      type: object
+      required: [site_id, rule_type, request_count]
+      properties:
+        site_id:
+          type: integer
+        rule_type:
+          $ref: '#/components/schemas/WafRuleType'
+        rule_id:
+          type: string
+          description: Id of the WAF rule from site config, when known
+        request_count:
+          type: integer
+          description: Blocked requests attributed to this rule
+        ip_count:
+          type: integer
+          description: Unique client IPs blocked by this rule in the interval
+
+    BlockReasonStatsResponse:
+      type: object
+      required: [timestamp, block_reason_stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+        block_reason_stats:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlockReasonItem'
+
+    AccessLogRecord:
+      type: object
+      description: One request. Sent as one JSON object per line.
+      required: [time, site_id, client_ip, method, host, uri, status, bytes_sent, blocked]
+      properties:
+        time:
+          type: string
+          format: date-time
+          description: Request end time, RFC 3339 UTC with milliseconds
+        request_id:
+          type: string
+          description: '`$request_id`'
+        site_id:
+          type: integer
+        client_ip:
+          type: string
+        country_iso:
+          type: string
+          nullable: true
+        method:
+          type: string
+        scheme:
+          type: string
+          enum: [http, https]
+        host:
+          type: string
+        uri:
+          type: string
+          description: '`$request_uri` (path and query string)'
+        protocol:
+          type: string
+          example: HTTP/2.0
+        status:
+          type: integer
+          description: Status sent to the client (including 444 / 9xx block codes)
+        bytes_sent:
+          type: integer
+        request_length:
+          type: integer
+        referer:
+          type: string
+          nullable: true
+        user_agent:
+          type: string
+          nullable: true
+        content_type:
+          type: string
+          nullable: true
+        cache_status:
+          type: string
+          nullable: true
+          enum: [HIT, MISS, EXPIRED, STALE, UPDATING, REVALIDATED, BYPASS, null]
+          description: '`null` when not cached (dynamic) or blocked'
+        request_time_ms:
+          type: number
+        upstream_status:
+          type: integer
+          nullable: true
+          description: Final origin status; `null` when origin was not contacted
+        upstream_response_time_ms:
+          type: number
+          nullable: true
+        upstream_bytes_received:
+          type: integer
+        blocked:
+          type: boolean
+        rule_type:
+          type: string
+          nullable: true
+          enum: [blacklist, geo, anti-cc, second-freq-limit, interval-freq-limit, user-agent, anti-header, response-freq, ip-reputation, temporary-block, other, null]
+          description: '`WafRuleType`; set when `blocked` is true'
+        rule_id:
+          type: string
+          nullable: true
+
     ReqStatusItem:
       type: object
       properties:
@@ -1227,7 +1791,7 @@ components:
           oneOf:
             - type: integer
             - type: string
-          description: Live egress bandwidth in bits/s (~10s window, connection->sent)
+          description: Live bandwidth in bits/s (~10s window)
         active:
           type: integer
           description: In-flight requests for this Host

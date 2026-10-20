@@ -17,7 +17,7 @@ extern int exiting;
 extern struct stats_config global_receive_stats;
 extern struct stats_config global_passed_stats;
 extern struct fixed_ip_pkt_stats global_max_ip_pkt_stats;
-extern struct traffic_stats_config global_traffic_stats[1441];
+extern struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS];
 
 #define BUF_SZ    1024
 #if 0
@@ -349,6 +349,40 @@ static void handle_tcp_rst_set(int cfd, char **argv, int argc) {
         reply(cfd, "failed\nError occured while setting parameters\n");
 }
 
+static void handle_tcp_stomp_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_tcp_stomp_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
+    if (argc != 8) { reply(cfd, "failed\nUsage failed\n"); return; }
+    int valid = 0;
+    if (strncmp(argv[1], "on", 2) == 0) valid = 1;
+    else valid = 0;
+
+    int ret = tcp_stomp_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]), atoi(argv[6]), atoi(argv[7]));
+    if (ret == 0)
+        reply(cfd, "ok\nsuccess\n");
+    else
+        reply(cfd, "failed\nError occured while setting parameters\n");
+}
+
+static void handle_tcp_socket_set(int cfd, char **argv, int argc) {
+    LOG_D("handle_tcp_socket_set: %s\n", argv[0]);
+    for (int i = 1; i < argc; i++) {
+        LOG_D("argv[%d]: %s\n", i, argv[i]);
+    }
+    if (argc != 5) { reply(cfd, "failed\nUsage failed\n"); return; }
+    int valid = 0;
+    if (strncmp(argv[1], "on", 2) == 0) valid = 1;
+    else valid = 0;
+
+    int ret = tcp_socket_set(valid, atoi(argv[2]), atoi(argv[3]), atoi(argv[4]));
+    if (ret == 0)
+        reply(cfd, "ok\nsuccess\n");
+    else
+        reply(cfd, "failed\nError occured while setting parameters\n");
+}
+
 static void handle_icmp_set(int cfd, char **argv, int argc) {
     LOG_D("handle_icmp_set: %s\n", argv[0]);
     for (int i = 1; i < argc; i++) {
@@ -503,40 +537,54 @@ static void handle_traffic_timestamps(int cfd, char **argv, int argc) {
     //}
     if (argc != 1) { reply(cfd, "failed\nUsage failed\n"); return; }
 
-    char data[1000000] = {0};
-    int index = 0;
-    for (index = 1439 ; index >= 0 ; index --) {
-        if (global_traffic_stats[index].timestamp == 0) break;
-    }
-    if (index != 1439) {
-        for (index = 0; index < 1440; index++) {
-            if (global_traffic_stats[index].timestamp == 0) break;
-            char temp[256] = {0};
-            snprintf(temp, 256, "%llu,", global_traffic_stats[index].timestamp);
-            strcat(data, temp);
+    int first_zero = -1;
+    for (int i = 0; i < TRAFFIC_STATS_SLOTS; i++) {
+        if (global_traffic_stats[i].timestamp == 0) {
+            first_zero = i;
+            break;
         }
-        reply(cfd, "ok\n%s\n", data);
     }
-    else {
-        for (index = 0; index < 1439; index++) {
-            if (global_traffic_stats[index].timestamp > global_traffic_stats[index + 1].timestamp) {
+
+    /* Empty, or filled from slot 0 and not yet wrapped. */
+    int oldest = 0;
+    int count = 0;
+    if (first_zero == 0) {
+        reply(cfd, "ok\n\n");
+        return;
+    }
+    if (first_zero > 0) {
+        count = first_zero;
+    } else {
+        /* Full ring. The single step backward is where the writer wrapped. */
+        int newest = TRAFFIC_STATS_SLOTS - 1;
+        for (int i = 0; i < TRAFFIC_STATS_SLOTS - 1; i++) {
+            if (global_traffic_stats[i].timestamp > global_traffic_stats[i + 1].timestamp) {
+                newest = i;
                 break;
             }
         }
-        for (int i = index + 1; i < 1440; i++) {
-            if (global_traffic_stats[i].timestamp == 0) continue;
-            char temp[256] = {0};
-            snprintf(temp, 256, "%llu,", global_traffic_stats[i].timestamp);
-            strcat(data, temp);
-        }
-        for (int i = 0; i <= index; i++) {
-            if (global_traffic_stats[i].timestamp == 0) continue;
-            char temp[256] = {0};
-            snprintf(temp, 256, "%llu,", global_traffic_stats[i].timestamp);
-            strcat(data, temp);
-        }
-        reply(cfd, "ok\n%s\n", data);
+        oldest = (newest + 1) % TRAFFIC_STATS_SLOTS;
+        count = TRAFFIC_STATS_SLOTS;
     }
+
+    /* 20 digits + comma per sample, plus "ok\n" and the trailing newline. */
+    size_t cap = (size_t)count * 21 + 8;
+    char *data = malloc(cap);
+    if (!data) {
+        reply(cfd, "failed\nOut of memory\n");
+        return;
+    }
+    size_t len = 0;
+    len += (size_t)snprintf(data + len, cap - len, "ok\n");
+    for (int n = 0; n < count; n++) {
+        int i = (oldest + n) % TRAFFIC_STATS_SLOTS;
+        if (global_traffic_stats[i].timestamp == 0)
+            continue;
+        len += (size_t)snprintf(data + len, cap - len, "%llu,", global_traffic_stats[i].timestamp);
+    }
+    len += (size_t)snprintf(data + len, cap - len, "\n");
+    reply(cfd, "%s", data);
+    free(data);
 }
 
 static void handle_traffic_stats(int cfd, char **argv, int argc) {
@@ -548,8 +596,8 @@ static void handle_traffic_stats(int cfd, char **argv, int argc) {
     int ret = -1;
     int timestamp = atoi(argv[1]);
     int index = 0;
-    for (int i = 0; i < 1440; i++) {
-        if (global_traffic_stats[i].timestamp == timestamp) {
+    for (int i = 0; i < TRAFFIC_STATS_SLOTS; i++) {
+        if (global_traffic_stats[i].timestamp == (__u64)timestamp) {
             ret = 0;
             index = i;
             break;
@@ -584,6 +632,8 @@ static const struct cmd_entry cmds[] = {
     {"TCP_SYN",    handle_tcp_syn_set},
     {"TCP_ACK",    handle_tcp_ack_set},
     {"TCP_RST",    handle_tcp_rst_set},
+    {"TCP_STOMP", handle_tcp_stomp_set},
+    {"TCP_SOCKET", handle_tcp_socket_set},
     {"ICMP",    handle_icmp_set},
     {"UDP",    handle_udp_set},
     {"GRE",    handle_gre_set},

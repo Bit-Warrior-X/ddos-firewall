@@ -34,27 +34,62 @@ local RULE_NAMES = {
     [9] = "anticc",
 }
 
+-- API WafRuleType per ACL id; anything else (whitelist, license, engine errors) is "other".
+local WAF_RULE_TYPES = {
+    [2] = "blacklist",
+    [3] = "geo",
+    [4] = "anti-header",
+    [5] = "interval-freq-limit",
+    [6] = "second-freq-limit",
+    [7] = "response-freq",
+    [8] = "user-agent",
+    [9] = "anti-cc",
+}
+local WAF_RULE_TYPE_TEMP_BLOCK = "temporary-block"
+local WAF_RULE_TYPE_OTHER = "other"
+
+-- acl_manager offsets each site's priorities by this; the remainder is the Angelos rule id.
+local SITE_PRIORITY_STRIDE = 100000
+
 local function stats_interval()
     local stats_cache = ngx.shared.stats_cache
     return (stats_cache and stats_cache:get("STATS_INTERVAL")) or 60
 end
 
-local function mark_blocked_ip(stats_cache, interval, country, site_id)
+local function matched_rule_id()
+    local prio = handle_acl.matched_priority()
+    if not prio then
+        return nil
+    end
+    return tostring(prio % SITE_PRIORITY_STRIDE)
+end
+
+local function mark_once(stats_cache, key, interval)
+    return stats_cache:add(key, true, interval * 2)
+end
+
+local function mark_blocked_ip(stats_cache, interval, country, site_id, rule_type, rule_id)
     local sid = site_id and tostring(site_id) or "0"
+    local bucket = math.floor(ngx.now() / interval) * interval
     stats_cache:incr("blocked_request_count", 1, 0)
     stats_cache:incr("s:" .. sid .. ":blocked_request_count", 1, 0)
 
+    ngx.var.waf_rule_type = rule_type
+    ngx.var.waf_rule_id = rule_id or ""
+
     local ip = ngx.var.remote_addr
-    local blocked_ip_key = "blocked_ip:" .. ip
-    if not stats_cache:get(blocked_ip_key) then
-        stats_cache:set(blocked_ip_key, true, interval)
+    if mark_once(stats_cache, "seen_blocked_ip:" .. bucket .. ":" .. ip, interval) then
         stats_cache:incr("blocked_ip_count", 1, 0)
     end
-    local site_blocked_ip_key = "s:" .. sid .. ":blocked_ip:" .. ip
-    if not stats_cache:get(site_blocked_ip_key) then
-        stats_cache:set(site_blocked_ip_key, true, interval)
+    if mark_once(stats_cache, "seen_site_blocked_ip:" .. bucket .. ":" .. sid .. ":" .. ip, interval) then
         stats_cache:incr("s:" .. sid .. ":blocked_ip_count", 1, 0)
         stats_cache:incr("block_country_req_count:" .. sid .. ":" .. country, 1, 0)
+    end
+
+    local reason = rule_type .. "|" .. (rule_id or "")
+    stats_cache:incr("br_req:" .. sid .. ":" .. reason, 1, 0)
+    if mark_once(stats_cache, "seen_br_ip:" .. bucket .. ":" .. sid .. ":" .. reason .. ":" .. ip, interval) then
+        stats_cache:incr("br_ip:" .. sid .. ":" .. reason, 1, 0)
     end
 end
 
@@ -133,7 +168,7 @@ function _M.run()
 
     if check_temporaryblacklist() then
         local country = geo_lookup.country()
-        mark_blocked_ip(stats_cache, interval, country, site_id)
+        mark_blocked_ip(stats_cache, interval, country, site_id, WAF_RULE_TYPE_TEMP_BLOCK, nil)
         return ngx.exit(444)
     end
 
@@ -146,7 +181,13 @@ function _M.run()
         ngx.var.acl_rule_id = RULE_NAMES[rule_id] or tostring(rule_id)
         ngx.var.acl_ret = action
 
-        mark_blocked_ip(stats_cache, interval, country, site_id)
+        local rule_type = WAF_RULE_TYPE_OTHER
+        local waf_rule_id
+        if action ~= "internal_error" and action ~= "no_license" and action ~= "unknown" then
+            rule_type = WAF_RULE_TYPES[rule_id] or WAF_RULE_TYPE_OTHER
+            waf_rule_id = matched_rule_id()
+        end
+        mark_blocked_ip(stats_cache, interval, country, site_id, rule_type, waf_rule_id)
 
         if action == "drop_block" then
             add_temporaryblacklist(

@@ -55,3 +55,5 @@ autom4te.cache/
 
 
 openresty-modules/openresty-1.27.1.2/build/
+setup/dist/
+.pack-venv-angelos/

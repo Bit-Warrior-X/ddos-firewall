@@ -10,8 +10,6 @@ LIBBPF_KERNEL_INCLUDE="/usr/src/linux-headers-${KERNEL_RELEASE}/tools/bpf/resolv
 SPARTA_SERVICE="sparta.service"
 SPARTA_PROM_SERVICE="sparta-prometheus.service"
 
-systemctl stop "${SPARTA_SERVICE}" >/dev/null 2>&1 || true
-
 cd "${SCRIPT_DIR}"
 
 missing_deps=()
@@ -80,6 +78,8 @@ if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
   echo "DDOS_FW_CI_PAYLOAD_ONLY=1: skipping install and systemd."
   exit 0
 fi
+
+systemctl stop "${SPARTA_SERVICE}" >/dev/null 2>&1 || true
 
 if sudo -n true >/dev/null 2>&1; then
   make install

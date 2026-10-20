@@ -52,9 +52,14 @@ class APIClient:
     
     @staticmethod
     def send_report_xdp(payload: Dict[str, Any]) -> bool:
-        """Send report log to API."""
+        """Send report log to API. Failures are logged; callers must check the result."""
+        ok, _retriable = APIClient.post_report_xdp(payload)
+        return ok
+
+    @staticmethod
+    def post_report_xdp(payload: Dict[str, Any]) -> tuple:
+        """POST one report. Returns (ok, retriable)."""
         headers = {'Content-Type': 'application/json'}
-        
         try:
             response = requests.post(
                 config.REPORT_XDP_API_URL,
@@ -64,9 +69,35 @@ class APIClient:
                 verify=False
             )
             response.raise_for_status()
-            return True
-        except requests.exceptions.RequestException:
-            return False
+            return True, False
+        except requests.exceptions.RequestException as exc:
+            response = getattr(exc, "response", None)
+            status = response.status_code if response is not None else None
+            body = ""
+            if response is not None and response.text:
+                body = response.text.replace("\n", " ")[:300]
+            retriable = (
+                isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError))
+                or status in (429, 500, 502, 503, 504)
+            )
+            print(
+                "[API_PARSER] report_xdp failed command="
+                + str(payload.get("command") or "")
+                + " data="
+                + str(payload.get("data") or payload.get("attack_type") or "")
+                + " req_id="
+                + str(payload.get("req_id") or "")
+                + " status="
+                + str(status)
+                + " retriable="
+                + str(retriable)
+                + " error="
+                + str(exc)
+                + " body="
+                + str(body),
+                flush=True,
+            )
+            return False, retriable
         
     @staticmethod
     def notify_temporary_blacklist_added(item: Dict[str, Any]) -> bool:

@@ -1,7 +1,7 @@
 local ngx = ngx
 local site_resolver = require "resty.site_resolver"
 
-local _M = { _VERSION = "1.2.0" }
+local _M = { _VERSION = "1.3.0" }
 
 local UNKNOWN_SITE = "0"
 
@@ -21,8 +21,17 @@ local METHOD_COUNTERS = {
     OPTIONS = "options_count",
 }
 
--- nginx $upstream_cache_status → hit / miss / bypass buckets for hit ratio.
-local CACHE_HIT_STATUS = {
+-- $upstream_cache_status → counter; empty / "-" / unknown is cache_dynamic_count.
+local CACHE_STATUS_COUNTERS = {
+    HIT = "cache_hit_count",
+    STALE = "cache_stale_count",
+    UPDATING = "cache_updating_count",
+    REVALIDATED = "cache_revalidated_count",
+    MISS = "cache_miss_count",
+    EXPIRED = "cache_expired_count",
+    BYPASS = "cache_bypass_count",
+}
+local CACHE_CACHED_STATUS = {
     HIT = true,
     STALE = true,
     UPDATING = true,
@@ -32,6 +41,128 @@ local CACHE_MISS_STATUS = {
     MISS = true,
     EXPIRED = true,
 }
+
+-- Upper bounds (ms) of the 11 non-cumulative latency buckets; the last is +Inf.
+local LATENCY_BOUNDS_MS = { 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000 }
+_M.LATENCY_BUCKETS = #LATENCY_BOUNDS_MS + 1
+
+local CONTENT_TYPE_EXACT = {
+    ["text/html"] = "html",
+    ["application/xhtml+xml"] = "html",
+    ["text/css"] = "css",
+    ["application/vnd.apple.mpegurl"] = "video",
+    ["application/x-mpegurl"] = "video",
+    ["application/dash+xml"] = "video",
+    ["application/pdf"] = "document",
+    ["application/xml"] = "document",
+    ["text/xml"] = "document",
+    ["text/plain"] = "document",
+    ["application/octet-stream"] = "binary",
+    ["application/zip"] = "binary",
+    ["application/wasm"] = "binary",
+}
+local CONTENT_TYPE_PREFIX = {
+    image = "image",
+    video = "video",
+    audio = "audio",
+    font = "font",
+}
+_M.CONTENT_TYPE_FAMILIES = {
+    "html", "css", "js", "json", "image", "video", "audio", "font", "document", "binary", "other",
+}
+
+function _M.content_type_family(content_type)
+    if not content_type or content_type == "" then
+        return "other"
+    end
+    local mime = content_type:match("^%s*([^;%s]+)")
+    if not mime then
+        return "other"
+    end
+    mime = mime:lower()
+
+    local exact = CONTENT_TYPE_EXACT[mime]
+    if exact then
+        return exact
+    end
+    local major, minor = mime:match("^([^/]+)/(.+)$")
+    if not major then
+        return "other"
+    end
+    if minor == "javascript" or minor == "ecmascript" or minor == "x-javascript" then
+        return "js"
+    end
+    if minor == "json" or minor:sub(-5) == "+json" then
+        return "json"
+    end
+    if major == "application" and minor:sub(1, 5) == "font-" then
+        return "font"
+    end
+    return CONTENT_TYPE_PREFIX[major] or "other"
+end
+
+local function latency_bucket(ms)
+    for i, bound in ipairs(LATENCY_BOUNDS_MS) do
+        if ms <= bound then
+            return i
+        end
+    end
+    return #LATENCY_BOUNDS_MS + 1
+end
+
+-- nginx upstream lists look like "502, 200" or "-, 0.004 : 0.010" (retries / redirects).
+local function last_token(list)
+    local last
+    if list then
+        for tok in list:gmatch("[^,:%s]+") do
+            last = tok
+        end
+    end
+    return last
+end
+
+local function sum_tokens(list)
+    local total, seen = 0, false
+    if list then
+        for tok in list:gmatch("[^,:%s]+") do
+            local v = tonumber(tok)
+            if v then
+                total = total + v
+                seen = true
+            end
+        end
+    end
+    return total, seen
+end
+
+_M.last_token = last_token
+_M.sum_tokens = sum_tokens
+
+function _M.upstream_contacted()
+    local addr = ngx.var.upstream_addr
+    return addr ~= nil and addr ~= "" and addr ~= "-"
+end
+
+--- Final origin status, or nil when no response header came back from origin.
+function _M.final_upstream_status()
+    local header_time = last_token(ngx.var.upstream_header_time)
+    if not header_time or header_time == "-" then
+        return nil
+    end
+    return tonumber(last_token(ngx.var.upstream_status))
+end
+
+function _M.upstream_response_time_ms()
+    local secs, seen = sum_tokens(ngx.var.upstream_response_time)
+    if not seen then
+        return nil
+    end
+    return secs * 1000
+end
+
+function _M.upstream_bytes_received()
+    return (sum_tokens(ngx.var.upstream_bytes_received))
+end
 
 local function request_domain()
     local host = ngx.var.host
@@ -70,13 +201,40 @@ local function incr(stats_cache, sid, name, n)
     stats_cache:incr("s:" .. sid .. ":" .. name, n, 0)
 end
 
+local function log_origin(stats_cache, sid)
+    incr(stats_cache, sid, "origin_request_count", 1)
+    incr(stats_cache, sid, "traffic_origin_rx", _M.upstream_bytes_received())
+
+    local status = _M.final_upstream_status()
+    if not status then
+        if tonumber(last_token(ngx.var.upstream_status)) == 504 then
+            incr(stats_cache, sid, "origin_timeout_count", 1)
+        else
+            incr(stats_cache, sid, "origin_error_count", 1)
+        end
+    elseif status >= 200 and status < 300 then
+        incr(stats_cache, sid, "origin_code2xx", 1)
+    elseif status >= 300 and status < 400 then
+        incr(stats_cache, sid, "origin_code3xx", 1)
+    elseif status >= 400 and status < 500 then
+        incr(stats_cache, sid, "origin_code4xx", 1)
+    elseif status >= 500 and status < 600 then
+        incr(stats_cache, sid, "origin_code5xx", 1)
+    else
+        incr(stats_cache, sid, "origin_error_count", 1)
+    end
+
+    local origin_ms = _M.upstream_response_time_ms() or 0
+    incr(stats_cache, sid, "origin_lat_h" .. latency_bucket(origin_ms), 1)
+    incr(stats_cache, sid, "origin_latency_sum_ms", origin_ms)
+end
+
 function _M.log_response()
     local stats_cache = ngx.shared.stats_cache
     local sid = _M.current_site_id()
     local domain = request_domain()
 
     local response_size = tonumber(ngx.var.bytes_sent) or 0
-    incr(stats_cache, sid, "bandwidth_l7_tx", response_size)
     incr(stats_cache, sid, "traffic_l7_tx", response_size)
     stats_cache:incr("domain_tx:" .. sid .. ":" .. domain, response_size, 0)
 
@@ -107,14 +265,44 @@ function _M.log_response()
         incr(stats_cache, sid, "http1_1_count", 1)
     end
 
+    if _M.upstream_contacted() then
+        log_origin(stats_cache, sid)
+    end
+
+    -- Blocked requests are excluded so the cache counters sum to request_count - blocked.
+    if ngx.var.acl_blocked == "1" then
+        return
+    end
+
+    local request_ms = (tonumber(ngx.var.request_time) or 0) * 1000
+    incr(stats_cache, sid, "edge_lat_h" .. latency_bucket(request_ms), 1)
+    incr(stats_cache, sid, "edge_latency_sum_ms", request_ms)
+
     -- Available in log phase after proxy_cache; empty on nocache locations.
     local cache_status = ngx.var.upstream_cache_status or ""
-    if CACHE_HIT_STATUS[cache_status] then
-        incr(stats_cache, sid, "cache_hit_count", 1)
-    elseif CACHE_MISS_STATUS[cache_status] then
-        incr(stats_cache, sid, "cache_miss_count", 1)
-    elseif cache_status == "BYPASS" then
-        incr(stats_cache, sid, "cache_bypass_count", 1)
+    incr(stats_cache, sid, CACHE_STATUS_COUNTERS[cache_status] or "cache_dynamic_count", 1)
+    local cached = CACHE_CACHED_STATUS[cache_status] == true
+    if cached then
+        incr(stats_cache, sid, "traffic_cached_tx", response_size)
+    end
+
+    local family = _M.content_type_family(ngx.var.sent_http_content_type)
+    local ct_suffix = sid .. ":" .. family
+    stats_cache:incr("ct_req:" .. ct_suffix, 1, 0)
+    stats_cache:incr("ct_tx:" .. ct_suffix, response_size, 0)
+    if cached then
+        stats_cache:incr("ct_creq:" .. ct_suffix, 1, 0)
+        stats_cache:incr("ct_ctx:" .. ct_suffix, response_size, 0)
+    end
+
+    local uri = ngx.var.uri or "/"
+    if uri == "" then
+        uri = "/"
+    end
+    local url_suffix = sid .. ":" .. domain .. " " .. uri
+    stats_cache:incr("cmu_req:" .. url_suffix, 1, 0)
+    if CACHE_MISS_STATUS[cache_status] then
+        stats_cache:incr("cmu_miss:" .. url_suffix, 1, 0)
     end
 end
 
@@ -128,20 +316,17 @@ function _M.track_request()
 
     local request_size = tonumber(ngx.var.request_length) or 0
     incr(stats_cache, sid, "traffic_l7_rx", request_size)
-    incr(stats_cache, sid, "bandwidth_l7_rx", request_size)
 
     stats_cache:incr("domain_req_count:" .. sid .. ":" .. domain, 1, 0)
     stats_cache:incr("domain_rx:" .. sid .. ":" .. domain, request_size, 0)
 
+    -- Seen markers carry the bucket start so "unique in the interval" follows bucket edges.
     local ip = ngx.var.remote_addr
-    local ip_key = "ip:" .. ip
-    if not stats_cache:get(ip_key) then
-        stats_cache:set(ip_key, true, interval)
+    local bucket = math.floor(ngx.now() / interval) * interval
+    if stats_cache:add("seen_ip:" .. bucket .. ":" .. ip, true, interval * 2) then
         stats_cache:incr("ip_count", 1, 0)
     end
-    local site_ip_key = "s:" .. sid .. ":seen_ip:" .. ip
-    if not stats_cache:get(site_ip_key) then
-        stats_cache:set(site_ip_key, true, interval)
+    if stats_cache:add("seen_site_ip:" .. bucket .. ":" .. sid .. ":" .. ip, true, interval * 2) then
         stats_cache:incr("s:" .. sid .. ":ip_count", 1, 0)
     end
 
@@ -167,6 +352,7 @@ function _M.track_request()
         isp = i or "-"
     end
     stats_cache:incr("country_req_count:" .. sid .. ":" .. country, 1, 0)
+    ngx.var.stats_country = country ~= "-" and country or ""
 
     if #isp > 256 then
         isp = isp:sub(1, 256)

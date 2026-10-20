@@ -74,6 +74,7 @@ void func_print(int id, const char* fmt, ...);
 #  define LOG_T(x, args...) func_print(9, ""x, ##args)
 #endif
 
-void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip);
+void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip, __u64 req_id);
+__u64 generate_attack_req_id(void);
 
 #endif

@@ -111,6 +111,12 @@ struct global_firewall_config global_fw_config ={
         .handshake_fixed_threshold = HANDSHAKE_FIXED_THRESHOLD,
         .handshake_fixed_check_duration = HANDSHAKE_FIXED_CHECK_DURATION_NS,
         .handshake_protect_duration = HANDSHAKE_PROTECTION_DURATION
+    },
+    .g_socket_config = {
+        .valid = 1,
+        .socket_fin_threshold = SOCKET_FIN_THRESHOLD,
+        .socket_fixed_threshold = SOCKET_FIXED_THRESHOLD,
+        .socket_fixed_check_duration = SOCKET_FIXED_CHECK_DURATION_NS
     }
 };
 
@@ -793,6 +799,15 @@ int load_config(struct bpf_object *obj) {
             } else if (strcmp(key, "handshake_protection_duration") == 0) {
                 global_fw_config.g_handshake_config.handshake_protect_duration = int_value;
             }
+            else if (strcmp(key, "socket_valid") == 0) {
+                global_fw_config.g_socket_config.valid = int_value;
+            } else if (strcmp(key, "socket_fin_threshold") == 0) {
+                global_fw_config.g_socket_config.socket_fin_threshold = int_value;
+            } else if (strcmp(key, "socket_fixed_threshold") == 0) {
+                global_fw_config.g_socket_config.socket_fixed_threshold = int_value;
+            } else if (strcmp(key, "socket_fixed_check_duration") == 0) {
+                global_fw_config.g_socket_config.socket_fixed_check_duration = (__u64)int_value * ONE_SECOND_NS;
+            }
             //TCP segment
             else if (strcmp(key, "tcp_seg_check") == 0) {
                 global_fw_config.g_config.tcp_seg_check = int_value;
@@ -850,6 +865,14 @@ int load_config(struct bpf_object *obj) {
         LOG_E("Burst threshold of GRE is zero. Please reconfig it\n");
         return -1;
     }
+    if (global_fw_config.g_stomp_config.burst_count_threshold == 0) {
+        LOG_E("Burst threshold of STOMP is zero. Please reconfig it\n");
+        return -1;
+    }
+    if (global_fw_config.g_handshake_config.burst_count_threshold == 0) {
+        LOG_E("Burst threshold of HANDSHAKE is zero. Please reconfig it\n");
+        return -1;
+    }
 
     // Calculate burst gap
     global_fw_config.g_syn_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_syn_config.burst_count_threshold);
@@ -858,6 +881,8 @@ int load_config(struct bpf_object *obj) {
     global_fw_config.g_icmp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_icmp_config.burst_count_threshold);
     global_fw_config.g_udp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_udp_config.burst_count_threshold);
     global_fw_config.g_gre_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_gre_config.burst_count_threshold);
+    global_fw_config.g_stomp_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_stomp_config.burst_count_threshold);
+    global_fw_config.g_handshake_config.burst_gap_ns = ONE_SECOND_NS / (global_fw_config.g_handshake_config.burst_count_threshold);
 
     int key = 0;
     

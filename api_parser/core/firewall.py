@@ -82,6 +82,17 @@ def set_protection(
     command_args.append(str(protection_duration))
     return execute_cli_command(command_args)
 
+def set_socket_protection(
+    status: str,
+    fin_threshold: int,
+    fixed_threshold: int,
+    fixed_duration: int
+) -> Dict[str, str]:
+    """Set SOCKET defense. This is a fixed window, not a flood mode."""
+    command_args = ['sparta_cli', 'TCP_SOCKET', status,
+                    str(fin_threshold), str(fixed_threshold), str(fixed_duration)]
+    return execute_cli_command(command_args)
+
 def health_check() -> Dict[str, str]:
     """Perform firewall health check."""
     command_args = ['sparta_cli', 'HEALTH_CHECK']

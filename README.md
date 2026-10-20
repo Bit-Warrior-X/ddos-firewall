@@ -433,8 +433,9 @@ Key includes:
 | `http_purge_cache.conf` | Redis socket + db for cache purge index |
 | `http_proxy_cache.conf` | Proxy cache zone (`athens_cache`) |
 | `http_shared_dicts.conf` | Lua shared dicts (ACL cache, stats, purge sync) |
+| `http_access_log.conf` | NDJSON request log for `/access_logs` (`nginx/logs/access/`, hourly files, 7-day retention) |
 | `server_main_acl.conf` | Main protected server + Lua access phase |
-| `server_stats_api.conf` | Stats and purge API on port 9000 |
+| `server_stats_api.conf` | Stats, `/access_logs` and purge API on port 9000 (spec: `openresty-modules/athens-metrics-api.yml`) |
 
 **Redis** (`redis-socket.conf`):
 

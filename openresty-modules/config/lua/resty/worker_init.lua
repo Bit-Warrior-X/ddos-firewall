@@ -89,6 +89,13 @@ function _M.run()
 
     local stats_worker = require "resty.stats_worker"
     stats_worker.start()
+
+    local ok_al, access_logs = pcall(require, "resty.access_logs")
+    if ok_al and access_logs and access_logs.start then
+        access_logs.start()
+    else
+        ngx.log(ngx.ERR, "failed to require resty.access_logs: ", tostring(access_logs))
+    end
 end
 
 return _M

@@ -18,6 +18,8 @@ ngx_int_t ngx_http_acl_remove_acl_rule(ngx_http_request_t* r, int acl_id);
 
 ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id);
 
+ngx_int_t ngx_http_acl_matched_priority(ngx_http_request_t* r);
+
 void ngx_http_acl_handler_cleanup(void *data);
 
 ngx_int_t ngx_http_acl_check_server_acl_rule(ngx_http_request_t* r, server_acl_rule_t * server_acl_rule_p);

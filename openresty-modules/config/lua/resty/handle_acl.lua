@@ -19,6 +19,9 @@ ngx_http_acl_handle_acl_rule(ngx_http_request_t* r, int acl_id, int action, int 
 
 ngx_int_t
 ngx_http_acl_remove_acl_rule(ngx_http_request_t* r, int acl_id);
+
+ngx_int_t
+ngx_http_acl_matched_priority(ngx_http_request_t* r);
 ]]
 
 local _M = {
@@ -55,6 +58,22 @@ function _M.process_acl_id(id)
     local r = get_request()
     local rc = C.ngx_http_acl_process_acl_id(r, id)
     return rc
+end
+
+--- Priority of the rule matched by the last process_acl_id call, or nil.
+function _M.matched_priority()
+    local r = get_request()
+    local ok, prio = pcall(function()
+        return C.ngx_http_acl_matched_priority(r)
+    end)
+    if not ok then
+        return nil
+    end
+    prio = tonumber(prio)
+    if not prio or prio < 0 then
+        return nil
+    end
+    return prio
 end
 
 function _M.set_acl_rule(cfg)

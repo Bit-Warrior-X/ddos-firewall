@@ -20,6 +20,8 @@
  #define MAX_RETRIES 3
  #define RECOVERY_DELAY_US 1000
  #define BUFFER_SIZE        (2 * 1024 * 1024)
+ /* SYN bit in the TCP flags conntrack records. */
+ #define CT_TCP_SYN         0x02
  
  static struct nfct_handle *h = NULL;
  extern int exiting;
@@ -273,7 +275,7 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
          LOG_C("TCP connection limit reached [%s] -> %u (limit=%u)\n",
                src_str, con_count, limit);
         
-        print_firewall_status(NULL, EVENT_TCP_CONNECTION_LIMIT_REACHED, sip);
+        print_firewall_status(NULL, EVENT_TCP_CONNECTION_LIMIT_REACHED, sip, 0);
 
          struct timespec ts;
          if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
@@ -287,6 +289,26 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
  }
  
  
+ /* 1 if this flow was opened with a SYN. Loose pickup of a raw PSH+ACK
+  * has no SYN bit; those must not enter the established fast path. */
+ static int conntrack_saw_syn(const struct nf_conntrack *ct)
+ {
+     uint8_t flags = 0;
+     int have_flags = 0;
+
+     if (nfct_attr_is_set(ct, ATTR_TCP_FLAGS_ORIG)) {
+         flags |= nfct_get_attr_u8(ct, ATTR_TCP_FLAGS_ORIG);
+         have_flags = 1;
+     }
+     if (nfct_attr_is_set(ct, ATTR_TCP_FLAGS_REPL)) {
+         flags |= nfct_get_attr_u8(ct, ATTR_TCP_FLAGS_REPL);
+         have_flags = 1;
+     }
+     if (!have_flags)
+         return 1;
+     return (flags & CT_TCP_SYN) != 0;
+ }
+
  /* Connection event callback */
  static int event_cb(enum nf_conntrack_msg_type type,
                      struct nf_conntrack *ct,
@@ -329,6 +351,12 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
      }
  
      if (type == NFCT_T_NEW || type == NFCT_T_UPDATE) {
+         /* nf_conntrack_tcp_loose picks up a raw PSH+ACK as ESTABLISHED.
+          * xdp_main would then skip STOMP/HANDSHAKE for that flow, so the
+          * attack counter stays far below the PSH+ACK flag count. */
+         if (!conntrack_saw_syn(ct))
+             return NFCT_CB_CONTINUE;
+
          /*
           * FIX #2: Deduplicate established map insertions.
           * During the initial dump, the same connection may appear multiple times.

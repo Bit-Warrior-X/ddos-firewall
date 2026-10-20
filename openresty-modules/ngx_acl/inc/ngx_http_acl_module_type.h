@@ -95,6 +95,7 @@ typedef struct action_s {
 typedef struct ngx_http_acl_ctx_s {
     ngx_int_t                       checked;                                    /**< Checked status */
     ngx_int_t                       matched;                                    /**< Whether this request was matched the ACL rule */
+    ngx_int_t                       matched_priority;                           /**< Priority of the last rule matched by process_acl_id, -1 if none */
     time_t                          time;                                       /**< Context created time */
     ngx_int_t                       read_body_done;
     ngx_int_t                       waiting_more_body;                          /**< Whether to wait to read more request bodies */

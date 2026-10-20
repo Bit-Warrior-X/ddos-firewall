@@ -90,6 +90,12 @@
 #define HANDSHAKE_BURST_GAP_NS            ONE_SECOND_NS / HANDSHAKE_BURST_PKT_THRESHOLD
 #define HANDSHAKE_PROTECTION_DURATION     0                         // Protection duration for HandShake
 
+/* SOCKET is not a flood mode. NULL/XMAS are dropped immediately.
+ * FIN-without-ACK and other unusual flags share one fixed window. */
+#define SOCKET_FIN_THRESHOLD              100
+#define SOCKET_FIXED_THRESHOLD            500
+#define SOCKET_FIXED_CHECK_DURATION_NS    (15ULL * ONE_SECOND_NS)
+
 /* ---- Event codes ---- */
 #define EVENT_IP_BLOCK_END                         0
 
@@ -153,8 +159,27 @@
 #define FIXED_IP_RING_BUF_ICMP                     11
 #define FIXED_IP_RING_BUF_GRE                      12
 // Newly added 2026/4/1
-#define FIXED_IP_RING_BUF_STOMP                    13     // PSH + ACK flood
-#define FIXED_IP_RING_BUF_HANDSHAKE                14     // SYN + ACK flood
+#define FIXED_IP_RING_BUF_STOMP                    13     // constant-length PSH+ACK flood
+#define FIXED_IP_RING_BUF_HANDSHAKE                14     // variable-length PSH+ACK, or SYN+ACK
+
+/* PSH+ACK payload-length profile. STOMP keeps one length; HANDSHAKE does not.
+ * Classify after PSH_LEN_WINDOW packets: differ_cnt >= PSH_LEN_DIFFER_HANDSHAKE
+ * means the lengths are spread out (HANDSHAKE). Fewer differs means STOMP.
+ * The decision is applied only after the source crosses the PSH+ACK rate threshold. */
+#define PSH_LEN_WINDOW                 32
+#define PSH_LEN_DIFFER_HANDSHAKE       5
+#define PSH_LEN_CLASS_UNKNOWN          0
+#define PSH_LEN_CLASS_STOMP            1
+#define PSH_LEN_CLASS_HANDSHAKE        2
+
+struct psh_len_profile {
+    __u16 first_len;
+    __u16 seen;
+    __u16 match_cnt;
+    __u16 differ_cnt;
+    __u8  klass;
+    __u8  _pad[7];
+};
 
 /* ---- Structures ---- */
 
@@ -170,6 +195,7 @@ struct event {
     __u64 time;
     __u16 reason;
     __u32 srcip;
+    __u64 req_id;
 };
 
 struct fixed_ip_event {
@@ -204,6 +230,16 @@ struct global_attack_stats {
     __u64 stomp_protect_expire;
     __u8 handshake_attack;
     __u64 handshake_protect_expire;
+
+    __u64 global_req_id;
+    __u64 syn_req_id;
+    __u64 ack_req_id;
+    __u64 rst_req_id;
+    __u64 icmp_req_id;
+    __u64 udp_req_id;
+    __u64 gre_req_id;
+    __u64 stomp_req_id;
+    __u64 handshake_req_id;
 };
 
 // Per-source state for SYN packet bursts.
@@ -303,6 +339,14 @@ struct handshake_config {
     __u32 handshake_protect_duration;
 };
 
+struct socket_config {
+    __u32 valid;
+    __u32 socket_fin_threshold;
+    __u32 socket_fixed_threshold;
+    __u32 _pad;
+    __u64 socket_fixed_check_duration;
+};
+
 struct geo_config {
     __u8 check;
     __u8 _pad_geo[3];
@@ -335,6 +379,7 @@ struct global_firewall_config {
     struct gre_config            g_gre_config;
     struct stomp_config          g_stomp_config;
     struct handshake_config      g_handshake_config;
+    struct socket_config         g_socket_config;
     struct geo_config            g_geo_config;
     struct tcp_connection_config g_tcp_connection_config;
 };
@@ -382,6 +427,9 @@ struct stats_config {
     __u64 udp;
     __u64 gre;
 };
+
+/* One traffic sample per second. 86400 slots keep 24 hours (~8 MB of RAM). */
+#define TRAFFIC_STATS_SLOTS (24 * 60 * 60)
 
 struct traffic_stats_config {
     __u64 timestamp;
