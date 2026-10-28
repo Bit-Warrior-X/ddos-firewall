@@ -1,5 +1,12 @@
 -- Dynamic upstream list from Redis key upstreamservers:{site_id}.
 -- Expected JSON: [ { "ip_port": "192.168.1.199:100", "description": "weight=4 ..." }, ... ]
+--
+-- Per-port pools from originroutes:{site_id} take precedence:
+--   { "http":  [ { "ports": [80], "upstreams": [ { ip_port, protocol, description } ] } ],
+--     "https": [ ... ] }
+-- A request on (scheme, server_port) listed in a rule uses that rule's pool.
+-- When a site has routes, any other port has no origin (502). Sites without
+-- routes use the flat upstreamservers pool for every port.
 
 local redis  = require "resty.redis"
 local cjson  = require "cjson.safe"
@@ -25,6 +32,9 @@ local DEFAULT_BACKEND = nil
 
 -- Per-worker L1: { [site_id] = { list=..., version=... } }
 local l1 = {}
+-- Per-worker L1 for routes: { [site_id] = { routes=table|false, version=... } }
+local l1_routes = {}
+local ROUTE_SCHEMES = { "http", "https" }
 
 local function parse_description(desc)
     if not desc or type(desc) ~= "string" then
@@ -100,6 +110,81 @@ local function load_from_redis(site_id)
     return normalize_list(list)
 end
 
+-- { http = { ["80"] = { "http://10.0.0.1:8080", ... } }, https = { ... } } or nil.
+-- Each pool is pre-expanded by weight; upstream protocol defaults to the route scheme.
+local function compile_routes(routes)
+    if type(routes) ~= "table" then
+        return nil
+    end
+    local out, any = { http = {}, https = {} }, false
+    for _, scheme in ipairs(ROUTE_SCHEMES) do
+        local rules = routes[scheme]
+        if type(rules) == "table" then
+            for _, rule in ipairs(rules) do
+                if type(rule) == "table" and type(rule.ports) == "table"
+                        and type(rule.upstreams) == "table" then
+                    local urls = {}
+                    for _, u in ipairs(rule.upstreams) do
+                        if type(u) == "table" and type(u.ip_port) == "string" and u.ip_port ~= "" then
+                            local proto = (u.protocol == "http" or u.protocol == "https")
+                                and u.protocol or scheme
+                            local w = math.max(1, math.floor(parse_description(u.description).weight or 1))
+                            for _ = 1, w do
+                                urls[#urls + 1] = proto .. "://" .. u.ip_port
+                            end
+                        end
+                    end
+                    if #urls > 0 then
+                        for _, p in ipairs(rule.ports) do
+                            local port = tonumber(p)
+                            if port then
+                                out[scheme][tostring(math.floor(port))] = urls
+                                any = true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return any and out or nil
+end
+
+-- Returns compiled routes, or nil when the site has none (key absent / empty).
+local function load_routes_from_redis(site_id)
+    local red, err = get_redis()
+    if not red then return nil, err end
+    local raw, rerr = red:get("originroutes:" .. tostring(site_id))
+    red:set_keepalive(10000, 100)
+    if rerr then
+        return nil, rerr
+    end
+    if not raw or raw == ngx.null or raw == "" then
+        return nil, nil
+    end
+    local routes, jerr = cjson.decode(raw)
+    if not routes then
+        log(WARN, "upstream_redis: invalid JSON for originroutes:", tostring(site_id), " ", tostring(jerr))
+        return nil, "invalid_json"
+    end
+    return compile_routes(routes), nil
+end
+
+-- Version is a shared counter (not ngx.time) so two publishes in the same
+-- second still invalidate other workers' L1.
+local function publish_routes(dict, site_id, routes)
+    local sid = tostring(site_id)
+    if routes then
+        dict:set("routes:" .. sid, cjson.encode(routes), 0)
+    else
+        dict:delete("routes:" .. sid)
+    end
+    local version = dict:incr("routes_gen", 1, 0) or ngx.now()
+    dict:set("routes_updated:" .. sid, version, 0)
+    l1_routes[sid] = { routes = routes or false, version = version }
+    return version
+end
+
 local function publish_list(dict, site_id, list, version)
     if not dict or not list or #list == 0 then
         return false
@@ -131,6 +216,14 @@ local function refresh_shm()
     local site_ids = {}
 
     for site_id, _ in pairs(site_domains) do
+        local routes, route_err = load_routes_from_redis(site_id)
+        if route_err then
+            -- Keep last-known-good routes on transient Redis errors.
+            log(WARN, "upstream_redis: route load failed for site ", site_id, ": ", tostring(route_err))
+        else
+            publish_routes(dict, site_id, routes)
+        end
+
         local list, err = load_from_redis(site_id)
         if err then
             -- Keep last-known-good upstreams on transient Redis errors.
@@ -161,6 +254,41 @@ local function refresh_shm()
     dict:set("updated", version, 0)
 end
 
+-- Returns (origin_url, site_has_routes). A routed site with no pool for this
+-- (scheme, server_port) gets (nil, true): the port is not served.
+local function route_backend(dict, site_id, sid)
+    local version = dict:get("routes_updated:" .. sid)
+    if not version then
+        -- Refresh has not seen this site yet: load once and remember "none" too.
+        local routes, err = load_routes_from_redis(site_id)
+        if err then
+            return nil
+        end
+        version = publish_routes(dict, site_id, routes)
+    end
+
+    local entry = l1_routes[sid]
+    if not entry or entry.version ~= version then
+        local raw = dict:get("routes:" .. sid)
+        entry = { routes = (raw and cjson.decode(raw)) or false, version = version }
+        l1_routes[sid] = entry
+    end
+    if not entry.routes then
+        return nil
+    end
+
+    local scheme = ngx.var.scheme
+    local port = ngx.var.server_port
+    local by_port = entry.routes[scheme]
+    local pool = by_port and port and by_port[port]
+    if type(pool) ~= "table" or #pool == 0 then
+        return nil, true
+    end
+    local rr_key = "round_robin:" .. sid .. ":" .. scheme .. ":" .. port
+    local idx = dict:incr(rr_key, 1, 0) or 1
+    return pool[(idx - 1) % #pool + 1], true
+end
+
 function _M.get_backend(site_id)
     site_id = site_id or site_resolver.lookup_site_id()
     if not site_id then
@@ -171,6 +299,12 @@ function _M.get_backend(site_id)
     local dict = shd[SHM_NAME]
     if not dict then
         return DEFAULT_BACKEND
+    end
+
+    local routed, has_routes = route_backend(dict, site_id, sid)
+    if has_routes then
+        -- Strict: the flat upstream_servers union must not serve unrouted ports.
+        return routed or DEFAULT_BACKEND
     end
 
     local version = dict:get("updated:" .. sid) or 0

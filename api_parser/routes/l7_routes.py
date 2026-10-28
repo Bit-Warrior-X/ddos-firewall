@@ -604,6 +604,84 @@ def _transform_site_upstreams(upstreams_in) -> list:
     return redis_upstreams
 
 
+_ORIGIN_ROUTE_SCHEMES = ("http", "https")
+
+
+def _transform_origin_routes(routes_in, site_id: int) -> tuple:
+    """Normalize { http: [ {ports, upstreams} ], https: [...] } for originroutes:{site_id}.
+
+    Each listen port may belong to only one pool per scheme. Upstream protocol
+    defaults to the route scheme (an https route proxies to https origins).
+    Returns (payload, error_message_or_None).
+    """
+    if not isinstance(routes_in, dict):
+        return None, "Invalid 'origin_routes' (must be object)."
+
+    nested_site = _pick_field(routes_in, "site_id", "siteId")
+    if nested_site is not None:
+        try:
+            if int(nested_site) != site_id:
+                return None, f"origin_routes.site_id {nested_site} does not match site_id {site_id}."
+        except (TypeError, ValueError):
+            return None, "Invalid 'origin_routes.site_id' (must be integer)."
+
+    payload = {}
+    for scheme in _ORIGIN_ROUTE_SCHEMES:
+        rules_in = routes_in.get(scheme)
+        if rules_in is None:
+            rules_in = []
+        if not isinstance(rules_in, list):
+            return None, f"Invalid '{scheme}' routes (must be array)."
+
+        rules = []
+        seen_ports = {}
+        for idx, rule in enumerate(rules_in):
+            if not isinstance(rule, dict):
+                return None, f"Invalid {scheme}[{idx}] (must be object)."
+            ports_in = rule.get("ports")
+            if not isinstance(ports_in, list):
+                return None, f"Invalid {scheme}[{idx}].ports (must be array)."
+            ports = []
+            for p in ports_in:
+                try:
+                    port = int(p)
+                except (TypeError, ValueError):
+                    return None, f"Invalid port {p!r} in {scheme}[{idx}].ports."
+                if port < 1 or port > 65535:
+                    return None, f"Port {port} in {scheme}[{idx}].ports is out of range."
+                if port in seen_ports and seen_ports[port] != idx:
+                    return None, (f"Port {port} is assigned to more than one {scheme} route "
+                                  f"({scheme}[{seen_ports[port]}] and {scheme}[{idx}]).")
+                seen_ports[port] = idx
+                if port not in ports:
+                    ports.append(port)
+
+            upstreams_in = _pick_field(rule, "upstreams", "upstream_servers", default=[])
+            if not isinstance(upstreams_in, list):
+                return None, f"Invalid {scheme}[{idx}].upstreams (must be array)."
+            upstreams = []
+            for u in upstreams_in:
+                if not isinstance(u, dict):
+                    continue
+                ip_port = (u.get("ip_port") or "").strip()
+                if not ip_port:
+                    continue
+                protocol = str(u.get("protocol") or scheme).strip().lower()
+                if protocol not in _ORIGIN_ROUTE_SCHEMES:
+                    protocol = scheme
+                upstreams.append({
+                    "ip_port": ip_port,
+                    "protocol": protocol,
+                    "description": (u.get("description") or "").strip()
+                                   or "weight=1 max_fails=3 fail_timeout=30s",
+                })
+
+            if ports and upstreams:
+                rules.append({"ports": ports, "upstreams": upstreams})
+        payload[scheme] = rules
+    return payload, None
+
+
 def _build_useragent_rule_string(url: str, user_agent: str, match: str) -> str:
     """Build ACL rule string for user-agent rules."""
     ua = (user_agent or "").strip()
@@ -696,6 +774,70 @@ def l7_update_upstreamservers():
         "serverId": server_id,
         "siteId": site_id,
         "upstreamsCount": len(redis_upstreams)
+    }), 200
+
+
+def _origin_routes_counts(routes: dict) -> dict:
+    return {
+        "httpRoutesCount": len(routes.get("http") or []),
+        "httpsRoutesCount": len(routes.get("https") or []),
+    }
+
+
+@l7_bp.route('/l7_update_origin_routes', methods=['POST'])
+def l7_update_origin_routes():
+    """Replace per-port origin pools for one site (stored under originroutes:{site_id}).
+
+    Expected JSON:
+      {
+        "server_id": 1033,
+        "site_id": 55,
+        "http":  [ { "ports": [80], "upstreams": [ { id, serverId, ip_port, protocol, description } ] } ],
+        "https": [ { "ports": [443], "upstreams": [ ... ] } ]
+      }
+
+    A request on listen port P with scheme S is proxied to the pool whose
+    S-rule lists P. Ports with no rule are not served (502) while routes exist.
+    Empty http and https lists clear the routes (flat pool for every port).
+    """
+    data, err = _json_object_or_error()
+    if err:
+        return err
+
+    server_id, err = _require_int_id(data, "server_id", "serverId")
+    if err:
+        return err
+    site_id, err = _require_int_id(data, "site_id", "siteId")
+    if err:
+        return err
+    if "http" not in data and "https" not in data:
+        return jsonify({"status": "error", "message": "Missing 'http' and 'https'."}), 400
+
+    routes, route_err = _transform_origin_routes(data, site_id)
+    if route_err:
+        return jsonify({"status": "error", "message": route_err}), 400
+
+    has_routes = bool(routes["http"] or routes["https"])
+    ok, store_err = RedisClient.store_site_origin_routes(site_id, routes if has_routes else None)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write origin routes to Redis.",
+            "details": store_err or "Unknown error"
+        }), 500
+
+    try:
+        ensure_backend_ips_whitelisted(apply_live=True)
+    except Exception as exc:
+        print(f"[L7] Backend whitelist after origin routes update failed: {exc}", flush=True)
+
+    return jsonify({
+        "status": "success",
+        "message": "Origin routes updated in Redis." if has_routes
+                   else "Origin routes cleared; all ports use upstream_servers.",
+        "server_id": server_id,
+        "site_id": site_id,
+        **_origin_routes_counts(routes),
     }), 200
 
 
@@ -1690,8 +1832,12 @@ def l7_update_site():
         "cache_rules": [...],
         "http_ports": [...],
         "https_ports": [...],
-        "upstream_servers": [...]
+        "upstream_servers": [...],          # union of all origins (older agents)
+        "origin_routes": { server_id, site_id, http: [ {ports, upstreams} ], https: [...] }
       }
+
+    origin_routes (optional) routes each listen port to its own origin pool and
+    is preferred over upstream_servers; when absent, stale routes are removed.
 
     Redis keys written:
       domain:{domain}              -> site_id
@@ -1702,6 +1848,7 @@ def l7_update_site():
       cache:{site_id}
       listening:{site_id}
       upstreamservers:{site_id}
+      originroutes:{site_id}       (deleted when origin_routes is absent/empty)
       compress:{site_id}
     """
     data = request.get_json(silent=True) or {}
@@ -1753,6 +1900,17 @@ def l7_update_site():
         upstreams_in = []
     if not isinstance(upstreams_in, list):
         return jsonify({"status": "error", "message": "Invalid 'upstream_servers' (must be array)."}), 400
+
+    # Full push is the source of truth: no origin_routes → drop stale routes so
+    # every port uses the flat upstream_servers pool (older Dorian behaviour).
+    redis_routes = None
+    routes_in = _pick_field(data, "origin_routes", "originRoutes")
+    if routes_in is not None:
+        redis_routes, route_err = _transform_origin_routes(routes_in, site_id)
+        if route_err:
+            return jsonify({"status": "error", "message": route_err}), 400
+        if not (redis_routes["http"] or redis_routes["https"]):
+            redis_routes = None
 
     compress_in = data.get("compress_settings")
     if compress_in is None:
@@ -1863,6 +2021,14 @@ def l7_update_site():
             "details": err or "Unknown error",
         }), 500
 
+    ok, err = RedisClient.store_site_origin_routes(site_id, redis_routes)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write origin routes to Redis.",
+            "details": err or "Unknown error",
+        }), 500
+
     try:
         ensure_backend_ips_whitelisted(apply_live=True)
     except Exception as exc:
@@ -1889,6 +2055,8 @@ def l7_update_site():
         "httpPortsCount": len(redis_listening.get("http_ports", [])),
         "httpsPortsCount": len(redis_listening.get("https_ports", [])),
         "upstreamsCount": len(redis_upstreams),
+        "originRoutes": redis_routes is not None,
+        **_origin_routes_counts(redis_routes or {}),
     }), 200
 
 
@@ -1911,6 +2079,7 @@ def l7_delete_site():
       cache:{site_id}
       listening:{site_id}
       upstreamservers:{site_id}
+      originroutes:{site_id}
       compress:{site_id}
     """
     data = request.get_json(silent=True) or {}

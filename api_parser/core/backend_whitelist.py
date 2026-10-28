@@ -93,9 +93,10 @@ def _config_tuple(name: str) -> List[str]:
 
 
 def collect_backend_ips() -> List[str]:
-    """Unique IPv4 backend/origin addresses from Redis upstreamservers keys."""
+    """Unique IPv4 backend/origin addresses from upstreamservers and originroutes keys."""
     found: Set[str] = set()
-    for entry in RedisClient.get_all_upstreamservers():
+    entries = RedisClient.get_all_upstreamservers() + RedisClient.get_all_origin_route_upstreams()
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         ip = ip_from_ip_port(str(entry.get("ip_port") or ""))

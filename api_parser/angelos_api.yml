@@ -586,6 +586,56 @@ paths:
         "4XX":
           $ref: "#/components/responses/AgentError"
 
+  /API/L7/l7_update_origin_routes:
+    post:
+      tags: [L7 Traffic]
+      summary: Replace per-port origin pools for a site
+      description: |
+        Incremental update of `origin_routes` (same shape as the nested field on
+        `l7_update_site`). A request on listen port P with scheme S is proxied to
+        the pool of the S-rule whose `ports` contains P, using each upstream's own
+        `protocol` (http/https). While a site has routes, a port with no rule
+        has no origin and returns 502 (the flat `upstream_servers` union is not
+        used). A port may appear in only one rule per scheme. Empty `http` and
+        `https` clear the routes, and every port uses `upstream_servers` again.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7OriginRoutes"
+            example:
+              server_id: 1033
+              site_id: 55
+              http:
+                - ports: [80]
+                  upstreams:
+                    - id: 1
+                      serverId: 1033
+                      ip_port: 10.0.0.1:8080
+                      protocol: http
+                      description: ""
+                - ports: [9000, 9001]
+                  upstreams:
+                    - id: 3
+                      serverId: 1033
+                      ip_port: 10.0.0.3:8080
+                      protocol: http
+                      description: ""
+              https:
+                - ports: [443]
+                  upstreams:
+                    - id: 8
+                      serverId: 1033
+                      ip_port: 10.0.0.8:443
+                      protocol: https
+                      description: ""
+      responses:
+        "200":
+          description: Origin routes applied
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /API/L7/l7_update_site:
     post:
       tags: [L7 Traffic]
@@ -594,7 +644,8 @@ paths:
         Called by Dorian when a site is created or updated (once per assigned
         edge server). Carries domain, SSL, classified WAF rules from
         `waf_rule_id`, compress, cache rules, selected HTTP/HTTPS site
-        listening ports, and upstream servers.
+        listening ports, upstream servers, and optional per-port
+        `origin_routes` (preferred over the flat `upstream_servers` union).
       requestBody:
         required: true
         content:
@@ -732,6 +783,18 @@ paths:
                   ip_port: 10.10.0.5:8080
                   protocol: http
                   description: Primary origin
+              origin_routes:
+                server_id: 1033
+                site_id: 55
+                http:
+                  - ports: [80]
+                    upstreams:
+                      - id: 11
+                        serverId: 1033
+                        ip_port: 10.10.0.5:8080
+                        protocol: http
+                        description: Primary origin
+                https: []
       responses:
         "200":
           description: Site configuration applied
@@ -1420,6 +1483,50 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/UpstreamServerL7"
+          description: Union of all origins (older agents); see origin_routes
+        origin_routes:
+          $ref: "#/components/schemas/L7OriginRoutes"
+          description: |
+            Optional per-port origin pools; preferred over upstream_servers.
+            Listen ports not covered by a rule return 502 while routes exist.
+            When absent (or both lists empty), any stored routes are removed and
+            every port uses upstream_servers.
+
+    L7OriginRoute:
+      type: object
+      required: [ports, upstreams]
+      properties:
+        ports:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+          description: Edge listen ports served by this pool
+        upstreams:
+          type: array
+          items:
+            $ref: "#/components/schemas/UpstreamServerL7"
+          description: Origin pool; upstream protocol defaults to the route scheme
+
+    L7OriginRoutes:
+      type: object
+      required: [server_id, site_id]
+      properties:
+        server_id:
+          type: integer
+          format: int64
+        site_id:
+          type: integer
+          format: int64
+        http:
+          type: array
+          items:
+            $ref: "#/components/schemas/L7OriginRoute"
+        https:
+          type: array
+          items:
+            $ref: "#/components/schemas/L7OriginRoute"
 
     L7SiteDomainUpdate:
       type: object

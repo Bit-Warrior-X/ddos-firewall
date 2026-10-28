@@ -891,6 +891,46 @@ class RedisClient:
         except Exception as e:
             return False, str(e)
 
+    ORIGINROUTES_PREFIX = "originroutes"
+
+    @staticmethod
+    def store_site_origin_routes(site_id: int, routes: Optional[Dict]) -> tuple:
+        """Store per-port origin pools under 'originroutes:{site_id}'.
+
+        routes is { "http": [ { ports, upstreams } ], "https": [...] }.
+        None deletes the key so resty.upstream_redis falls back to the flat
+        upstreamservers:{site_id} pool.
+        """
+        try:
+            rcli = RedisClient.get_client()
+            key = f"{RedisClient.ORIGINROUTES_PREFIX}:{site_id}"
+            if routes is None:
+                rcli.delete(key)
+                return True, None
+            rcli.set(key, json.dumps(routes, ensure_ascii=False, separators=(",", ":")))
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
+    @staticmethod
+    def get_all_origin_route_upstreams() -> List[Dict]:
+        """Upstream entries from every originroutes:{site_id} rule (http and https)."""
+        entries: List[Dict] = []
+        try:
+            rcli = RedisClient.get_client()
+            for key in RedisClient._scan_keys(rcli, f"{RedisClient.ORIGINROUTES_PREFIX}:*"):
+                routes = RedisClient._get_json_key(rcli, key)
+                if not isinstance(routes, dict):
+                    continue
+                for scheme in ("http", "https"):
+                    for rule in routes.get(scheme) or []:
+                        if isinstance(rule, dict):
+                            entries.extend(u for u in rule.get("upstreams") or []
+                                           if isinstance(u, dict))
+        except Exception:
+            return entries
+        return entries
+
     @staticmethod
     def store_site_compress(site_id: int, compress_flags: Dict) -> tuple:
         """Store site-scoped compress settings under key 'compress:{site_id}'."""
@@ -1025,6 +1065,7 @@ class RedisClient:
           cache:{site_id}
           listening:{site_id}
           upstreamservers:{site_id}
+          originroutes:{site_id}
           compress:{site_id}
 
         Publishes acl:updates for each deleted WAF key so OpenResty can reload.
@@ -1052,7 +1093,8 @@ class RedisClient:
             for key in RedisClient._scan_keys(rcli, f"waf:{site_id}:*"):
                 keys_to_delete.add(key)
 
-            for prefix in ("cache", "listening", "upstreamservers", "compress", "ssl"):
+            for prefix in ("cache", "listening", "upstreamservers",
+                           RedisClient.ORIGINROUTES_PREFIX, "compress", "ssl"):
                 keys_to_delete.add(f"{prefix}:{site_id}")
             keys_to_delete.add(f"site:{site_id}:domain")
 
