@@ -174,6 +174,56 @@ void clear_tracked_tcp_state_for_blocked_ip(int tcp_established_fd,
     flush_conntrack_for_ip(ip_net_order);
 }
 
+static int cmp_u32(const void *a, const void *b)
+{
+    __u32 x = *(const __u32 *)a, y = *(const __u32 *)b;
+    return (x > y) - (x < y);
+}
+
+void clear_tracked_tcp_state_for_blocked_ips(int tcp_established_fd,
+                                             int tcp_connection_map_fd,
+                                             __u32 *ips_net_order, size_t n)
+{
+    if (!ips_net_order || n == 0)
+        return;
+
+    qsort(ips_net_order, n, sizeof(*ips_net_order), cmp_u32);
+
+    if (tcp_established_fd >= 0) {
+        /* Collect first: deleting while iterating restarts get_next_key. */
+        size_t cap = 1024, cnt = 0;
+        __u64 *victims = malloc(cap * sizeof(*victims));
+        __u64 key, next_key;
+        int has = victims && bpf_map_get_next_key(tcp_established_fd, NULL, &next_key) == 0;
+
+        while (has) {
+            key = next_key;
+            __u32 ip = (__u32)key;
+            if (bsearch(&ip, ips_net_order, n, sizeof(*ips_net_order), cmp_u32)) {
+                if (cnt == cap) {
+                    __u64 *grown = realloc(victims, cap * 2 * sizeof(*victims));
+                    if (!grown)
+                        break;
+                    victims = grown;
+                    cap *= 2;
+                }
+                victims[cnt++] = key;
+            }
+            has = bpf_map_get_next_key(tcp_established_fd, &key, &next_key) == 0;
+        }
+
+        for (size_t i = 0; i < cnt; i++)
+            bpf_map_delete_elem(tcp_established_fd, &victims[i]);
+        free(victims);
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        if (tcp_connection_map_fd >= 0)
+            bpf_map_delete_elem(tcp_connection_map_fd, &ips_net_order[i]);
+        flush_conntrack_for_ip(ips_net_order[i]);
+    }
+}
+
 int reconcile_blocked_ips_tracked_state(struct bpf_object *obj)
 {
     int est_fd, conn_fd, blocked_fd;

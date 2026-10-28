@@ -45,6 +45,7 @@ static void usage(void) {
 "  CLEAR_BLOCK_IP <ip> : Remove ip from blacklist\n"
 "  CLEAR_BLOCK_IP_ALL : Remove all ips from blacklist\n"
 "  ADD_BLOCK_IP <ip> [seconds] : Add ip to blacklist. Default duration if seconds omitted.\n"
+"  ADD_BLOCK_IPS <seconds> [reason] : Add IPs read from stdin (one per line) to blacklist.\n"
 "  LIST_ALLOW_IP : Dump whitelist ip list\n"
 "  CLEAR_ALLOW_IP <ip> : Remove ip from whitelist\n"
 "  CLEAR_ALLOW_IP_ALL : Remove all ips from blacklist\n"
@@ -667,6 +668,38 @@ static int send_and_print(const char *msg) {
     return 0;
 }
 
+#define BULK_BUF_SZ (64 * 1024)
+
+/* ADD_BLOCK_IPS <seconds> [reason] : IPs are read from stdin, one per line. */
+static int send_bulk_block(int argc, char *argv[]) {
+    if (argc < 3 || argc > 4) usage();
+
+    char *msg = malloc(BULK_BUF_SZ);
+    if (!msg) { perror("malloc"); return 2; }
+    size_t pos = (size_t)snprintf(msg, BULK_BUF_SZ, "ADD_BLOCK_IPS %d %s\n",
+                                  atoi(argv[2]), argc == 4 ? argv[3] : "cli");
+
+    char ip[64];
+    while (fgets(ip, sizeof ip, stdin)) {
+        size_t len = strcspn(ip, " \t\r\n");
+        if (len == 0)
+            continue;
+        if (pos + len + sizeof("\nEND\n") >= BULK_BUF_SZ) {
+            fputs("failed\ntoo many IPs (64KB request limit)\n", stderr);
+            free(msg);
+            return 2;
+        }
+        memcpy(msg + pos, ip, len);
+        pos += len;
+        msg[pos++] = '\n';
+    }
+    memcpy(msg + pos, "END\n", sizeof("END\n"));
+
+    int ret = send_and_print(msg);
+    free(msg);
+    return ret;
+}
+
 
 int main(int argc, char *argv[]) {
     if (argc < 2) usage();
@@ -929,6 +962,9 @@ int main(int argc, char *argv[]) {
             return EXIT_FAILURE;
         }
     }   
+
+    if (strcmp(argv[1], "ADD_BLOCK_IPS") == 0)
+        return send_bulk_block(argc, argv);
 
     /* Build the outgoing line */
     char line[BUF_SZ] = {0};

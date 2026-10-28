@@ -23,6 +23,10 @@ extern struct det_snapshot global_det_stats;
 extern struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS];
 
 #define BUF_SZ    1024
+#define BULK_CMD      "ADD_BLOCK_IPS"
+#define BULK_BUF_SZ   (64 * 1024)
+#define BULK_MAX_IPS  4096
+#define CLIENT_RCV_TIMEOUT_S 2
 #if 0
 static void reply(int cfd, const char *fmt, ...) {
     char buf[BUF_SZ];
@@ -332,6 +336,66 @@ static void handle_add_block_ip(int cfd, char **argv, int argc) {
     } else {
         reply(cfd, "failed\nError occured while adding %s to blacklist\n", ip);
     }
+}
+
+/*
+ * ADD_BLOCK_IPS <seconds> [reason]\n<ip>\n<ip>...\nEND\n
+ * Used by OpenResty resty.l7_guard_flusher to escalate L7 offenders to XDP.
+ * All map inserts happen before the reply; tracked TCP state is cleared after.
+ */
+static void handle_add_block_ips(int cfd, char *buf)
+{
+    char *save = NULL;
+    char *line = strtok_r(buf, "\n", &save);
+    char tag[64] = "bulk";
+    int secs = 0;
+
+    if (!line || sscanf(line, "%*s %d %63s", &secs, tag) < 1) {
+        reply(cfd, "ERR usage: ADD_BLOCK_IPS <seconds> [reason]\\n<ip>\\n...\\nEND\n");
+        return;
+    }
+
+    char **ips = malloc(BULK_MAX_IPS * sizeof(*ips));
+    if (!ips) {
+        reply(cfd, "failed\nout of memory\n");
+        return;
+    }
+
+    int n = 0;
+    while (n < BULK_MAX_IPS && (line = strtok_r(NULL, "\n", &save))) {
+        size_t len = strlen(line);
+        while (len && isspace((unsigned char)line[len - 1]))
+            line[--len] = '\0';
+        while (*line && isspace((unsigned char)*line))
+            line++;
+        if (strcmp(line, "END") == 0)
+            break;
+        if (*line)
+            ips[n++] = line;
+    }
+
+    __u32 *keys = NULL;
+    int added = 0;
+    if (add_block_ips_bulk(ips, n, secs, &keys, &added) < 0) {
+        reply(cfd, "failed\nError occured while adding IPs to blacklist\n");
+        free(ips);
+        return;
+    }
+
+    char reason[96];
+    snprintf(reason, sizeof reason, "L7 abuse (%s)", tag);
+    struct in_addr tmp;
+    for (int i = 0; i < n; i++) {
+        if (inet_pton(AF_INET, ips[i], &tmp) == 1)
+            append_block_ip_to_sqlite(ips[i], secs, reason);
+    }
+
+    reply(cfd, "ok\nadded:%d\n", added);
+    LOG_I("ADD_BLOCK_IPS: blocked %d/%d IPs for %ds (%s)\n", added, n, secs, tag);
+
+    clear_tracked_tcp_state_bulk(keys, added);
+    free(keys);
+    free(ips);
 }
 
 
@@ -764,6 +828,31 @@ static void dispatch(int cfd, char *line) {
     reply(cfd, "ERR unknown command\n");
 }
 
+/* Bulk requests span several reads: keep reading until the END line, EOF,
+ * timeout or BULK_BUF_SZ. Returns a malloc'd NUL-terminated buffer. */
+static char *read_bulk_request(int cfd, const char *first, size_t first_len)
+{
+    char *big = malloc(BULK_BUF_SZ);
+    if (!big)
+        return NULL;
+    size_t len = first_len < BULK_BUF_SZ - 1 ? first_len : BULK_BUF_SZ - 1;
+    memcpy(big, first, len);
+    big[len] = '\0';
+
+    while (len < BULK_BUF_SZ - 1) {
+        if (strstr(big, "\nEND\n"))
+            break;
+        ssize_t n = read(cfd, big + len, BULK_BUF_SZ - 1 - len);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0)
+            break;
+        len += (size_t)n;
+        big[len] = '\0';
+    }
+    return big;
+}
+
 static void * unix_socket_worker(void * arg)
 {
     while (!exiting) 
@@ -771,12 +860,28 @@ static void * unix_socket_worker(void * arg)
         int cfd = accept(srv_fd, NULL, NULL);
         if (cfd == -1) { if (errno == EINTR) continue; LOG_E("accept"); break; }
 
+        /* A client that never sends must not stall this single-threaded server. */
+        struct timeval tv = { .tv_sec = CLIENT_RCV_TIMEOUT_S, .tv_usec = 0 };
+        setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+
         char buf[BUF_SZ];
         ssize_t n;
         /* Handle exactly one request per connection (simple) */
         if ((n = read(cfd, buf, sizeof buf - 1)) > 0) {
             buf[n] = '\0';
-            dispatch(cfd, buf);
+            if ((size_t)n >= sizeof(BULK_CMD) - 1 &&
+                strncasecmp(buf, BULK_CMD, sizeof(BULK_CMD) - 1) == 0 &&
+                (buf[sizeof(BULK_CMD) - 1] == ' ' || buf[sizeof(BULK_CMD) - 1] == '\n')) {
+                char *big = read_bulk_request(cfd, buf, (size_t)n);
+                if (big) {
+                    handle_add_block_ips(cfd, big);
+                    free(big);
+                } else {
+                    reply(cfd, "failed\nout of memory\n");
+                }
+            } else {
+                dispatch(cfd, buf);
+            }
         }
         close(cfd);
     }

@@ -14,6 +14,27 @@ local REDIS_SOCK = "unix:/tmp/redis.sock"
 local SHM_NAME = "site_resolver"
 local DOMAIN_MAP_KEY = "domain_map"
 local DOMAIN_MAP_TTL = 5
+-- Last-known-good copies served while Redis is unreachable.
+local STALE_PREFIX = "stale:"
+local STALE_ID_TTL = 3600
+-- Shared Redis circuit breaker: while open, hot paths skip Redis entirely.
+local BREAKER_KEY = "redis_down"
+local BREAKER_TTL = 2
+
+--- True while the shared Redis circuit breaker is open.
+function _M.redis_down()
+    local dict = ngx.shared[SHM_NAME]
+    return dict ~= nil and dict:get(BREAKER_KEY) ~= nil
+end
+
+--- Open the breaker for BREAKER_TTL seconds (logs once per open).
+function _M.mark_redis_down(err)
+    local dict = ngx.shared[SHM_NAME]
+    if dict and dict:add(BREAKER_KEY, tostring(err or "error"), BREAKER_TTL) then
+        ngx.log(ngx.WARN, "site_resolver: redis circuit open for ", BREAKER_TTL,
+            "s: ", tostring(err))
+    end
+end
 
 local function get_redis(timeout)
     local red = redis:new()
@@ -74,18 +95,71 @@ local function cache_set(cache_key, site_id)
     if not dict then
         return
     end
-    dict:set("id:" .. cache_key, site_id and tostring(site_id) or "", DOMAIN_MAP_TTL)
+    local val = site_id and tostring(site_id) or ""
+    dict:set("id:" .. cache_key, val, DOMAIN_MAP_TTL)
+    dict:set(STALE_PREFIX .. "id:" .. cache_key, val, STALE_ID_TTL)
 end
 
+local function stale_get(cache_key)
+    local dict = ngx.shared[SHM_NAME]
+    if not dict then
+        return nil
+    end
+    local val = dict:get(STALE_PREFIX .. "id:" .. cache_key)
+    if val == nil or val == "" then
+        return nil
+    end
+    return tonumber(val)
+end
+
+--- Returns (site_id|nil, err). err is set only on Redis errors, not on "not found".
 local function redis_get_domain(red, name)
     if not name or name == "" then
         return nil
     end
-    local val = red:get("domain:" .. name)
+    local val, err = red:get("domain:" .. name)
+    if err then
+        return nil, err
+    end
     if val and val ~= ngx.null and val ~= "" then
         return tonumber(val)
     end
     return nil
+end
+
+local function request_cache_key(host)
+    local http_host = tostring(host or ngx.var.http_host or ngx.var.host or "")
+    local bare = strip_port(http_host)
+    if bare == "" then
+        return nil
+    end
+    local port = tostring(ngx.var.server_port or "")
+    -- Port-scoped cache key (bare host alone is unsafe when multiple sites share it).
+    return port ~= "" and (bare .. ":" .. port) or bare, bare, port, http_host
+end
+
+local function remember(site_id)
+    ngx.ctx._site_id_resolved = true
+    ngx.ctx._site_id = site_id
+    return site_id
+end
+
+--- Like lookup_site_id but never touches Redis (safe in log_by_lua / hot paths).
+--- Falls back to the last-known-good mapping.
+function _M.lookup_site_id_cached(host)
+    if ngx.ctx._site_id_resolved then
+        return ngx.ctx._site_id
+    end
+
+    local cache_key = request_cache_key(host)
+    if not cache_key then
+        return nil
+    end
+    local cached_id, hit = cache_get(cache_key)
+    if hit then
+        return cached_id
+    end
+    return stale_get(cache_key)
 end
 
 --- Return site_id (number) for current request Host, or nil.
@@ -94,50 +168,48 @@ function _M.lookup_site_id(host)
         return ngx.ctx._site_id
     end
 
-    local http_host = tostring(host or ngx.var.http_host or ngx.var.host or "")
-    local bare = strip_port(http_host)
-    local port = tostring(ngx.var.server_port or "")
-    if bare == "" then
-        ngx.ctx._site_id_resolved = true
-        ngx.ctx._site_id = nil
-        return nil
+    local cache_key, bare, port, http_host = request_cache_key(host)
+    if not cache_key then
+        return remember(nil)
     end
 
-    -- Port-scoped cache key (bare host alone is unsafe when multiple sites share it).
-    local cache_key = port ~= "" and (bare .. ":" .. port) or bare
     local cached_id, hit = cache_get(cache_key)
     if hit then
-        ngx.ctx._site_id_resolved = true
-        ngx.ctx._site_id = cached_id
-        return cached_id
+        return remember(cached_id)
+    end
+
+    -- Do not negative-cache Redis failures; serve last-known-good instead.
+    if _M.redis_down() then
+        return remember(stale_get(cache_key))
     end
 
     local red, err = get_redis(500)
     if not red then
-        -- Do not negative-cache Redis failures — retry next request.
-        ngx.log(ngx.WARN, "site_resolver: redis connect failed: ", tostring(err))
-        ngx.ctx._site_id_resolved = true
-        ngx.ctx._site_id = nil
-        return nil
+        _M.mark_redis_down(err)
+        return remember(stale_get(cache_key))
     end
 
-    local site_id
+    local site_id, gerr
     -- Prefer host:port keys (panel form), then bare host, then raw Host as stored.
     if port ~= "" then
-        site_id = redis_get_domain(red, bare .. ":" .. port)
+        site_id, gerr = redis_get_domain(red, bare .. ":" .. port)
     end
-    if not site_id then
-        site_id = redis_get_domain(red, bare)
+    if not site_id and not gerr then
+        site_id, gerr = redis_get_domain(red, bare)
     end
-    if not site_id and http_host ~= "" and http_host:lower() ~= bare then
-        site_id = redis_get_domain(red, http_host:lower())
+    if not site_id and not gerr and http_host ~= "" and http_host:lower() ~= bare then
+        site_id, gerr = redis_get_domain(red, http_host:lower())
+    end
+
+    if gerr then
+        red:close()
+        _M.mark_redis_down(gerr)
+        return remember(stale_get(cache_key))
     end
     release_redis(red)
 
     cache_set(cache_key, site_id)
-    ngx.ctx._site_id_resolved = true
-    ngx.ctx._site_id = site_id
-    return site_id
+    return remember(site_id)
 end
 
 --- Scan Redis domain:* and return { [site_id_str] = { "host1", "host2", ... }, ... }
@@ -154,10 +226,30 @@ function _M.list_site_domains()
         end
     end
 
+    local function stale_map()
+        if dict then
+            local stale = dict:get(STALE_PREFIX .. DOMAIN_MAP_KEY)
+            if stale and stale ~= "" then
+                local cjson = require "cjson.safe"
+                local decoded = cjson.decode(stale)
+                if type(decoded) == "table" then
+                    return decoded
+                end
+            end
+        end
+        return {}
+    end
+
+    -- An empty map would rebuild site-scoped ACLs (incl. anti-CC) with no rules.
+    if _M.redis_down() then
+        return stale_map()
+    end
+
     local red, err = get_redis(2000)
     if not red then
         ngx.log(ngx.WARN, "site_resolver: list_site_domains redis failed: ", tostring(err))
-        return {}
+        _M.mark_redis_down(err)
+        return stale_map()
     end
 
     local map = {}
@@ -165,7 +257,10 @@ function _M.list_site_domains()
     repeat
         local res, scan_err = red:scan(cursor, "MATCH", "domain:*", "COUNT", 100)
         if not res or scan_err then
-            break
+            red:close()
+            ngx.log(ngx.WARN, "site_resolver: list_site_domains scan failed: ", tostring(scan_err))
+            _M.mark_redis_down(scan_err)
+            return stale_map()
         end
         cursor = res[1]
         local keys = res[2]
@@ -194,7 +289,9 @@ function _M.list_site_domains()
 
     if dict then
         local cjson = require "cjson.safe"
-        dict:set(DOMAIN_MAP_KEY, cjson.encode(map), DOMAIN_MAP_TTL)
+        local encoded = cjson.encode(map)
+        dict:set(DOMAIN_MAP_KEY, encoded, DOMAIN_MAP_TTL)
+        dict:set(STALE_PREFIX .. DOMAIN_MAP_KEY, encoded, 0)
     end
 
     return map

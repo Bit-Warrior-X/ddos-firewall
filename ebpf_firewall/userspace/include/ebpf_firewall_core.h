@@ -13,6 +13,8 @@ int get_block_list_ips(char **out, char *filter_type, char *filter_ip, char * da
 int clear_deny_ip(char * ip);
 int clear_deny_ip_all();
 int add_block_ip(char *ip, int seconds);
+int add_block_ips_bulk(char **ips, int n, int seconds, __u32 **out_keys, int *out_count);
+void clear_tracked_tcp_state_bulk(__u32 *keys, int n);
 int list_allow_ip(char **out);
 int clear_allow_ip(char * ip);
 int clear_allow_ip_all();

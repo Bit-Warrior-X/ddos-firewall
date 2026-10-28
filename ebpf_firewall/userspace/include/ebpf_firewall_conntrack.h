@@ -18,6 +18,14 @@ void clear_tracked_tcp_state_for_blocked_ip(int tcp_established_fd,
                                             int tcp_connection_map_fd,
                                             __u32 ip_net_order);
 
+/*
+ * Same as clear_tracked_tcp_state_for_blocked_ip for many IPs, with a single
+ * pass over tcp_established_map. Sorts ips_net_order in place.
+ */
+void clear_tracked_tcp_state_for_blocked_ips(int tcp_established_fd,
+                                             int tcp_connection_map_fd,
+                                             __u32 *ips_net_order, size_t n);
+
 /* After reloading blocked_ips from DB into the BPF map, sync kernel + BPF maps. */
 int reconcile_blocked_ips_tracked_state(struct bpf_object *obj);
 

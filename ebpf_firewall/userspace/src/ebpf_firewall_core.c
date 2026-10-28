@@ -2947,6 +2947,62 @@ int add_block_ip(char *ip, int seconds) {
     return is_new_entry ? 0 : 1;
 }
 
+/*
+ * Insert many IPv4s into blocked_ips (drops take effect immediately) and
+ * return the network-order keys that were written via *out_keys (caller frees),
+ * so tracked TCP state can be cleared afterwards in one pass with
+ * clear_tracked_tcp_state_for_blocked_ips().
+ */
+int add_block_ips_bulk(char **ips, int n, int seconds, __u32 **out_keys, int *out_count)
+{
+    *out_keys = NULL;
+    *out_count = 0;
+
+    int blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
+    if (blocked_ips_fd < 0) {
+        LOG_E("Failed to find blocked_ips\n");
+        return -1;
+    }
+
+    __u64 expire;
+    if (seconds == 0)
+        expire = now_ns() + global_fw_config.g_config.black_ip_duration;
+    else if (seconds == -1)
+        expire = -1;
+    else
+        expire = now_ns() + (__u64)seconds * ONE_SECOND_NS;
+
+    __u32 *keys = calloc(n > 0 ? n : 1, sizeof(*keys));
+    if (!keys)
+        return -1;
+
+    int added = 0;
+    for (int i = 0; i < n; i++) {
+        __u32 key;
+        if (inet_pton(AF_INET, ips[i], &key) != 1) {
+            LOG_W("add_block_ips_bulk: invalid IPv4 '%s'\n", ips[i]);
+            continue;
+        }
+        if (bpf_map_update_elem(blocked_ips_fd, &key, &expire, BPF_ANY)) {
+            LOG_E("add_block_ips_bulk: map update for %s failed: %s\n", ips[i], strerror(errno));
+            continue;
+        }
+        keys[added++] = key;
+    }
+
+    *out_keys = keys;
+    *out_count = added;
+    return added;
+}
+
+void clear_tracked_tcp_state_bulk(__u32 *keys, int n)
+{
+    int tcp_established_map_fd = bpf_object__find_map_fd_by_name(obj, "tcp_established_map");
+    int tcp_connection_map_fd = bpf_object__find_map_fd_by_name(obj, "tcp_connection_map");
+    clear_tracked_tcp_state_for_blocked_ips(tcp_established_map_fd, tcp_connection_map_fd,
+                                            keys, (size_t)n);
+}
+
 
 // Append whitelist functions
 int add_allow_ip(char *ip) {

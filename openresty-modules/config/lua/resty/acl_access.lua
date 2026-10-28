@@ -110,49 +110,75 @@ local function check_temporaryblacklist()
     return true
 end
 
-local function add_temporaryblacklist(rule_id, ip, url, trigger_rule)
-    local country, city = geo_lookup.get(ip)
-
-    if ip == "" then
+local function persist_temporaryblacklist(premature, item_key, json_str, ttl)
+    if premature or site_resolver.redis_down() then
         return
     end
 
     local red = redis:new()
     red:set_timeout(2000)
-    local ok_conn, err_conn = red:connect(REDIS_SOCK)
+    local ok_conn, err_conn = red:connect(REDIS_SOCK, { pool = "athens_redis_db0" })
     if not ok_conn then
         ngx.log(ngx.ERR, "temporaryblacklist redis connect failed: ", tostring(err_conn))
+        site_resolver.mark_redis_down(err_conn)
         return
     end
 
+    red:init_pipeline()
+    red:set(item_key, json_str)
+    red:expire(item_key, ttl)
+    red:publish("temporaryblacklist:added", json_str)
+    local _, perr = red:commit_pipeline()
+    if perr then
+        ngx.log(ngx.ERR, "temporaryblacklist redis write failed: ", tostring(perr))
+        red:close()
+        return
+    end
+    red:set_keepalive(10000, 100)
+end
+
+--- Block locally (shm, all workers) right away; persist + publish to Redis
+--- asynchronously so the request path never waits on Redis.
+--- all_sites: omit site_id so the entry applies to every site.
+function _M.add_temporaryblacklist(rule_id, ip, url, trigger_rule, ttl, all_sites)
+    if not ip or ip == "" then
+        return
+    end
+
+    local country, city = geo_lookup.get(ip)
+    ttl = ttl or DEFAULT_TEMP_BLACKLIST_TTL
     local blocked_at = tostring(ngx.time())
-    local site_id = site_resolver.lookup_site_id()
+    local site_id = not all_sites and site_resolver.lookup_site_id_cached() or nil
     local entry = {
         ip = ip,
         url = url,
         country = country,
         city = city,
         blocked_at = blocked_at,
-        ttl = DEFAULT_TEMP_BLACKLIST_TTL,
+        ttl = ttl,
         trigger_rule = trigger_rule or RULE_NAMES[rule_id] or tostring(rule_id),
     }
     if site_id then
         entry.site_id = site_id
     end
     local json_str = cjson.encode(entry)
-    if json_str then
-        temp_blacklist.on_entry_added(entry)
-
-        local item_key = "temporaryblacklist:" .. ip .. ":" .. blocked_at
-        if site_id then
-            item_key = item_key .. ":" .. tostring(site_id)
-        end
-        red:set(item_key, json_str)
-        red:expire(item_key, DEFAULT_TEMP_BLACKLIST_TTL)
-        red:publish("temporaryblacklist:added", json_str)
+    if not json_str then
+        return
     end
-    red:set_keepalive(10000, 100)
+
+    temp_blacklist.on_entry_added(entry)
+
+    local item_key = "temporaryblacklist:" .. ip .. ":" .. blocked_at
+    if site_id then
+        item_key = item_key .. ":" .. tostring(site_id)
+    end
+    local ok, err = ngx.timer.at(0, persist_temporaryblacklist, item_key, json_str, ttl)
+    if not ok then
+        ngx.log(ngx.WARN, "temporaryblacklist: persist timer failed: ", tostring(err))
+    end
 end
+
+local add_temporaryblacklist = _M.add_temporaryblacklist
 
 function _M.run()
     local stats_cache = ngx.shared.stats_cache

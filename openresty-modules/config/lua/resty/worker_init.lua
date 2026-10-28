@@ -77,6 +77,20 @@ function _M.run()
         temp_blacklist.start()
     end
 
+    local ok_lg, l7_guard = pcall(require, "resty.l7_guard")
+    if ok_lg and l7_guard and l7_guard.start then
+        l7_guard.start()
+    else
+        ngx.log(ngx.ERR, "failed to require resty.l7_guard: ", tostring(l7_guard))
+    end
+
+    local ok_lgf, l7_guard_flusher = pcall(require, "resty.l7_guard_flusher")
+    if ok_lgf and l7_guard_flusher and l7_guard_flusher.start then
+        l7_guard_flusher.start()
+    else
+        ngx.log(ngx.ERR, "failed to require resty.l7_guard_flusher: ", tostring(l7_guard_flusher))
+    end
+
     local ok_ssl, ssl_cert = pcall(require, "resty.ssl_cert")
     if ok_ssl and ssl_cert and ssl_cert.start then
         ssl_cert.start()

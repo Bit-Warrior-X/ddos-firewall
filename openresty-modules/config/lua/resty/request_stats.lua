@@ -188,7 +188,13 @@ function _M.current_site_id()
         return var_id
     end
 
-    local id = site_resolver.lookup_site_id()
+    -- Cosockets (Redis) are disabled in log_by_lua.
+    local id
+    if ngx.get_phase() == "log" then
+        id = site_resolver.lookup_site_id_cached()
+    else
+        id = site_resolver.lookup_site_id()
+    end
     local sid = id and tostring(id) or UNKNOWN_SITE
     ngx.ctx._stats_site_id = sid
     ngx.var.site_id = sid
