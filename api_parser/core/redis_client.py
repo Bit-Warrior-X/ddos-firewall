@@ -520,81 +520,160 @@ class RedisClient:
         return site_id if site_id > 0 else None
 
     @staticmethod
+    def _temporaryblacklist_entry_key(ip: str, blocked_at: int, site_id: Optional[int]) -> str:
+        key = f"{RedisClient.TEMPORARYBLACKLIST_PREFIX}{ip}:{blocked_at}"
+        if site_id is not None:
+            key = f"{key}:{site_id}"
+        return key
+
+    @staticmethod
+    def _prepare_temporaryblacklist_writes(entries: List[Dict], now_ts: Optional[int] = None):
+        """Return (desired_keys:set, writes:list[(key, json, remaining_ttl)])."""
+        now_ts = int(time.time()) if now_ts is None else int(now_ts)
+        desired = set()
+        writes = []
+        for e in entries or []:
+            if not isinstance(e, dict):
+                continue
+            ip = (e.get("ip") or "").strip()
+            if not ip:
+                continue
+            blocked_at = RedisClient.parse_blocked_at(e.get("blocked_at"))
+            try:
+                ttl_val = int(e.get("ttl", 0))
+            except (TypeError, ValueError):
+                continue
+            if blocked_at <= 0 or ttl_val <= 0:
+                continue
+            remaining = blocked_at + ttl_val - now_ts
+            if remaining <= 0:
+                continue
+            site_id = RedisClient.parse_optional_site_id(
+                e.get("site_id") if e.get("site_id") is not None else e.get("siteId")
+            )
+            key = RedisClient._temporaryblacklist_entry_key(ip, blocked_at, site_id)
+            value_obj = {
+                "ip": ip,
+                "url": e.get("url", "") or "",
+                "country": e.get("country", "") or "",
+                "city": e.get("city", "") or "",
+                "blocked_at": str(blocked_at),
+                "ttl": ttl_val,
+                "trigger_rule": e.get("trigger_rule", "") or "",
+            }
+            if site_id is not None:
+                value_obj["site_id"] = site_id
+            value = json.dumps(value_obj, ensure_ascii=False, separators=(",", ":")).replace("\\/", "/")
+            desired.add(key)
+            writes.append((key, value, remaining))
+        return desired, writes
+
+    @staticmethod
     def clear_temporaryblacklist() -> None:
-        """Delete all temporaryblacklist:* keys from Redis."""
+        """Delete all temporaryblacklist:* keys from Redis (key names only)."""
         rcli = RedisClient.get_client()
-        cursor: str = "0"
         pattern = RedisClient.TEMPORARYBLACKLIST_PREFIX + "*"
-        while True:
-            cursor, keys = rcli.scan(cursor=cursor, match=pattern, count=100)
-            if keys:
-                # delete in batches
-                rcli.delete(*keys)
-            if cursor == 0 or cursor == "0":
-                break
+        batch = []
+        for key in RedisClient._scan_keys(rcli, pattern):
+            batch.append(key)
+            if len(batch) >= 500:
+                rcli.unlink(*batch)
+                batch = []
+        if batch:
+            rcli.unlink(*batch)
 
     @staticmethod
     def store_temporaryblacklist(entries: List[Dict]) -> tuple:
         """
         Store temporary blacklist entries as individual keys with proper TTL.
 
-        Each entry is written as:
-          key:   temporaryblacklist:<ip>:<blocked_at>[:<site_id>]
-          value: JSON { ip, url, country, city, blocked_at, ttl, trigger_rule, site_id }
-
-        Redis TTL is computed as: blocked_at + ttl - now_epoch().
-        Expired entries (TTL <= 0) are skipped.
-        No publish is done here, so api_parser will NOT notify backend again.
+        Prefer replace_temporaryblacklist() for panel full-sync (avoids a blank
+        window and does not SCAN+GET every existing value).
         """
         try:
             rcli = RedisClient.get_client()
-            now_ts = int(time.time())
-            pipe = rcli.pipeline()
-
-            for e in entries or []:
-                if not isinstance(e, dict):
-                    continue
-                ip = (e.get("ip") or "").strip()
-                if not ip:
-                    continue
-                blocked_at = RedisClient.parse_blocked_at(e.get("blocked_at"))
-                try:
-                    ttl_val = int(e.get("ttl", 0))
-                except (TypeError, ValueError):
-                    continue
-                if blocked_at <= 0 or ttl_val <= 0:
-                    continue
-
-                remaining = blocked_at + ttl_val - now_ts
-                if remaining <= 0:
-                    # Already expired according to backend timing; skip
-                    continue
-
-                site_id = RedisClient.parse_optional_site_id(
-                    e.get("site_id") if e.get("site_id") is not None else e.get("siteId")
-                )
-                key = f"{RedisClient.TEMPORARYBLACKLIST_PREFIX}{ip}:{blocked_at}"
-                if site_id is not None:
-                    key = f"{key}:{site_id}"
-                value_obj = {
-                    "ip": ip,
-                    "url": e.get("url", "") or "",
-                    "country": e.get("country", "") or "",
-                    "city": e.get("city", "") or "",
-                    "blocked_at": str(blocked_at),
-                    "ttl": ttl_val,
-                    "trigger_rule": e.get("trigger_rule", "") or "",
-                }
-                if site_id is not None:
-                    value_obj["site_id"] = site_id
-                value = json.dumps(value_obj, ensure_ascii=False, separators=(",", ":")).replace("\\/", "/")
+            _, writes = RedisClient._prepare_temporaryblacklist_writes(entries)
+            if not writes:
+                return True, None
+            pipe = rcli.pipeline(transaction=False)
+            for key, value, remaining in writes:
                 pipe.set(key, value)
                 pipe.expire(key, remaining)
-
             pipe.execute()
             return True, None
         except Exception as e:
             return False, str(e)
+
+    @staticmethod
+    def replace_temporaryblacklist(entries: List[Dict]) -> tuple:
+        """
+        Full replace used by l7_update_temporaryblacklist (panel → edge sync).
+
+        Previous path: SCAN + GET every temporaryblacklist:* value, clear all,
+        then rewrite. With thousands of L4 rows that dominated each sync.
+
+        New path:
+          1) Pipeline SET/EXPIRE the desired keys (no prior read).
+          2) SCAN key *names* only; delete keys not in the desired set.
+          3) GET only obsolete keys to decide L4 CLEAR_BLOCK_IP.
+
+        Returns (ok, err, meta) where meta includes written/deleted/l4_cleared.
+        No publish — panel already owns this set.
+        """
+        meta = {"written": 0, "deleted": 0, "l4_cleared": 0, "skipped_expired": 0}
+        try:
+            rcli = RedisClient.get_client()
+            desired, writes = RedisClient._prepare_temporaryblacklist_writes(entries)
+            meta["skipped_expired"] = max(0, len(entries or []) - len(writes))
+
+            # 1) Upsert desired keys first so the list never goes empty mid-sync.
+            if writes:
+                pipe = rcli.pipeline(transaction=False)
+                for key, value, remaining in writes:
+                    pipe.set(key, value)
+                    pipe.expire(key, remaining)
+                pipe.execute()
+                meta["written"] = len(writes)
+
+            # 2) Key-name SCAN only — find obsolete keys without GETting keepers.
+            obsolete = []
+            pattern = RedisClient.TEMPORARYBLACKLIST_PREFIX + "*"
+            for key in RedisClient._scan_keys(rcli, pattern):
+                if key not in desired:
+                    obsolete.append(key)
+
+            # 3) GET obsolete values only (for L4 clear), then UNLINK.
+            l4_ips_to_clear = set()
+            if obsolete:
+                # MGET in chunks
+                chunk = 200
+                for i in range(0, len(obsolete), chunk):
+                    part = obsolete[i : i + chunk]
+                    values = rcli.mget(part)
+                    for key, raw in zip(part, values or []):
+                        if not raw:
+                            continue
+                        try:
+                            obj = json.loads(raw)
+                        except Exception:
+                            continue
+                        if not isinstance(obj, dict):
+                            continue
+                        trig = str(obj.get("trigger_rule", "")).strip().lower()
+                        ip = str(obj.get("ip", "")).strip()
+                        if trig == "l4ddos" and ip:
+                            l4_ips_to_clear.add(ip)
+                    try:
+                        rcli.unlink(*part)
+                    except Exception:
+                        rcli.delete(*part)
+                    meta["deleted"] += len(part)
+
+            meta["l4_cleared_ips"] = sorted(l4_ips_to_clear)
+            meta["l4_cleared"] = len(l4_ips_to_clear)
+            return True, None, meta
+        except Exception as e:
+            return False, str(e), meta
 
     # -----------------------------
     # Per-site L7 config (l7_update_site)
@@ -904,7 +983,13 @@ class RedisClient:
 
     @staticmethod
     def store_site_domain(site_id: int, domain: str) -> tuple:
-        """Store site:{site_id}:domain and domain:{domain} -> site_id."""
+        """Store site:{site_id}:domain and domain:{domain} -> site_id.
+
+        Panel may send host:port (e.g. xstream.wtf:80). Athens site_resolver
+        falls back to domain:{host}:{server_port} when looking up Host.
+        Do not invent a bare domain:{host} alias — one hostname can map to
+        different site_ids on different listen ports.
+        """
         try:
             domain = (domain or "").strip()
             if not domain:
@@ -1120,7 +1205,9 @@ class RedisClient:
                     }
                 _site(sid)[field] = parsed
 
-        # Fill primary domain from domains list when missing
+        # Fill primary domain from domains list when missing, and normalize
+        # types the panel schema expects (object vs array). Bad Redis values
+        # like listening:[] make /report_edge_configure return 400.
         for sid, bucket in sites.items():
             domains_list = bucket.get("domains")
             if not isinstance(domains_list, list):
@@ -1130,6 +1217,17 @@ class RedisClient:
             if not bucket.get("domain") and domains_sorted:
                 bucket["domain"] = domains_sorted[0]
             bucket["domains"] = domains_sorted
+
+            for obj_field in ("waf", "listening", "compress", "ssl"):
+                val = bucket.get(obj_field)
+                if not isinstance(val, dict):
+                    bucket[obj_field] = {}
+            for arr_field in ("cache", "upstreamservers"):
+                val = bucket.get(arr_field)
+                if not isinstance(val, list):
+                    bucket[arr_field] = []
+            if not isinstance(bucket.get("domain"), str):
+                bucket["domain"] = str(bucket.get("domain") or "")
 
         edge = {
             "listeningports": RedisClient.get_edge_listeningports(),

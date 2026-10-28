@@ -1952,8 +1952,10 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
        acl_rule_list_p = acl_rule_list_p->next;
     }
     
+    /* Empty/unregistered ACL id is normal (no WAF rules for that type). */
     if (acl_rule_list_p == NULL) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_http_acl : There is no ACL rule which's id is %d.", acl_id);
+        ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                      "ngx_http_acl : There is no ACL rule which's id is %d.", acl_id);
     }
 
 

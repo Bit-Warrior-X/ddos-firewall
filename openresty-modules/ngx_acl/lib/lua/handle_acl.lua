@@ -57,6 +57,12 @@ function _M.process_acl_id(id)
     return rc
 end
 
+-- Never-matching placeholder so an empty WAF type still owns its ACL id in
+-- ngx_acl shm. Without it, remove+empty leaves the id missing and every
+-- request logs "There is no ACL rule which's id is N".
+local EMPTY_ACL_PLACEHOLDER = '["Header","Host","eq","__dorian_acl_empty__"]'
+local ACTION_ALLOW = 1
+
 function _M.set_acl_rule(cfg)
     local r = get_request()
     local rc = C.ngx_http_acl_remove_acl_rule(r, cfg.id)
@@ -65,13 +71,26 @@ function _M.set_acl_rule(cfg)
         return nil, "Failed to remove original ACL rule"
     end
 
-    for _, rule in ipairs(cfg.rules) do
+    local rules = cfg.rules
+    if type(rules) ~= "table" or #rules == 0 then
+        local charPtr = stringToCharPointer(EMPTY_ACL_PLACEHOLDER)
+        if charPtr == nil then
+            return nil, "no memory"
+        end
+        rc = C.ngx_http_acl_handle_acl_rule(r, cfg.id, ACTION_ALLOW, 0, charPtr)
+        if rc == NGX_ERROR then
+            return nil, "failed to handle empty ACL placeholder"
+        end
+        return true
+    end
+
+    for _, rule in ipairs(rules) do
         local charPtr = stringToCharPointer(rule.rule)
         if charPtr == nil then
             return nil, "no memory"
         end
 
-        local rc = C.ngx_http_acl_handle_acl_rule(r, cfg.id, rule.action, rule.priority, charPtr)
+        rc = C.ngx_http_acl_handle_acl_rule(r, cfg.id, rule.action, rule.priority, charPtr)
 
         if rc == NGX_ERROR then
             return nil, "failed to handle ACL rule"

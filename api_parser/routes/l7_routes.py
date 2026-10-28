@@ -60,18 +60,60 @@ def firewall_main_l7():
     }), 200
 
 
+def _acl_escape(value: str) -> str:
+    """Escape a value embedded inside an ACL JSON-like clause string."""
+    return (value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _append_url_acl_parts(parts: list, url: str) -> None:
+    """Map panel URL to ngx_acl fields.
+
+    ngx_acl 'URI Path' is r->uri only (no query). Putting '?a=b' into URI Path
+    never matches; split into Path + Query String instead.
+    Query uses 'contains' (URI Query String has no regex operator).
+    """
+    url = (url or "").strip()
+    if not url:
+        return
+
+    path = url
+    query = ""
+    if "://" in url:
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+        query = parsed.query or ""
+    elif "?" in url:
+        path, query = url.split("?", 1)
+
+    path = (path or "").strip()
+    query = (query or "").strip()
+
+    if path:
+        parts.append(f'["URI Path","-","regex","{_acl_escape(path)}"]')
+    if query:
+        parts.append(f'["URI Query String","-","contains","{_acl_escape(query)}"]')
+
+
+def _append_ip_acl_parts(parts: list, ips: str) -> None:
+    """Add IP match clause. '*' / '-' / empty means any client (omit IP filter).
+
+    ngx_acl compare_ip_in_ip_list only accepts dotted IPs / CIDR — literal '*'
+    or '-' never match, so panel 'all IPs' must not emit an IP clause.
+    """
+    ips = (ips or "").strip()
+    if not ips or ips in {"*", "-"}:
+        return
+    parts.append(f'["IP","-","is in","{_acl_escape(ips)}"]')
+
+
 def _build_whitelist_rule_string(ips: str, url: str, method: str) -> str:
     """Build ACL rule string from backend rule fields (IP, URI path, RequestMethod)."""
-    ips = (ips or "").strip()
-    url = (url or "").strip()
     method = (method or "").strip()
     parts = []
-    if ips:
-        parts.append(f'["IP","-","is in","{ips}"]')
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_ip_acl_parts(parts, ips)
+    _append_url_acl_parts(parts, url)
     if method:
-        parts.append(f'["RequestMethod","-","is in","{method}"]')
+        parts.append(f'["RequestMethod","-","is in","{_acl_escape(method)}"]')
     return " \nAND \n".join(parts) if parts else ""
 
 
@@ -97,13 +139,11 @@ def _behavior_to_action(behavior: str) -> int:
 
 def _build_geo_rule_string(url: str, country: str) -> str:
     """Build ACL rule string for Geo-based rules (URI path + Geo country list)."""
-    url = (url or "").strip()
     country = (country or "").strip()
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if country:
-        parts.append(f'["Geo","-","is in","{country}"]')
+        parts.append(f'["Geo","-","is in","{_acl_escape(country)}"]')
     return " \nAND \n".join(parts) if parts else ""
 
 
@@ -118,21 +158,20 @@ def _block_mode_to_header_op(block_mode: str) -> str:
 
 def _build_antiheader_rule_string(url: str, header: str, value: str, block_mode: str) -> str:
     """Build ACL rule string for anti-header rules (URI path + header value)."""
-    url = (url or "").strip()
     header = (header or "").strip()
     value = (value or "").strip()
     op = _block_mode_to_header_op(block_mode)
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if header and value:
-        parts.append(f'["Header","{header}","{op}","{value}"]')
+        parts.append(
+            f'["Header","{_acl_escape(header)}","{op}","{_acl_escape(value)}"]'
+        )
     return " \nAND \n".join(parts) if parts else ""
 
 
 def _build_intervalfreq_rule_string(url: str, req_count: int, time_sec: int) -> str:
     """Build ACL rule string for interval frequency limit rules."""
-    url = (url or "").strip()
     try:
         req_count = int(req_count)
     except (TypeError, ValueError):
@@ -142,8 +181,7 @@ def _build_intervalfreq_rule_string(url: str, req_count: int, time_sec: int) -> 
     except (TypeError, ValueError):
         time_sec = 0
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if req_count > 0 and time_sec > 0:
         freq_str = f"{req_count}times/{time_sec}s"
         parts.append(f'["Request Frequency","-",">=","{freq_str}"]')
@@ -152,7 +190,6 @@ def _build_intervalfreq_rule_string(url: str, req_count: int, time_sec: int) -> 
 
 def _build_secondfreq_rule_string(url: str, req_count: int, burst: int) -> str:
     """Build ACL rule string for second frequency (burst) limit rules."""
-    url = (url or "").strip()
     try:
         req_count = int(req_count)
     except (TypeError, ValueError):
@@ -162,8 +199,7 @@ def _build_secondfreq_rule_string(url: str, req_count: int, burst: int) -> str:
     except (TypeError, ValueError):
         burst = 0
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if burst > 0 and req_count > 0:
         freq_str = f"{burst}/{req_count}"
         parts.append(f'["Burst Frequency","-","-","{freq_str}"]')
@@ -172,7 +208,6 @@ def _build_secondfreq_rule_string(url: str, req_count: int, burst: int) -> str:
 
 def _build_responsefreq_rule_string(url: str, response_code: str, response_count: int, time_sec: int) -> str:
     """Build ACL rule string for response frequency rules (URI path + response code + count/time)."""
-    url = (url or "").strip()
     response_code = (response_code or "").strip()
     try:
         response_count = int(response_count)
@@ -183,12 +218,13 @@ def _build_responsefreq_rule_string(url: str, response_code: str, response_count
     except (TypeError, ValueError):
         time_sec = 0
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if response_count > 0 and time_sec > 0:
         freq_str = f"{response_count}times/{time_sec}s"
         code_val = response_code if response_code else "-"
-        parts.append(f'["Response Frequency","{code_val}",">=","{freq_str}"]')
+        parts.append(
+            f'["Response Frequency","{_acl_escape(code_val)}",">=","{freq_str}"]'
+        )
     return " \nAND \n".join(parts) if parts else ""
 
 
@@ -261,7 +297,6 @@ def _rule_id_or_index(entry: dict, idx: int) -> int:
 
 def _build_anticc_rule_string(url: str, method: str, threshold, window) -> str:
     """Build ACL rule string for anti-CC rules (URI + method + request frequency)."""
-    url = (url or "").strip()
     method = (method or "").strip()
     try:
         threshold = int(threshold)
@@ -272,10 +307,9 @@ def _build_anticc_rule_string(url: str, method: str, threshold, window) -> str:
     except (TypeError, ValueError):
         window = 0
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if method and method != "*":
-        parts.append(f'["RequestMethod","-","is in","{method}"]')
+        parts.append(f'["RequestMethod","-","is in","{_acl_escape(method)}"]')
     if threshold > 0 and window > 0:
         freq_str = f"{threshold}times/{window}s"
         parts.append(f'["Request Frequency","-",">=","{freq_str}"]')
@@ -572,14 +606,12 @@ def _transform_site_upstreams(upstreams_in) -> list:
 
 def _build_useragent_rule_string(url: str, user_agent: str, match: str) -> str:
     """Build ACL rule string for user-agent rules."""
-    url = (url or "").strip()
     ua = (user_agent or "").strip()
     op = _match_to_useragent_op(match)
     parts = []
-    if url:
-        parts.append(f'["URI Path","-","regex","{url}"]')
+    _append_url_acl_parts(parts, url)
     if ua:
-        parts.append(f'["UserAgent","-","{op}","{ua}"]')
+        parts.append(f'["UserAgent","-","{op}","{_acl_escape(ua)}"]')
     return " \nAND \n".join(parts) if parts else ""
 
 
@@ -1454,11 +1486,12 @@ def l7_update_temporaryblacklist():
     }
 
     Behavior:
-      - Delete all existing temporaryblacklist:* keys in Redis.
-      - Store each entry as key temporaryblacklist:<ip>:<blocked_at>[:<site_id>]
-        with JSON value including site_id so the block applies to that site.
-      - TTL for each key is computed as blocked_at + ttl - now_epoch().
-      - These writes do NOT notify backend again (no publish on temporaryblacklist:added).
+      - Upsert all entries, then delete Redis keys not in the new set
+        (no full SCAN+GET of every existing value; see replace_temporaryblacklist).
+      - Key: temporaryblacklist:<ip>:<blocked_at>[:<site_id>]
+      - TTL: blocked_at + ttl - now_epoch(); already-expired rows skipped.
+      - Removed L4 (trigger_rule=l4ddos) entries → sparta_cli CLEAR_BLOCK_IP.
+      - No publish (panel already owns this set).
     """
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
@@ -1476,82 +1509,36 @@ def l7_update_temporaryblacklist():
     if not isinstance(items, list):
         return jsonify({"status": "error", "message": "Invalid 'temporaryblacklist' (must be array)."}), 400
 
-    # Load existing temporaryblacklist entries before clearing, so we can detect removed L4 entries.
-    try:
-        rcli = RedisClient.get_client()
-        # Snapshot of existing keys: key -> parsed JSON
-        old_entries = {}
-        cursor = "0"
-        pattern = f"{RedisClient.TEMPORARYBLACKLIST_PREFIX}*"
-        while True:
-            cursor, keys = rcli.scan(cursor=cursor, match=pattern, count=100)
-            if keys:
-                for k in keys:
-                    try:
-                        raw = rcli.get(k)
-                        if raw:
-                            obj = json.loads(raw)
-                            if isinstance(obj, dict):
-                                old_entries[k] = obj
-                    except Exception:
-                        continue
-            if cursor == 0 or cursor == "0":
-                break
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to read old temporary blacklist from Redis: {e}"}), 500
-
-    # Build a fast lookup for new entries by IP+blocked_at+site_id.
-    new_index = set()
-    for e in items:
-        if not isinstance(e, dict):
-            continue
-        ip = (e.get("ip") or "").strip()
-        blocked_at = RedisClient.parse_blocked_at(e.get("blocked_at"))
-        site_id = RedisClient.parse_optional_site_id(
-            e.get("site_id") if e.get("site_id") is not None else e.get("siteId")
-        )
-        if ip and blocked_at > 0:
-            new_index.add((ip, str(blocked_at), site_id))
-
-    # For any old entry that was L4 (trigger_rule == "l4ddos") and is not in new_index,
-    # call sparta_cli CLEAR_BLOCK_IP <ip> to clear the L4 block.
-    for key, obj in old_entries.items():
-        try:
-            trig = str(obj.get("trigger_rule", "")).strip().lower()
-            ip = str(obj.get("ip", "")).strip()
-            blocked_at = str(RedisClient.parse_blocked_at(obj.get("blocked_at")))
-            site_id = RedisClient.parse_optional_site_id(
-                obj.get("site_id") if obj.get("site_id") is not None else obj.get("siteId")
-            )
-            if trig == "l4ddos" and ip and blocked_at != "0" and (ip, blocked_at, site_id) not in new_index:
-                command_args = ["sparta_cli", "CLEAR_BLOCK_IP", ip]
-                # Reuse the helper from l4_routes to execute CLI
-                from routes.l4_routes import execute_cli_command  # local import to avoid cycles at module load
-                res = execute_cli_command(command_args)
-                print(f"[L7] CLEAR_BLOCK_IP ip={ip} result={res.get('status')} msg={res.get('message')}")
-        except Exception as e:
-            print(f"[L7] Error while clearing L4 block for key={key}: {e}")
-
-    # Clear existing temporaryblacklist:* keys, then store new set.
-    try:
-        RedisClient.clear_temporaryblacklist()
-    except Exception as e:
-        return jsonify({"status": "error", "message": f"Failed to clear temporary blacklist in Redis: {e}"}), 500
-
-    ok, err = RedisClient.store_temporaryblacklist(items)
+    ok, err, meta = RedisClient.replace_temporaryblacklist(items)
     if not ok:
         return jsonify({
             "status": "error",
-            "message": "Failed to write temporary blacklist to Redis.",
-            "details": err or "Unknown error"
+            "message": "Failed to replace temporary blacklist in Redis.",
+            "details": err or "Unknown error",
         }), 500
 
-    # Count only entries that were non-expired and had valid ip/ttl
+    # Clear Sparta L4 blocks for IPs dropped from the panel set.
+    l4_ips = meta.get("l4_cleared_ips") or []
+    if l4_ips:
+        from routes.l4_routes import execute_cli_command  # local import to avoid cycles
+        for ip in l4_ips:
+            try:
+                res = execute_cli_command(["sparta_cli", "CLEAR_BLOCK_IP", ip])
+                print(
+                    f"[L7] CLEAR_BLOCK_IP ip={ip} result={res.get('status')} "
+                    f"msg={res.get('message')}"
+                )
+            except Exception as e:
+                print(f"[L7] Error while clearing L4 block for ip={ip}: {e}")
+
     return jsonify({
         "status": "success",
         "message": "Temporary blacklist updated in Redis.",
         "serverId": server_id,
-        "itemsCount": len(items)
+        "itemsCount": len(items),
+        "written": meta.get("written", 0),
+        "deleted": meta.get("deleted", 0),
+        "l4Cleared": meta.get("l4_cleared", 0),
     }), 200
 
 

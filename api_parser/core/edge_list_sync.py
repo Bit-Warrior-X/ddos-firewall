@@ -79,7 +79,8 @@ def _read_firewall_config() -> Tuple[bool, Any]:
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        parsed[key.strip()] = value.strip()
+        value = value.split("#", 1)[0].strip()
+        parsed[key.strip()] = value
     return True, parsed
 
 

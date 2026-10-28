@@ -59,6 +59,79 @@ tags:
       by the **panel**, not by the edge agent.
 
 paths:
+  /report_cache_hit:
+    post:
+      servers:
+        - url: https://panel.dorian.center/api
+          description: Dorian panel API (angelos → panel)
+      tags: [Edge → Panel]
+      summary: L7 cache-hit breakdown (content types + top miss URLs)
+      description: |
+        Angelos worker (`cache_hit_sync`) POSTs each closed Athens stats bucket
+        (default every **60s**) for the panel cache-hit page.
+
+        **Sources on the edge (Athens `:9000`)**
+
+        - `GET /content_type_request_stats?timestamp=…` — requests / cached
+          requests / bytes by content-type family
+        - `GET /cache_miss_url_stats?timestamp=…` — top URLs with
+          `$upstream_cache_status` in `MISS` or `EXPIRED`
+
+        Panel fields:
+
+        - `content_types` — hit ratio by content type
+          (`cache_hit_ratio = cached_request_count / request_count`)
+        - `top_miss_urls` — URLs that send the most traffic to origin
+
+        Aliases `content_type_request_stats` / `cache_miss_url_stats` mirror the
+        Athens metrics API names (same arrays).
+      operationId: reportCacheHit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CacheHitReport"
+            example:
+              token: edge-auth-token
+              command: report_cache_hit
+              reported_at: 1742800060
+              timestamp: 1742800000
+              interval_seconds: 60
+              content_types_count: 3
+              top_miss_urls_count: 2
+              content_types:
+                - site_id: 3
+                  content_type: image
+                  request_count: 4200
+                  cached_request_count: 3900
+                  cache_hit_ratio: 0.928571
+                  traffic_l7_tx: 62914560
+                  traffic_cached_tx: 58720256
+                - site_id: 3
+                  content_type: html
+                  request_count: 2600
+                  cached_request_count: 900
+                  cache_hit_ratio: 0.346154
+                  traffic_l7_tx: 15728640
+                  traffic_cached_tx: 5242880
+              top_miss_urls:
+                - site_id: 3
+                  domain: www.example.com
+                  url: /products/list
+                  miss_count: 310
+                  request_count: 420
+                - site_id: 3
+                  domain: www.example.com
+                  url: /api/status
+                  miss_count: 85
+                  request_count: 190
+      responses:
+        "200":
+          description: Cache-hit snapshot accepted
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /report_edge_configure:
     post:
       servers:
@@ -2041,6 +2114,40 @@ components:
           type: boolean
         tcpConnectionLimitCnt:
           type: integer
+        # --- Adaptive L4 (optional; synced via report_edge_configure) ---
+        preferAdaptive:
+          type: boolean
+          description: Shadow adaptive owns Attack START when true
+        enforceDropInvalid:
+          type: boolean
+        detectionLevel:
+          type: integer
+          minimum: 1
+          maximum: 10
+          description: Proficiency 1..10 (5=normal); also accepts names via snake_case file
+        alertHoldWindows:
+          type: integer
+          description: Defer panel/episode START until Attack lasts N seconds
+        quietClearWindows:
+          type: integer
+        confirmWindows:
+          type: integer
+        exitWindows:
+          type: integer
+        cooldownSeconds:
+          type: integer
+        escalateAfterWindows:
+          type: integer
+        blockInitialSeconds:
+          type: integer
+        blockMaxSeconds:
+          type: integer
+        baselineK:
+          type: integer
+        baselineM:
+          type: integer
+        learningDays:
+          type: integer
 
     L4Options:
       type: object
@@ -2198,6 +2305,93 @@ components:
               type: string
               nullable: true
               description: Contents of Athens `server_default_ports.conf`
+
+    CacheHitContentTypeItem:
+      type: object
+      required: [site_id, content_type, request_count, cached_request_count, cache_hit_ratio]
+      properties:
+        site_id:
+          type: integer
+        content_type:
+          type: string
+          description: Family of Content-Type (html, css, js, json, image, video, …)
+        request_count:
+          type: integer
+        cached_request_count:
+          type: integer
+          description: HIT + STALE + UPDATING + REVALIDATED
+        cache_hit_ratio:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: cached_request_count / request_count
+        traffic_l7_tx:
+          type: integer
+        traffic_cached_tx:
+          type: integer
+
+    CacheHitTopMissUrlItem:
+      type: object
+      required: [site_id, domain, url, miss_count, request_count]
+      properties:
+        site_id:
+          type: integer
+        domain:
+          type: string
+          description: Request Host
+        url:
+          type: string
+          description: Path without query string
+        miss_count:
+          type: integer
+          description: Requests with upstream_cache_status MISS or EXPIRED
+        request_count:
+          type: integer
+
+    CacheHitReport:
+      type: object
+      required: [token, command, reported_at, timestamp, content_types, top_miss_urls]
+      description: |
+        One closed Athens stats bucket for the panel cache-hit page.
+      properties:
+        token:
+          type: string
+        command:
+          type: string
+          enum: [report_cache_hit]
+        reported_at:
+          type: integer
+          format: int64
+        timestamp:
+          type: integer
+          format: int64
+          description: Athens bucket start (unix seconds)
+        interval_seconds:
+          type: integer
+          description: Bucket width (default 60)
+        content_types:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheHitContentTypeItem"
+        top_miss_urls:
+          type: array
+          items:
+            $ref: "#/components/schemas/CacheHitTopMissUrlItem"
+        content_type_request_stats:
+          type: array
+          description: Alias of `content_types` (Athens metrics API name)
+          items:
+            $ref: "#/components/schemas/CacheHitContentTypeItem"
+        cache_miss_url_stats:
+          type: array
+          description: Alias of `top_miss_urls` (Athens metrics API name)
+          items:
+            $ref: "#/components/schemas/CacheHitTopMissUrlItem"
+        content_types_count:
+          type: integer
+        top_miss_urls_count:
+          type: integer
 
     EdgeConfigureReport:
       type: object

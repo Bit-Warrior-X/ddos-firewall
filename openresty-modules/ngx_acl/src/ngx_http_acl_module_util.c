@@ -1113,6 +1113,10 @@ ngx_int_t compare_ip_in_ip_list(ngx_http_request_t* r, char * ip_addr, char *ip_
     
     while (token != NULL) {
         if (*token != '\0') {
+            /* Panel "all IPs" wildcard */
+            if (token[0] == '*' && token[1] == '\0') {
+                return NGX_HTTP_ACL_SUCCESS;
+            }
             /* check for CIDR suffix */
             char *slash = strchr(token, '/');
             if (slash == NULL) {

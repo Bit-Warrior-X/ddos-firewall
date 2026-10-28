@@ -70,14 +70,34 @@ local function log_err(...)
     ngx.log(ngx.ERR, "cache_purge_sync: ", ...)
 end
 
+-- DB 2 must use its own keepalive pool. Returning a SELECT 2 connection to
+-- the default pool made site/upstream readers (DB 0) see empty keys.
+local POOL_DB2 = "athens_redis_db2"
+local POOL_DB0 = "athens_redis_db0"
+
 local function get_redis(timeout)
     local red = redis:new()
     red:set_timeout(timeout or 2000)
-    local ok, err = red:connect(REDIS_SOCK)
+    local ok, err = red:connect(REDIS_SOCK, { pool = POOL_DB2 })
     if not ok then
         return nil, err
     end
     local ok_sel, sel_err = red:select(REDIS_DB)
+    if not ok_sel then
+        red:close()
+        return nil, sel_err
+    end
+    return red
+end
+
+local function get_redis_db0(timeout)
+    local red = redis:new()
+    red:set_timeout(timeout or 2000)
+    local ok, err = red:connect(REDIS_SOCK, { pool = POOL_DB0 })
+    if not ok then
+        return nil, err
+    end
+    local ok_sel, sel_err = red:select(0)
     if not ok_sel then
         red:close()
         return nil, sel_err
@@ -92,15 +112,10 @@ local function release_redis(red)
 end
 
 local function get_max_cache_ttl()
-    local red, err = get_redis(1000)
+    -- cache:* rules live on DB 0 — use a separate connection, never flip DB on the DB2 pool.
+    local red, err = get_redis_db0(1000)
     if not red then
         log_debug("get_max_cache_ttl connect failed: ", tostring(err))
-        return 600
-    end
-
-    local ok_sel, sel_err = red:select(0)
-    if not ok_sel then
-        release_redis(red)
         return 600
     end
 
@@ -143,7 +158,6 @@ local function get_max_cache_ttl()
         end
     end
 
-    red:select(REDIS_DB)
     release_redis(red)
     return max_ttl > 0 and max_ttl or 600
 end

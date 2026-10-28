@@ -32,6 +32,10 @@ SERVER_PORT = 5000
 #API_BASE_URL = "http://93.95.116.174:8080/api".rstrip("/")
 API_BASE_URL = "https://panel.dorian.center/api".rstrip("/")
 
+# This edge often has IPv6 addresses but no default IPv6 route. DNS AAAA then
+# yields Errno 101 (Network is unreachable) in requests. Force IPv4 to panel.
+FORCE_IPV4 = True
+
 # L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
 
@@ -51,6 +55,13 @@ EDGE_L4_LISTS_REPORT_URL = EDGE_CONFIG_REPORT_URL
 EDGE_LIST_SYNC_INTERVAL = 60
 # Include full SSL PEM material in reports (large); default redacts to presence/length only
 EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS = False
+
+# L7 cache-hit UI: content-type hit ratios + top miss URLs (from Athens :9000)
+CACHE_HIT_REPORT_URL = f"{API_BASE_URL}/report_cache_hit"
+CACHE_HIT_SYNC_INTERVAL = 60
+CACHE_HIT_BUCKET_SECONDS = 60
+CACHE_HIT_TOP_MISS_URLS = 50
+ATHENS_STATS_TIMEOUT = 5
 
 # Redis configuration
 REDIS_SOCK = "/tmp/redis.sock"

@@ -18,7 +18,10 @@ local _M = { _VERSION = "2.0.0" }
 local REDIS_SOCK      = "unix:/tmp/redis.sock"
 local SHM_NAME        = "upstream_servers"
 local REFRESH_SEC     = 5
-local DEFAULT_BACKEND = "http://127.0.0.1:9000"
+-- Never proxy to the internal :9000 stats server — that returns
+-- "Welcome to Default Server" and leaks onto customer Hosts.
+-- Callers must treat nil as "no upstream" (typically HTTP 502).
+local DEFAULT_BACKEND = nil
 
 -- Per-worker L1: { [site_id] = { list=..., version=... } }
 local l1 = {}
@@ -45,10 +48,16 @@ end
 local function get_redis(timeout)
     local red = redis:new()
     red:set_timeout(timeout or 2000)
-    local ok, err = red:connect(REDIS_SOCK)
+    -- Dedicated pool so DB-2 cache_purge connections never poison site upstream reads.
+    local ok, err = red:connect(REDIS_SOCK, { pool = "athens_redis_db0" })
     if not ok then
         log(ERR, "upstream_redis: redis connect failed: ", tostring(err))
         return nil, err
+    end
+    local ok_sel, sel_err = red:select(0)
+    if not ok_sel then
+        red:close()
+        return nil, sel_err or "select_0_failed"
     end
     return red
 end
@@ -76,15 +85,30 @@ local function load_from_redis(site_id)
     local key = "upstreamservers:" .. tostring(site_id)
     local raw, rerr = red:get(key)
     red:set_keepalive(10000, 100)
+    if rerr then
+        return nil, rerr
+    end
     if not raw or raw == ngx.null or raw == "" then
-        return {}
+        -- Distinguish "no config" from Redis errors; empty is a real miss.
+        return {}, nil
     end
     local list, jerr = cjson.decode(raw)
     if not list or type(list) ~= "table" then
         log(WARN, "upstream_redis: invalid JSON for ", key, " ", tostring(jerr))
-        return {}
+        return nil, "invalid_json"
     end
     return normalize_list(list)
+end
+
+local function publish_list(dict, site_id, list, version)
+    if not dict or not list or #list == 0 then
+        return false
+    end
+    local sid = tostring(site_id)
+    dict:set("list:" .. sid, cjson.encode(list), 0)
+    dict:set("updated:" .. sid, version or ngx.time(), 0)
+    l1[sid] = { list = list, version = version or ngx.time() }
+    return true
 end
 
 local function expand_by_weight(list)
@@ -109,13 +133,27 @@ local function refresh_shm()
     for site_id, _ in pairs(site_domains) do
         local list, err = load_from_redis(site_id)
         if err then
+            -- Keep last-known-good upstreams on transient Redis errors.
             log(WARN, "upstream_redis: load failed for site ", site_id, ": ", tostring(err))
+            if dict:get("list:" .. tostring(site_id)) then
+                site_ids[#site_ids + 1] = tostring(site_id)
+            end
         else
             local expanded = expand_by_weight(list)
-            dict:set("list:" .. site_id, cjson.encode(expanded), 0)
-            dict:set("updated:" .. site_id, version, 0)
-            l1[tostring(site_id)] = { list = expanded, version = version }
-            site_ids[#site_ids + 1] = tostring(site_id)
+            if #expanded > 0 then
+                publish_list(dict, site_id, expanded, version)
+                site_ids[#site_ids + 1] = tostring(site_id)
+            else
+                -- Keep last-known-good; only warn when we had nothing cached
+                -- (otherwise a transient empty read would spam every refresh).
+                local prev = dict:get("list:" .. tostring(site_id))
+                if prev and prev ~= "" and prev ~= "[]" then
+                    site_ids[#site_ids + 1] = tostring(site_id)
+                else
+                    log(WARN, "upstream_redis: empty upstream list for site ",
+                        site_id, " (no previous cache)")
+                end
+            end
         end
     end
 
@@ -140,15 +178,16 @@ function _M.get_backend(site_id)
     local list = entry and entry.list
     if not list or not entry or entry.version ~= version then
         local raw = dict:get("list:" .. sid)
-        if not raw or raw == "" then
+        if not raw or raw == "" or raw == "[]" then
             -- Lazy load once if refresh has not populated this site yet.
-            local loaded = load_from_redis(site_id)
-            if loaded then
-                list = expand_by_weight(loaded)
-                local now = ngx.time()
-                dict:set("list:" .. sid, cjson.encode(list), 0)
-                dict:set("updated:" .. sid, now, 0)
-                l1[sid] = { list = list, version = now }
+            local loaded, lerr = load_from_redis(site_id)
+            if lerr then
+                log(WARN, "upstream_redis: lazy load failed for site ", sid, ": ", tostring(lerr))
+                return DEFAULT_BACKEND
+            end
+            list = expand_by_weight(loaded or {})
+            if #list > 0 then
+                publish_list(dict, site_id, list, ngx.time())
             else
                 return DEFAULT_BACKEND
             end

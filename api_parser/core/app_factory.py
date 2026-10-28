@@ -11,6 +11,7 @@ from core.listening_ports import sync_from_redis_on_startup
 from core.temporary_blacklist_monitor import start_temporary_blacklist_monitor
 from core.license_monitor import start_license_monitor
 from core.edge_list_sync import start_edge_list_sync
+from core.cache_hit_sync import start_cache_hit_sync
 import config
 
 def create_app() -> Flask:
@@ -55,6 +56,8 @@ def initialize_app():
     start_license_monitor()
     # Push edge L4+L7 configure (SQLite + firewall.config + Redis) to backend
     start_edge_list_sync()
+    # Push L7 cache-hit breakdowns (content types + top miss URLs) to backend
+    start_cache_hit_sync()
 
 def cleanup_on_exit():
     """Cleanup resources on application exit."""

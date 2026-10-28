@@ -7,6 +7,8 @@
 #include <ebpf_firewall_geo.h>
 #include <ebpf_firewall_core.h>
 #include <ebpf_firewall_utils.h>
+#include <ebpf_firewall_shadow.h>
+#include <ebpf_firewall_mapsize.h>
 #include <unistd.h>
 #include <arpa/inet.h> 
 #include <netinet/in.h> 
@@ -89,121 +91,6 @@ static void traffic_stats_config_sum_percpu(const void *raw, size_t stride, int 
     }
 }
 
-/* ---------- Helper function ---------- */
-
-static int resize_map(struct bpf_object *obj, const char *name, __u32 max_entries)
-{
-    struct bpf_map *map = bpf_object__find_map_by_name(obj, name);
-    if (!map) {
-        LOG_W("Map '%s' not found, skipping resize\n", name);
-        return 0;  /* non-fatal: map might not exist in older .o files */
-    }
-
-    __u32 old = bpf_map__max_entries(map);
-    if (max_entries == old)
-        return 0;
-
-    int err = bpf_map__set_max_entries(map, max_entries);
-    if (err) {
-        LOG_E("Failed to resize map '%s' from %u to %u: %s\n",
-              name, old, max_entries, strerror(-err));
-        return err;
-    }
-
-    LOG_I("Map '%s' resized: %u -> %u entries\n", name, old, max_entries);
-    return 0;
-}
-
-#if 0
-static int apply_map_sizing(struct bpf_object *obj)
-{
-    /*
-     * Read these from your parsed config. Below uses globals for illustration.
-     * Default to 0 = "don't resize, keep compiled-in default".
-     */
-    struct {
-        const char *map_name;
-        __u32 size;
-    } resize_list[] = {
-        /* --- Critical: undersized in original code --- */
-        { "blocked_ips",               global_fw_config_map_sizes.blocked_ips      },
-
-        /* --- SYN maps (already 100K, but configurable now) --- */
-        { "syn_counter_fixed",         global_fw_config_map_sizes.syn              },
-        { "syn_counter_fixed_metrics", global_fw_config_map_sizes.syn              },
-        { "burst_syn_state",           global_fw_config_map_sizes.syn              },
-        { "syn_challenge",             global_fw_config_map_sizes.syn              },
-
-        /* --- ACK maps (was 65535) --- */
-        { "ack_counter_fixed",         global_fw_config_map_sizes.ack              },
-        { "ack_counter_fixed_metrics", global_fw_config_map_sizes.ack              },
-        { "burst_ack_state",           global_fw_config_map_sizes.ack              },
-
-        /* --- RST maps (was 65535) --- */
-        { "rst_counter_fixed",         global_fw_config_map_sizes.rst              },
-        { "rst_counter_fixed_metrics", global_fw_config_map_sizes.rst              },
-        { "burst_rst_state",           global_fw_config_map_sizes.rst              },
-
-        /* --- ICMP maps --- */
-        { "icmp_counter_fixed",         global_fw_config_map_sizes.icmp            },
-        { "icmp_counter_fixed_metrics", global_fw_config_map_sizes.icmp            },
-        { "burst_icmp_state",           global_fw_config_map_sizes.icmp            },
-
-        /* --- UDP maps --- */
-        { "udp_counter_fixed",         global_fw_config_map_sizes.udp              },
-        { "udp_counter_fixed_metrics", global_fw_config_map_sizes.udp              },
-        { "burst_udp_state",           global_fw_config_map_sizes.udp              },
-
-        /* --- GRE maps --- */
-        { "gre_counter_fixed",         global_fw_config_map_sizes.gre              },
-        { "gre_counter_fixed_metrics", global_fw_config_map_sizes.gre              },
-        { "burst_gre_state",           global_fw_config_map_sizes.gre              },
-
-        /* --- NEW: PSH/STOMP maps --- */
-        { "stomp_counter_fixed",         global_fw_config_map_sizes.stomp              },
-        { "stomp_counter_fixed_metrics", global_fw_config_map_sizes.stomp              },
-        { "burst_stomp_state",           global_fw_config_map_sizes.stomp              },
-
-        /* --- NEW: SOCKET maps --- */
-        { "socket_counter_fixed",      global_fw_config_map_sizes.socket           },
-
-        /* --- NEW: Handshake maps --- */
-        { "handshake_counter_fixed",   global_fw_config_map_sizes.handshake        },
-        { "handshake_counter_fixed_metrics", global_fw_config_map_sizes.handshake  },
-        { "burst_handshake_state",     global_fw_config_map_sizes.handshake        },
-
-        /* --- Shared maps --- */
-        { "tcp_established_map",       global_fw_config_map_sizes.tcp_established  },
-        { "tcp_connection_map",        global_fw_config_map_sizes.tcp_established  },
-        { "allowed_ips",               global_fw_config_map_sizes.tcp_established  },
-        { "geo_result_cache",          global_fw_config_map_sizes.geo_cache        },
-    };
-
-    int count = sizeof(resize_list) / sizeof(resize_list[0]);
-    for (int i = 0; i < count; i++) {
-        if (resize_list[i].size == 0)
-            continue;  /* 0 = use compiled-in default */
-
-        /* Enforce minimum of 1024 to prevent misconfiguration */
-        __u32 sz = resize_list[i].size;
-        if (sz < 1024) sz = 1024;
-
-        /* Enforce maximum of 1M to prevent OOM */
-        if (sz > 1048576) {
-            LOG_W("Map '%s' size %u exceeds 1M max, capping to 1048576\n",
-                  resize_list[i].map_name, sz);
-            sz = 1048576;
-        }
-
-        int err = resize_map(obj, resize_list[i].map_name, sz);
-        if (err)
-            return err;
-    }
-
-    return 0;
-}
-#endif
-
 static void log_map_memory_usage(struct bpf_object *obj)
 {
     struct bpf_map *map;
@@ -267,6 +154,7 @@ static void log_map_memory_usage(struct bpf_object *obj)
 struct stats_config global_receive_stats = {0};
 struct stats_config global_passed_stats = {0};
 struct fixed_ip_pkt_stats global_max_ip_pkt_stats = {0};
+struct det_snapshot global_det_stats = {0};
 
 struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS] = {0};
 
@@ -633,6 +521,8 @@ static void * global_attack_check_worker(void * arg) {
     int nr = bpf_percpu_nr_cpus();
     size_t vsize = sizeof(__u64) * (size_t)nr;
     __u64 *values = calloc((size_t)nr, sizeof(__u64));
+    void *raw = NULL;
+    void *det_raw = NULL;
 
     if (!values)
         goto cleanup; 
@@ -705,9 +595,15 @@ static void * global_attack_check_worker(void * arg) {
         LOG_E( "Failed to find global_socket_pkt_counter eBPF map\n");
         goto cleanup;
     }
+    (void)global_socket_pkt_counter_map_fd; /* kept for map presence check; H3 does not drain */
     int global_handshake_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_handshake_pkt_counter");
     if (global_handshake_pkt_counter_map_fd < 0) {
         LOG_E( "Failed to find global_handshake_pkt_counter eBPF map\n");
+        goto cleanup;
+    }
+    int global_synack_pkt_counter_map_fd = bpf_object__find_map_fd_by_name(obj, "global_synack_pkt_counter");
+    if (global_synack_pkt_counter_map_fd < 0) {
+        LOG_E( "Failed to find global_synack_pkt_counter eBPF map\n");
         goto cleanup;
     }
     int global_psh_ack_filtered_map_fd = bpf_object__find_map_fd_by_name(obj, "global_psh_ack_filtered");
@@ -716,185 +612,117 @@ static void * global_attack_check_worker(void * arg) {
         goto cleanup;
     }
 
+    int det_class_totals_fd = bpf_object__find_map_fd_by_name(obj, "det_class_totals");
+    if (det_class_totals_fd < 0) {
+        LOG_E("Failed to find det_class_totals eBPF map\n");
+        goto cleanup;
+    }
+    int invalid_totals_fd = bpf_object__find_map_fd_by_name(obj, "invalid_totals");
+    if (invalid_totals_fd < 0) {
+        LOG_E("Failed to find invalid_totals eBPF map\n");
+        goto cleanup;
+    }
+
+    struct bpf_map_info info = {};
+    __u32 info_len = sizeof(info);
+    if (bpf_obj_get_info_by_fd(income_stats_fd, &info, &info_len)) {
+        LOG_E("bpf_obj_get_info_by_fd %s\n", strerror(errno));
+        goto cleanup;
+    }
+    size_t inc_stride = bpf_percpu_stride(info.value_size);
+    size_t inc_buf = inc_stride * (size_t)nr;
+    raw = calloc(1, inc_buf);
+    if (!raw)
+        goto cleanup;
+
+    /* Phase 0 H3: cumulative counters; sample as current - previous (no zeroing). */
+    __u64 prev_syn = 0, prev_ack = 0, prev_rst = 0, prev_icmp = 0, prev_udp = 0, prev_gre = 0;
+    __u64 prev_stomp = 0, prev_handshake = 0, prev_synack = 0, prev_psh_filt = 0;
+    struct stats_config prev_income = {0};
+    struct det_snapshot prev_det = {0};
+    int have_baseline = 0;
+    int have_det_baseline = 0;
+
+    size_t det_stride = bpf_percpu_stride(sizeof(struct det_val));
+    size_t det_buf_sz = det_stride * (size_t)nr;
+    det_raw = calloc(1, det_buf_sz);
+    if (!det_raw)
+        goto cleanup;
+
     while (!exiting) {
         __u32 key = 0;
         time_t now = time(NULL);     /* current epoch seconds */
 
-        /*
-        struct global_firewall_config g_fw_config = {0};
-        if (bpf_map_lookup_elem(bss_map_fd, &key, &g_fw_config) != 0) {
-            LOG_E("bpf_map_lookup_elem %s\n", strerror(errno));
-            goto cleanup;
-        }*/
-        
         struct global_attack_stats * global_attack_stats_val =&global_fw_config.g_attack_stats;
-        
-        __u64 total_syn_cnt = 0;
-        if (bpf_map_lookup_elem(global_syn_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_syn_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_syn_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
 
-        __u64 total_ack_cnt = 0;
-        if (bpf_map_lookup_elem(global_ack_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_ack_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_ack_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
+        #define READ_PERCPU_SUM(map_fd, out) do { \
+            if (bpf_map_lookup_elem((map_fd), &key, values)) { \
+                LOG_E("bpf_map_lookup_elem"); \
+                goto cleanup; \
+            } \
+            (out) = 0; \
+            for (int cpu = 0; cpu < nr; cpu++) \
+                (out) += values[cpu]; \
+        } while (0)
 
-        __u64 total_rst_cnt = 0;
-        if (bpf_map_lookup_elem(global_rst_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_rst_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_rst_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
+        __u64 cur_syn = 0, cur_ack = 0, cur_rst = 0, cur_icmp = 0, cur_udp = 0, cur_gre = 0;
+        __u64 cur_stomp = 0, cur_handshake = 0, cur_synack = 0, cur_psh_filt = 0;
 
-        __u64 total_icmp_cnt = 0;
-        if (bpf_map_lookup_elem(global_icmp_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_icmp_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_icmp_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
+        READ_PERCPU_SUM(global_syn_pkt_counter_map_fd, cur_syn);
+        READ_PERCPU_SUM(global_ack_pkt_counter_map_fd, cur_ack);
+        READ_PERCPU_SUM(global_rst_pkt_counter_map_fd, cur_rst);
+        READ_PERCPU_SUM(global_icmp_pkt_counter_map_fd, cur_icmp);
+        READ_PERCPU_SUM(global_udp_pkt_counter_map_fd, cur_udp);
+        READ_PERCPU_SUM(global_gre_pkt_counter_map_fd, cur_gre);
+        READ_PERCPU_SUM(global_stomp_pkt_counter_map_fd, cur_stomp);
+        READ_PERCPU_SUM(global_handshake_pkt_counter_map_fd, cur_handshake);
+        READ_PERCPU_SUM(global_synack_pkt_counter_map_fd, cur_synack);
+        READ_PERCPU_SUM(global_psh_ack_filtered_map_fd, cur_psh_filt);
+        #undef READ_PERCPU_SUM
 
-        __u64 total_udp_cnt = 0;
-        if (bpf_map_lookup_elem(global_udp_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_udp_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_udp_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
-
-        __u64 total_gre_cnt = 0;
-        if (bpf_map_lookup_elem(global_gre_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_gre_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_gre_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
-
-        __u64 total_stomp_cnt = 0;
-        if (bpf_map_lookup_elem(global_stomp_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_stomp_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_stomp_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
-
-        /* Drain SOCKET counter */
-        if (global_socket_pkt_counter_map_fd >= 0) {
-            if (!bpf_map_lookup_elem(global_socket_pkt_counter_map_fd, &key, values)) {
-                memset(values, 0, vsize);
-                bpf_map_update_elem(global_socket_pkt_counter_map_fd, &key, values, 0);
-            }
-        }
-
-        __u64 total_handshake_cnt = 0;
-        if (bpf_map_lookup_elem(global_handshake_pkt_counter_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_handshake_cnt += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_handshake_pkt_counter_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
-
-        __u64 total_psh_ack_filtered = 0;
-        if (bpf_map_lookup_elem(global_psh_ack_filtered_map_fd, &key, values)) {
-            LOG_E( "bpf_map_lookup_elem");
-            goto cleanup;
-        }
-        for (int cpu = 0; cpu < nr; cpu++) {
-            total_psh_ack_filtered += values[cpu];
-        }
-        memset(values, 0, vsize);
-        if (bpf_map_update_elem(global_psh_ack_filtered_map_fd, &key, values, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            goto cleanup;
-        }
-
-        struct bpf_map_info info = {};
-        __u32 info_len = sizeof(info);
-
-        if (bpf_obj_get_info_by_fd(income_stats_fd, &info, &info_len)) {
-            LOG_E("bpf_obj_get_info_by_fd %s\n", strerror(errno));
-            goto cleanup;
-        }
-
-        size_t inc_stride = bpf_percpu_stride(info.value_size);
-        size_t inc_buf = inc_stride * (size_t)nr;
-
-        void *raw = calloc(1, inc_buf);
-        if (!raw) {
-            goto cleanup;
-        }
-
-        struct stats_config aggregate = {0};
         if (bpf_map_lookup_elem(income_stats_fd, &key, raw)) {
             LOG_E( "bpf_map_lookup_elem");
-            free(raw);
             goto cleanup;
         }
+        struct stats_config cur_income = {0};
+        stats_config_sum_percpu(raw, inc_stride, nr, &cur_income);
 
-        stats_config_sum_percpu(raw, inc_stride, nr, &aggregate);
-
-        memset(raw, 0, inc_buf);
-        if (bpf_map_update_elem(income_stats_fd, &key, raw, 0)) {
-            LOG_E( "bpf_map_update_elem");
-            free(raw);
-            goto cleanup;
+        if (!have_baseline) {
+            prev_syn = cur_syn; prev_ack = cur_ack; prev_rst = cur_rst;
+            prev_icmp = cur_icmp; prev_udp = cur_udp; prev_gre = cur_gre;
+            prev_stomp = cur_stomp; prev_handshake = cur_handshake;
+            prev_synack = cur_synack; prev_psh_filt = cur_psh_filt;
+            prev_income = cur_income;
+            have_baseline = 1;
+            sleep(1);
+            continue;
         }
-        free(raw);
+
+        __u64 total_syn_cnt = traffic_counter_delta(cur_syn, &prev_syn);
+        __u64 total_ack_cnt = traffic_counter_delta(cur_ack, &prev_ack);
+        __u64 total_rst_cnt = traffic_counter_delta(cur_rst, &prev_rst);
+        __u64 total_icmp_cnt = traffic_counter_delta(cur_icmp, &prev_icmp);
+        __u64 total_udp_cnt = traffic_counter_delta(cur_udp, &prev_udp);
+        __u64 total_gre_cnt = traffic_counter_delta(cur_gre, &prev_gre);
+        __u64 total_stomp_cnt = traffic_counter_delta(cur_stomp, &prev_stomp);
+        __u64 total_handshake_cnt = traffic_counter_delta(cur_handshake, &prev_handshake);
+        __u64 total_synack_cnt = traffic_counter_delta(cur_synack, &prev_synack);
+        __u64 total_psh_ack_filtered = traffic_counter_delta(cur_psh_filt, &prev_psh_filt);
+
+        struct stats_config aggregate = {0};
+        aggregate.syn = traffic_counter_delta(cur_income.syn, &prev_income.syn);
+        aggregate.ack = traffic_counter_delta(cur_income.ack, &prev_income.ack);
+        aggregate.rst = traffic_counter_delta(cur_income.rst, &prev_income.rst);
+        aggregate.fin = traffic_counter_delta(cur_income.fin, &prev_income.fin);
+        aggregate.psh = traffic_counter_delta(cur_income.psh, &prev_income.psh);
+        aggregate.urg = traffic_counter_delta(cur_income.urg, &prev_income.urg);
+        aggregate.syn_ack = traffic_counter_delta(cur_income.syn_ack, &prev_income.syn_ack);
+        aggregate.fin_ack = traffic_counter_delta(cur_income.fin_ack, &prev_income.fin_ack);
+        aggregate.rst_ack = traffic_counter_delta(cur_income.rst_ack, &prev_income.rst_ack);
+        aggregate.psh_ack = traffic_counter_delta(cur_income.psh_ack, &prev_income.psh_ack);
+        aggregate.icmp = traffic_counter_delta(cur_income.icmp, &prev_income.icmp);
+        aggregate.udp = traffic_counter_delta(cur_income.udp, &prev_income.udp);
+        aggregate.gre = traffic_counter_delta(cur_income.gre, &prev_income.gre);
 
         time_t rawtime;
         struct tm *tm_info;
@@ -903,6 +731,12 @@ static void * global_attack_check_worker(void * arg) {
 
         __u8 need_to_update = false;
         __u8 syn_attack = false, ack_attack = false, rst_attack = false, icmp_attack = false, udp_attack = false, gre_attack = false, stomp_attack = false, handshake_attack = false;
+
+        __u8 prefer_adaptive = global_fw_config.g_config.prefer_adaptive;
+
+        /* Under prefer_adaptive, shadow owns START/END + attack flags. */
+        if (prefer_adaptive)
+            goto skip_classic_protection;
 
         if (total_syn_cnt >= global_fw_config.g_syn_config.syn_threshold) syn_attack = true;
         else syn_attack = false;
@@ -1036,40 +870,17 @@ static void * global_attack_check_worker(void * arg) {
             }
         }
 
-        /* PSH+ACK flag rate opens the flood. STOMP vs HANDSHAKE counts only
-         * choose which defense it is. A flat flood can leave most packets out
-         * of both program counters; the larger of those two counters wins,
-         * and a tie is STOMP. SYN+ACK still uses the handshake counter alone
-         * when PSH+ACK itself is under the gate. */
-        {
-            __u8 stomp_on = global_fw_config.g_stomp_config.valid != 0;
-            __u8 handshake_on = global_fw_config.g_handshake_config.valid != 0;
-            __u32 psh_gate = 0;
-            int have_gate = 0;
-
-            if (stomp_on) {
-                psh_gate = global_fw_config.g_stomp_config.stomp_threshold;
-                have_gate = 1;
-            }
-            if (handshake_on) {
-                __u32 handshake_gate = global_fw_config.g_handshake_config.handshake_threshold;
-                if (!have_gate || handshake_gate < psh_gate)
-                    psh_gate = handshake_gate;
-                have_gate = 1;
-            }
-
-            if (have_gate && aggregate.psh_ack >= psh_gate) {
-                if (handshake_on && total_handshake_cnt > total_stomp_cnt)
-                    handshake_attack = true;
-                else if (stomp_on)
-                    stomp_attack = true;
-                else
-                    handshake_attack = true;
-            } else if (handshake_on &&
-                       total_handshake_cnt >= global_fw_config.g_handshake_config.handshake_threshold) {
+        /* Phase 0 N2/H7: STOMP and HANDSHAKE are independent. SYN+ACK has its
+         * own counter but reuses handshake_threshold / handshake_attack. */
+        if (global_fw_config.g_stomp_config.valid &&
+            total_stomp_cnt >= global_fw_config.g_stomp_config.stomp_threshold)
+            stomp_attack = true;
+        if (global_fw_config.g_handshake_config.valid) {
+            __u32 hs_gate = global_fw_config.g_handshake_config.handshake_threshold;
+            if (total_handshake_cnt >= hs_gate || total_synack_cnt >= hs_gate)
                 handshake_attack = true;
-            }
         }
+
         if (stomp_attack != global_attack_stats_val->stomp_attack) {
             if (stomp_attack == true) {
                 if (now >= global_attack_stats_val->stomp_protect_expire) {
@@ -1107,7 +918,8 @@ static void * global_attack_check_worker(void * arg) {
                 }
             }
         }
-        
+
+skip_classic_protection:
         if (need_to_update == true) {
             bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
         }
@@ -1119,7 +931,7 @@ static void * global_attack_check_worker(void * arg) {
             "PSH:%4llu "
             "FIN:%4llu "
             "URG:%4llu "
-            "SYN+ACK:%5llu "
+            "SYN+ACK:%5llu/%-5llu "
             "FIN+ACK:%4llu "
             "RST+ACK:%4llu "
             "PSH+ACK:%4llu/%-5llu "
@@ -1134,7 +946,7 @@ static void * global_attack_check_worker(void * arg) {
             aggregate.psh,
             aggregate.fin,
             aggregate.urg,
-            aggregate.syn_ack,
+            aggregate.syn_ack, total_synack_cnt,
             aggregate.fin_ack,
             aggregate.rst_ack,
             aggregate.psh_ack, total_psh_ack_filtered,
@@ -1152,18 +964,93 @@ static void * global_attack_check_worker(void * arg) {
         global_passed_stats.psh = aggregate.psh;
         global_passed_stats.fin = aggregate.fin;
         global_passed_stats.urg = aggregate.urg;
-        global_passed_stats.syn_ack = total_handshake_cnt;
+        global_passed_stats.syn_ack = total_synack_cnt;
         global_passed_stats.fin_ack = aggregate.fin_ack;
         global_passed_stats.rst_ack = aggregate.rst_ack;
-        global_passed_stats.psh_ack = total_stomp_cnt;
+        global_passed_stats.psh_ack = total_stomp_cnt + total_handshake_cnt;
         global_passed_stats.icmp = total_icmp_cnt;
         global_passed_stats.udp = total_udp_cnt;
         global_passed_stats.gre = total_gre_cnt;
+
+        /* Phase 1: host-wide {class,invalid} totals (monotonic deltas). */
+        {
+            struct det_snapshot cur = {0};
+            for (__u32 c = 0; c < DET_CLASS_MAX; c++) {
+                if (bpf_map_lookup_elem(det_class_totals_fd, &c, det_raw) != 0)
+                    continue;
+                for (int cpu = 0; cpu < nr; cpu++) {
+                    const struct det_val *p =
+                        (const struct det_val *)((const char *)det_raw + cpu * det_stride);
+                    cur.class_pkts[c] += p->pkts;
+                    cur.class_bytes[c] += p->bytes;
+                }
+            }
+            for (__u32 r = 0; r < INVALID_REASON_MAX; r++) {
+                if (bpf_map_lookup_elem(invalid_totals_fd, &r, values) != 0)
+                    continue;
+                for (int cpu = 0; cpu < nr; cpu++)
+                    cur.invalid_pkts[r] += values[cpu];
+            }
+            for (__u32 c = 0; c < DET_CLASS_EXCLUSIVE_MAX; c++) {
+                cur.total_pkts += cur.class_pkts[c];
+                cur.total_bytes += cur.class_bytes[c];
+            }
+
+            if (!have_det_baseline) {
+                prev_det = cur;
+                have_det_baseline = 1;
+            } else {
+                struct det_snapshot delta = {0};
+                for (__u32 c = 0; c < DET_CLASS_MAX; c++) {
+                    delta.class_pkts[c] =
+                        traffic_counter_delta(cur.class_pkts[c], &prev_det.class_pkts[c]);
+                    delta.class_bytes[c] =
+                        traffic_counter_delta(cur.class_bytes[c], &prev_det.class_bytes[c]);
+                }
+                for (__u32 r = 0; r < INVALID_REASON_MAX; r++) {
+                    delta.invalid_pkts[r] =
+                        traffic_counter_delta(cur.invalid_pkts[r], &prev_det.invalid_pkts[r]);
+                }
+                for (__u32 c = 0; c < DET_CLASS_EXCLUSIVE_MAX; c++) {
+                    delta.total_pkts += delta.class_pkts[c];
+                    delta.total_bytes += delta.class_bytes[c];
+                }
+                global_det_stats = delta;
+                LOG_T("DET pkts=%llu bytes=%llu SYN=%llu ACK=%llu SYNACK=%llu RST=%llu "
+                      "DATA=%llu SOCKET=%llu ICMP=%llu UDP=%llu GRE=%llu OTHER=%llu "
+                      "STOMP_lbl=%llu HS_lbl=%llu inv=%llu\n",
+                      delta.total_pkts, delta.total_bytes,
+                      delta.class_pkts[DET_CLASS_SYN],
+                      delta.class_pkts[DET_CLASS_ACK],
+                      delta.class_pkts[DET_CLASS_SYNACK],
+                      delta.class_pkts[DET_CLASS_RST],
+                      delta.class_pkts[DET_CLASS_DATA],
+                      delta.class_pkts[DET_CLASS_SOCKET],
+                      delta.class_pkts[DET_CLASS_ICMP],
+                      delta.class_pkts[DET_CLASS_UDP],
+                      delta.class_pkts[DET_CLASS_GRE],
+                      delta.class_pkts[DET_CLASS_OTHER],
+                      delta.class_pkts[DET_CLASS_STOMP],
+                      delta.class_pkts[DET_CLASS_HANDSHAKE],
+                      delta.invalid_pkts[INVALID_BAD_IHL] +
+                          delta.invalid_pkts[INVALID_BAD_DOFF] +
+                          delta.invalid_pkts[INVALID_LAND] +
+                          delta.invalid_pkts[INVALID_TCP_FRAG] +
+                          delta.invalid_pkts[INVALID_FLAG_NULL] +
+                          delta.invalid_pkts[INVALID_FLAG_XMAS] +
+                          delta.invalid_pkts[INVALID_FLAG_SYN_FIN] +
+                          delta.invalid_pkts[INVALID_FLAG_SYN_RST] +
+                          delta.invalid_pkts[INVALID_FLAG_SYN_URG] +
+                          delta.invalid_pkts[INVALID_FLAG_FIN_ONLY]);
+            }
+        }
 
         sleep (1);
     }
 
 cleanup:
+    if (det_raw) free(det_raw);
+    if (raw) free(raw);
     if (values) free (values);
     return NULL;
 }
@@ -1294,6 +1181,7 @@ char str_fixed_ip_ring_buf_type[256][128] = {
     "FIXED_IP_RING_BUF_GRE",        /* 12 */
     "FIXED_IP_RING_BUF_STOMP",      /* 13 */
     "FIXED_IP_RING_BUF_HANDSHAKE",  /* 14 */
+    "FIXED_IP_RING_BUF_SOCKET",     /* 15 */
 };
 
 
@@ -1303,7 +1191,7 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
 
     char src[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &e->srcip, src, sizeof(src));
-    if (e->fixed_type >= 0 && e->fixed_type <= FIXED_IP_RING_BUF_HANDSHAKE) {
+    if (e->fixed_type >= 0 && e->fixed_type <= FIXED_IP_RING_BUF_SOCKET) {
         if (e->duration == 0) {
             LOG_E("Fixed checked duration is 0\n");
             return 0;
@@ -1417,7 +1305,8 @@ static int fixed_ip_ringbuf_handle_event(void *ctx, void *data, size_t size)
         }
         
         if (e->over_fixed == 1)
-            LOG_C("[OVER FIXED] %s %s %llu pps\n", str_fixed_ip_ring_buf_type[e->fixed_type], src, expected_pps);
+            LOG_C("DETECT over-fixed %s src=%s rate≈%llu pps\n",
+                  str_fixed_ip_ring_buf_type[e->fixed_type], src, expected_pps);
 
     } else {
         LOG_E("Unknown fixed ip type\n");
@@ -1598,99 +1487,137 @@ static int attack_episode_active(const struct global_attack_stats *stats)
 {
     return stats->syn_attack || stats->ack_attack || stats->rst_attack ||
            stats->icmp_attack || stats->udp_attack || stats->gre_attack ||
-           stats->stomp_attack || stats->handshake_attack;
+           stats->stomp_attack || stats->handshake_attack ||
+           stats->synack_attack || stats->socket_attack ||
+           stats->fin_attack || stats->frag_attack || stats->other_attack;
 }
 
-static void format_report_time(char *time_buf, size_t time_buf_size)
+static void format_active_attack_classes(const struct global_attack_stats *stats,
+                                         char *buf, size_t buflen)
 {
-    time_t rawtime;
-    struct tm tm_info;
+    size_t n = 0;
+    buf[0] = '\0';
+#define APPEND_CLASS(flag, name) do {                                         \
+        if ((flag) && n + 12 < buflen) {                                      \
+            n += (size_t)snprintf(buf + n, buflen - n, "%s%s",                \
+                                  n ? "," : "", (name));                      \
+        }                                                                     \
+    } while (0)
+    APPEND_CLASS(stats->syn_attack, "SYN");
+    APPEND_CLASS(stats->ack_attack, "ACK");
+    APPEND_CLASS(stats->rst_attack, "RST");
+    APPEND_CLASS(stats->icmp_attack, "ICMP");
+    APPEND_CLASS(stats->udp_attack, "UDP");
+    APPEND_CLASS(stats->gre_attack, "GRE");
+    /* DATA Attack arms both flags; report STOMP vs HANDSHAKE from length labels. */
+    if (stats->stomp_attack || stats->handshake_attack) {
+        if (shadow_data_overlay_is_handshake())
+            APPEND_CLASS(1, "HANDSHAKE");
+        else
+            APPEND_CLASS(1, "STOMP");
+    }
+    APPEND_CLASS(stats->synack_attack, "SYNACK");
+    APPEND_CLASS(stats->socket_attack, "SOCKET");
+    APPEND_CLASS(stats->fin_attack, "FIN");
+    APPEND_CLASS(stats->frag_attack, "FRAG");
+    APPEND_CLASS(stats->other_attack, "OTHER");
+#undef APPEND_CLASS
+}
 
-    time(&rawtime);
-    localtime_r(&rawtime, &tm_info);
-    if (strftime(time_buf, time_buf_size, "%Y-%m-%d %H:%M:%S", &tm_info) == 0)
-        snprintf(time_buf, time_buf_size, "0000-00-00 00:00:00");
+/* Shared so cleanup can flush STOP if the worker exits mid-episode. */
+static volatile int episode_signal_sent = 0;
+static pthread_t episode_worker_thr;
+static int episode_worker_thr_valid = 0;
+
+static void flush_attack_episode_stop(const char *why)
+{
+    char message[2048];
+    char classes[128];
+    struct alert_extra ex = {0};
+    struct global_attack_stats *g_attack_stats = &global_fw_config.g_attack_stats;
+    __u64 req_id;
+
+    if (!episode_signal_sent)
+        return;
+    episode_signal_sent = 0;
+
+    req_id = g_attack_stats->global_req_id;
+    format_active_attack_classes(g_attack_stats, classes, sizeof(classes));
+    ex.classes = classes;
+    ex.source = global_fw_config.g_config.prefer_adaptive ? "adaptive" : "classic";
+    ex.why = why ? why : "episode_close";
+    attack_log_note("episode STOP source=%s classes=%s why=%s\n",
+                    ex.source, classes[0] ? classes : "-", ex.why);
+    build_attack_episode_message(0, req_id, message, sizeof(message), &ex);
+    send_message_to_api_parser(message);
+    if (g_attack_stats->global_req_id == req_id)
+        g_attack_stats->global_req_id = 0;
+    LOG_I("ALERT episode STOP req_id=%llu source=%s why=%s\n",
+          (unsigned long long)req_id, ex.source, ex.why);
+    attack_log_close(classes[0] ? classes : "-");
 }
 
 static void * report_attack_status_worker(void * arg)
 {
-    int signal_sent = 0;
-
     (void)arg;
     while (!exiting) {
         struct global_attack_stats *g_attack_stats = &global_fw_config.g_attack_stats;
         int active = attack_episode_active(g_attack_stats);
-        char message[1024];
-        char time_buf[32];
+        char message[2048];
         __u64 req_id;
 
-        if (active && signal_sent == 0) {
+        if (active && episode_signal_sent == 0) {
+            char classes[128];
+            struct alert_extra ex = {0};
+
             if (g_attack_stats->global_req_id == 0)
                 g_attack_stats->global_req_id = generate_attack_req_id();
             req_id = g_attack_stats->global_req_id;
 
-            format_report_time(time_buf, sizeof(time_buf));
-            snprintf(message, sizeof(message),
-                     "command:report_attack\ndata:attack_start\nreq_id:%llu\ntime:%s\n",
-                     (unsigned long long)req_id,
-                     time_buf);
+            format_active_attack_classes(g_attack_stats, classes, sizeof(classes));
+            ex.classes = classes;
+            ex.source = global_fw_config.g_config.prefer_adaptive ? "adaptive" : "classic";
+            ex.why = "episode_open";
+            /* Classic path opens here; adaptive usually already opened in shadow. */
+            if (attack_log_open(req_id, classes[0] ? classes : "-", ex.source) > 0)
+                LOG_I("ATTACK archive open req_id=%llu\n",
+                      (unsigned long long)req_id);
+            attack_log_note("episode START source=%s classes=%s\n",
+                            ex.source, classes[0] ? classes : "-");
+            build_attack_episode_message(1, req_id, message, sizeof(message), &ex);
             send_message_to_api_parser(message);
-            signal_sent = 1;
-            LOG_D("Send report attack status req_id=%llu syn=%d ack=%d rst=%d icmp=%d udp=%d gre=%d stomp=%d handshake=%d\n",
-                  (unsigned long long)req_id,
-                  g_attack_stats->syn_attack,
-                  g_attack_stats->ack_attack,
-                  g_attack_stats->rst_attack,
-                  g_attack_stats->icmp_attack,
-                  g_attack_stats->udp_attack,
-                  g_attack_stats->gre_attack,
-                  g_attack_stats->stomp_attack,
-                  g_attack_stats->handshake_attack);
-        } else if (!active && signal_sent == 1) {
-            req_id = g_attack_stats->global_req_id;
-
-            format_report_time(time_buf, sizeof(time_buf));
-            snprintf(message, sizeof(message),
-                     "command:report_attack\ndata:attack_stop\nreq_id:%llu\ntime:%s\n",
-                     (unsigned long long)req_id,
-                     time_buf);
-            send_message_to_api_parser(message);
-            /* A new episode may have started after the snapshot above. */
-            if (!attack_episode_active(g_attack_stats) &&
-                g_attack_stats->global_req_id == req_id)
-                g_attack_stats->global_req_id = 0;
-            signal_sent = 0;
-            LOG_D("Send report attack status req_id=%llu syn=%d ack=%d rst=%d icmp=%d udp=%d gre=%d stomp=%d handshake=%d\n",
-                  (unsigned long long)req_id,
-                  g_attack_stats->syn_attack,
-                  g_attack_stats->ack_attack,
-                  g_attack_stats->rst_attack,
-                  g_attack_stats->icmp_attack,
-                  g_attack_stats->udp_attack,
-                  g_attack_stats->gre_attack,
-                  g_attack_stats->stomp_attack,
-                  g_attack_stats->handshake_attack);
+            episode_signal_sent = 1;
+            LOG_I("ALERT episode START req_id=%llu source=%s classes=%s\n",
+                  (unsigned long long)req_id, ex.source, classes[0] ? classes : "-");
+        } else if (!active && episode_signal_sent == 1) {
+            flush_attack_episode_stop("episode_close");
         }
 
         usleep(100000);
     }
 
+    /* Service stop / crash path: always close an open episode. */
+    flush_attack_episode_stop("shutdown");
     return NULL;
 }
 
 int main(int argc, char **argv) {
-    LOG_I("Starting EBPF-Firewall\n");
+    int map_plan = (argc >= 2 && strcmp(argv[1], "--map-plan") == 0);
+    if (map_plan)
+        set_main_log_path("off");   /* stdout only; keep the production log clean */
+    else
+        LOG_I("Starting EBPF-Firewall\n");
     int ifindex, err = -1;
 
     struct bpf_program *prog_main, *prog_parse_syn, *prog_parse_ack, *prog_parse_rst,
                        *prog_parse_icmp, *prog_parse_udp, *prog_parse_gre,
                        *prog_parse_stomp, *prog_parse_tcp_socket, *prog_parse_handshake,
-                       *prog_parse_psh_ack;
+                       *prog_parse_psh_ack, *prog_parse_synack;
 
     int attach_id = -1, prog_main_fd, prog_parse_syn_fd, prog_parse_ack_fd,
         prog_parse_rst_fd, prog_parse_icmp_fd, prog_parse_udp_fd, prog_parse_gre_fd,
         prog_parse_stomp_fd, prog_parse_tcp_socket_fd, prog_parse_handshake_fd,
-        prog_parse_psh_ack_fd;
+        prog_parse_psh_ack_fd, prog_parse_synack_fd;
 
     int prog_array_map_fd;
     int tcp_established_map_fd, tcp_connection_map_fd, blocked_ips_map_fd;
@@ -1714,13 +1641,16 @@ int main(int argc, char **argv) {
         LOG_E( "ERROR: opening BPF object file failed\n");
         return 1;
     }
-    
-#if 0
-    if (apply_map_sizing(obj) < 0) {
-        LOG_E("Failed to apply map sizing from config\n");
+
+    if (apply_host_map_sizing(obj) < 0) {
+        LOG_E("Failed to apply host map sizing\n");
         goto cleanup;
     }
-#endif
+    /* Print the sizing plan for this host and exit (deploy-time check). */
+    if (map_plan) {
+        bpf_object__close(obj);
+        return 0;
+    }
     // Load the BPF object into the kernel.
     err = bpf_object__load(obj);
     if (err) {
@@ -1756,17 +1686,17 @@ int main(int argc, char **argv) {
 
 #ifdef PRODUCTION_MODE
     LOG_I("Running EBPF-Firewall with Production mode\n");
-    if (argc < 2) {
-        LOG_E("Please input token : {usage : %s token}\n", argv[0]);
-        return EXIT_FAILURE;
-    }
-    strcpy(token, argv[1]);
-
-    int ret;
-    ret = check_token();
-    if (ret != 0) {
-        LOG_E("Failed to check token so exit.\n");
-        goto cleanup;
+    /* Optional CLI token (short-lived). systemd units normally omit it and
+     * rely on LICENSE_PATH already verified by get_license_status() above. */
+    if (argc >= 2 && argv[1] && argv[1][0]) {
+        strncpy(token, argv[1], sizeof(token) - 1);
+        token[sizeof(token) - 1] = '\0';
+        if (check_token() != 0) {
+            LOG_E("Failed to check token so exit.\n");
+            goto cleanup;
+        }
+    } else {
+        LOG_I("No CLI token; using verified license\n");
     }
 #else
     LOG_W("Running EBPF-Firewall with Test mode\n");
@@ -1799,11 +1729,12 @@ int main(int argc, char **argv) {
     prog_parse_tcp_socket = bpf_object__find_program_by_name(obj, "xdp_parse_tcp_socket");
     prog_parse_handshake = bpf_object__find_program_by_name(obj, "xdp_parse_handshake");
     prog_parse_psh_ack = bpf_object__find_program_by_name(obj, "xdp_parse_psh_ack");
+    prog_parse_synack = bpf_object__find_program_by_name(obj, "xdp_parse_synack");
 
     if (!prog_main || !prog_parse_syn || !prog_parse_ack || !prog_parse_rst ||
         !prog_parse_icmp || !prog_parse_udp || !prog_parse_gre ||
         !prog_parse_stomp || !prog_parse_tcp_socket || !prog_parse_handshake ||
-        !prog_parse_psh_ack) {
+        !prog_parse_psh_ack || !prog_parse_synack) {
         LOG_E("ERROR: could not find all program sections\n");
         goto cleanup;
     }
@@ -1820,6 +1751,7 @@ int main(int argc, char **argv) {
     prog_parse_tcp_socket_fd = bpf_program__fd(prog_parse_tcp_socket);
     prog_parse_handshake_fd = bpf_program__fd(prog_parse_handshake);
     prog_parse_psh_ack_fd = bpf_program__fd(prog_parse_psh_ack);
+    prog_parse_synack_fd = bpf_program__fd(prog_parse_synack);
 
 
     // Find the prog_array map (declared as "prog_array" in our BPF program).
@@ -1833,7 +1765,7 @@ int main(int argc, char **argv) {
     // Update the prog_array map:
     // Key 0 -> xdp_parse_syn; Key 1 -> xdp_parse_ack.
     // Key 2 -> xdp_parse_rst; Key 3 -> xdp_parse_icmp. Key 4 -> xdp_parse_udp. Key 5 -> xdp_parse_gre.
-    int key0 = 0, key1 = 1, key2 = 2, key3 = 3, key4 = 4, key5 = 5, key6 = 6, key7 = 7, key8 = 8, key9 = 9;
+    int key0 = 0, key1 = 1, key2 = 2, key3 = 3, key4 = 4, key5 = 5, key6 = 6, key7 = 7, key8 = 8, key9 = 9, key10 = 10;
     
     err = bpf_map_update_elem(prog_array_map_fd, &key0, &prog_parse_syn_fd, 0);
     if (err) {
@@ -1883,6 +1815,11 @@ int main(int argc, char **argv) {
     err = bpf_map_update_elem(prog_array_map_fd, &key9, &prog_parse_stomp_fd, 0);
     if (err) {
         LOG_E("ERROR: updating prog_array key 9 (stomp) failed: %d\n", err);
+        goto cleanup;
+    }
+    err = bpf_map_update_elem(prog_array_map_fd, &key10, &prog_parse_synack_fd, 0);
+    if (err) {
+        LOG_E("ERROR: updating prog_array key 10 (synack) failed: %d\n", err);
         goto cleanup;
     }
 
@@ -1954,6 +1891,30 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
 
+    /* TC egress: record outbound SYN for inbound SYN-ACK match (H7). */
+    {
+        struct bpf_program *tc_prog =
+            bpf_object__find_program_by_name(obj, "tc_egress_record_syn");
+        if (tc_prog && global_fw_config.g_config.svc.synack_match_outbound) {
+            int tc_fd = bpf_program__fd(tc_prog);
+            LIBBPF_OPTS(bpf_tc_hook, tc_hook,
+                        .ifindex = ifindex,
+                        .attach_point = BPF_TC_EGRESS);
+            LIBBPF_OPTS(bpf_tc_opts, tc_opts,
+                        .handle = 1,
+                        .priority = 50,
+                        .prog_fd = tc_fd);
+            int tc_err = bpf_tc_hook_create(&tc_hook);
+            if (tc_err && tc_err != -EEXIST)
+                LOG_W("TC egress hook create: %d (SYN-ACK match may be off)\n", tc_err);
+            tc_err = bpf_tc_attach(&tc_hook, &tc_opts);
+            if (tc_err)
+                LOG_W("TC egress attach failed: %d (SYN-ACK match degraded)\n", tc_err);
+            else
+                LOG_I("TC egress SYN recorder attached on %s\n", ifname);
+        }
+    }
+
     if (init_conntrack(tcp_established_map_fd, tcp_connection_map_fd, blocked_ips_map_fd) < 0) {
         LOG_E( "Failed to init conntrack\n");
         goto cleanup;
@@ -1962,6 +1923,11 @@ int main(int argc, char **argv) {
     pthread_t global_attack_ch_thr, blocked_ips_duration_thr;
     if (pthread_create(&global_attack_ch_thr, NULL, global_attack_check_worker, obj) != 0) {
         LOG_E("pthread_create for global_attack_ch_thr %s\n", strerror(errno));
+        goto cleanup;
+    }
+
+    if (start_shadow_control_loop(obj) < 0) {
+        LOG_E("Failed to start shadow control loop\n");
         goto cleanup;
     }
 
@@ -1989,6 +1955,8 @@ int main(int argc, char **argv) {
         LOG_E("pthread_create for send_check_blocklist_thr %s\n", strerror(errno));
         goto cleanup;
     }
+    episode_worker_thr = send_check_blocklist_thr;
+    episode_worker_thr_valid = 1;
 
     pthread_t license_check_thr;
     if (pthread_create(&license_check_thr, NULL, license_check_worker, NULL) != 0) {
@@ -2014,9 +1982,19 @@ int main(int argc, char **argv) {
     }
     
 cleanup:
+    exiting = 1;
+    stop_shadow_control_loop();
+
     pthread_cond_broadcast(&sqlite_block_q_cv);
     if (sqlite_worker_thr_valid)
         pthread_join(sqlite_worker_thr, NULL);
+
+    /* Join episode worker before closing the API socket so STOP can be sent. */
+    if (episode_worker_thr_valid) {
+        pthread_join(episode_worker_thr, NULL);
+        episode_worker_thr_valid = 0;
+    }
+    flush_attack_episode_stop("shutdown");
 
     if (ringbuf) ring_buffer__free(ringbuf);
     if (fixed_ip_ringbuf) ring_buffer__free(fixed_ip_ringbuf);
@@ -2510,6 +2488,85 @@ int clear_fw() {
     fd = bpf_object__find_map_fd_by_name(obj, "burst_handshake_state");
     if (fd >= 0) clear_batch_map(fd);
     LOG_D("burst_handshake_state is cleared\n");
+
+    /* --- SYN+ACK maps (Phase 0 H7) --- */
+    fd = bpf_object__find_map_fd_by_name(obj, "global_synack_pkt_counter");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("global_synack_pkt_counter is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "synack_counter_fixed");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("synack_counter_fixed is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "burst_synack_state");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("burst_synack_state is cleared\n");
+
+    /* --- Phase 1 detection maps --- */
+    fd = bpf_object__find_map_fd_by_name(obj, "det_counters");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("det_counters is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "invalid_counters");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("invalid_counters is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "mitigation_mode");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("mitigation_mode is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "drop_invalid_totals");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("drop_invalid_totals is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "src_buckets");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("src_buckets is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "dst_class_rate");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("dst_class_rate is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "drop_mode2_totals");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("drop_mode2_totals is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "drop_mode3_totals");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("drop_mode3_totals is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "flows");
+    if (fd >= 0) clear_batch_map(fd);
+    LOG_D("flows is cleared\n");
+
+    fd = bpf_object__find_map_fd_by_name(obj, "drop_flow_totals");
+    if (fd >= 0) clear_pkt_counter_map(fd);
+    LOG_D("drop_flow_totals is cleared\n");
+
+    {
+        int nr = bpf_percpu_nr_cpus();
+        size_t dstride = bpf_percpu_stride(sizeof(struct det_val));
+        void *dzeros = calloc((size_t)nr, dstride);
+        size_t istride = bpf_percpu_stride(sizeof(__u64));
+        void *izeros = calloc((size_t)nr, istride);
+        if (dzeros) {
+            fd = bpf_object__find_map_fd_by_name(obj, "det_class_totals");
+            if (fd >= 0) {
+                for (__u32 c = 0; c < DET_CLASS_MAX; c++)
+                    bpf_map_update_elem(fd, &c, dzeros, 0);
+            }
+            free(dzeros);
+        }
+        if (izeros) {
+            fd = bpf_object__find_map_fd_by_name(obj, "invalid_totals");
+            if (fd >= 0) {
+                for (__u32 r = 0; r < INVALID_REASON_MAX; r++)
+                    bpf_map_update_elem(fd, &r, izeros, 0);
+            }
+            free(izeros);
+        }
+        memset(&global_det_stats, 0, sizeof(global_det_stats));
+    }
 
     return 0;
 }

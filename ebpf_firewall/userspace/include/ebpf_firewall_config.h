@@ -3,5 +3,8 @@
 
 int init_time_offset(void);
 int load_config(struct bpf_object *obj);
+int refresh_capacity_profile(void);
+
+extern struct capacity_profile global_capacity_profile;
 
 #endif

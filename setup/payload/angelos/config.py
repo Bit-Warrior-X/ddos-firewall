@@ -32,6 +32,9 @@ SERVER_PORT = 5000
 #API_BASE_URL = "http://93.95.116.174:8080/api".rstrip("/")
 API_BASE_URL = "https://panel.dorian.center/api".rstrip("/")
 
+# Prefer IPv4 to panel (no working default IPv6 route on many edges)
+FORCE_IPV4 = True
+
 # L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
 

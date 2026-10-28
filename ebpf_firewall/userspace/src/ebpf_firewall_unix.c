@@ -9,6 +9,8 @@
 #include <ebpf_firewall_common.h>
 #include <ebpf_firewall_unix.h>
 #include <ebpf_firewall_core.h>
+#include <ebpf_firewall_config.h>
+#include <ebpf_firewall_shadow.h>
 #include <ebpf_firewall_log.h>
 #include <ebpf_firewall_utils.h>
 
@@ -17,6 +19,7 @@ extern int exiting;
 extern struct stats_config global_receive_stats;
 extern struct stats_config global_passed_stats;
 extern struct fixed_ip_pkt_stats global_max_ip_pkt_stats;
+extern struct det_snapshot global_det_stats;
 extern struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS];
 
 #define BUF_SZ    1024
@@ -126,6 +129,98 @@ static void handle_clear_fw(int cfd, char **argv, int argc) {
     } else {
         reply(cfd, "OK! FW clear stats\n");
     }
+}
+
+static void handle_stats_shadow(int cfd, char **argv, int argc) {
+    (void)argv;
+    (void)argc;
+    char buf[2048];
+    if (shadow_format_status(buf, sizeof(buf)) < 0)
+        reply(cfd, "Failed! DETECT status unavailable\n");
+    else
+        reply(cfd, "%s", buf);
+}
+
+static void handle_set_enforce(int cfd, char **argv, int argc) {
+    extern struct bpf_object *obj;
+    if (argc < 2) {
+        reply(cfd, "Failed! usage: SET_ENFORCE 0|1\n");
+        return;
+    }
+    int en = atoi(argv[1]);
+    if (set_enforce_drop_invalid(obj, en) < 0)
+        reply(cfd, "Failed! could not update enforce_drop_invalid\n");
+    else
+        reply(cfd, "OK! enforce_drop_invalid=%d\n", en ? 1 : 0);
+}
+
+static void handle_set_adaptive(int cfd, char **argv, int argc) {
+    extern struct bpf_object *obj;
+    if (argc < 2) {
+        reply(cfd, "Failed! usage: SET_ADAPTIVE 0|1\n");
+        return;
+    }
+    int en = atoi(argv[1]);
+    if (set_prefer_adaptive(obj, en) < 0)
+        reply(cfd, "Failed! could not update prefer_adaptive\n");
+    else
+        reply(cfd, "OK! prefer_adaptive=%d\n", en ? 1 : 0);
+}
+
+static void handle_stats_cap(int cfd, char **argv, int argc) {
+    (void)argv;
+    (void)argc;
+    refresh_capacity_profile();
+    struct capacity_profile *p = &global_capacity_profile;
+    reply(cfd,
+          "OK! CAP link_mbps=%u rx_queues=%u xdp_cores=%u "
+          "line_pps=%llu cpu_pps=%llu host_ceiling_pps=%llu host_ceiling_bps=%llu "
+          "cap_syn=%llu cap_ack=%llu cap_rst=%llu cap_icmp=%llu "
+          "cap_udp=%llu cap_gre=%llu cap_data=%llu http3=%u gre_tunnels=%u\n",
+          p->link_mbps, p->rx_queues, p->xdp_cores,
+          (unsigned long long)p->line_pps, (unsigned long long)p->cpu_pps,
+          (unsigned long long)p->host_ceiling_pps, (unsigned long long)p->host_ceiling_bps,
+          (unsigned long long)p->cap_syn, (unsigned long long)p->cap_ack,
+          (unsigned long long)p->cap_rst, (unsigned long long)p->cap_icmp,
+          (unsigned long long)p->cap_udp, (unsigned long long)p->cap_gre,
+          (unsigned long long)p->cap_data, p->http3, p->gre_tunnels);
+}
+
+static void handle_stats_det(int cfd, char **argv, int argc) {
+    (void)argv;
+    (void)argc;
+    /* Last 1s Phase 1 snapshot; exclusive classes sum ≈ NIC IPv4 pps. */
+    reply(cfd,
+          "OK! DET total_pkts=%llu total_bytes=%llu "
+          "SYN=%llu ACK=%llu SYNACK=%llu RST=%llu "
+          "DATA=%llu SOCKET=%llu ICMP=%llu UDP=%llu GRE=%llu OTHER=%llu "
+          "STOMP_lbl=%llu HANDSHAKE_lbl=%llu "
+          "inv_ihl=%llu inv_doff=%llu inv_land=%llu inv_frag=%llu "
+          "inv_null=%llu inv_xmas=%llu inv_synfin=%llu inv_synrst=%llu "
+          "inv_synurg=%llu inv_fin=%llu\n",
+          global_det_stats.total_pkts, global_det_stats.total_bytes,
+          global_det_stats.class_pkts[DET_CLASS_SYN],
+          global_det_stats.class_pkts[DET_CLASS_ACK],
+          global_det_stats.class_pkts[DET_CLASS_SYNACK],
+          global_det_stats.class_pkts[DET_CLASS_RST],
+          global_det_stats.class_pkts[DET_CLASS_DATA],
+          global_det_stats.class_pkts[DET_CLASS_SOCKET],
+          global_det_stats.class_pkts[DET_CLASS_ICMP],
+          global_det_stats.class_pkts[DET_CLASS_UDP],
+          global_det_stats.class_pkts[DET_CLASS_GRE],
+          global_det_stats.class_pkts[DET_CLASS_OTHER],
+          global_det_stats.class_pkts[DET_CLASS_STOMP],
+          global_det_stats.class_pkts[DET_CLASS_HANDSHAKE],
+          global_det_stats.invalid_pkts[INVALID_BAD_IHL],
+          global_det_stats.invalid_pkts[INVALID_BAD_DOFF],
+          global_det_stats.invalid_pkts[INVALID_LAND],
+          global_det_stats.invalid_pkts[INVALID_TCP_FRAG],
+          global_det_stats.invalid_pkts[INVALID_FLAG_NULL],
+          global_det_stats.invalid_pkts[INVALID_FLAG_XMAS],
+          global_det_stats.invalid_pkts[INVALID_FLAG_SYN_FIN],
+          global_det_stats.invalid_pkts[INVALID_FLAG_SYN_RST],
+          global_det_stats.invalid_pkts[INVALID_FLAG_SYN_URG],
+          global_det_stats.invalid_pkts[INVALID_FLAG_FIN_ONLY]);
 }
 
 static void handle_stats_fw(int cfd, char **argv, int argc) {
@@ -621,6 +716,11 @@ static const struct cmd_entry cmds[] = {
     {"RELOAD_FW",   handle_reload_fw},
     {"CLEAR_FW",    handle_clear_fw},
     {"STATS_FW",    handle_stats_fw},
+    {"STATS_DET",   handle_stats_det},
+    {"STATS_CAP",   handle_stats_cap},
+    {"STATS_SHADOW", handle_stats_shadow},
+    {"SET_ENFORCE", handle_set_enforce},
+    {"SET_ADAPTIVE", handle_set_adaptive},
     {"LIST_BLOCK_IP",      handle_list_block_ip},
     {"LIST_ALLOW_IP",      handle_list_allow_ip},
     {"CLEAR_BLOCK_IP",     handle_clear_deny_ip},

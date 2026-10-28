@@ -6,9 +6,12 @@
  *      blocked IPs into tcp_established_map or count their connections
  *   2. Fix connection counter — read current count before adjusting,
  *      and deduplicate UPDATE events (only increment on first ESTABLISHED)
- *   3. Track both directions (orig + reply) in tcp_established_map
+ *   3. Track inbound (orig) direction only in tcp_established_map (Phase 0 C2:
+ *      reply-tuple keys like server:443 let spoofed packets fast-path)
  *   4. Suppress log spam — only log once when connection limit first reached
  *   5. Initial dump uses BPF_NOEXIST to avoid double-counting
+ *   6. Require a real SYN-seen handshake (IP_CT_TCP_FLAG_SEEN_SYN) when the
+ *      attr is available; with tcp_loose=0, loose pickups are rare (C4)
  */
 
  #include <ebpf_firewall_common.h>
@@ -20,8 +23,14 @@
  #define MAX_RETRIES 3
  #define RECOVERY_DELAY_US 1000
  #define BUFFER_SIZE        (2 * 1024 * 1024)
- /* SYN bit in the TCP flags conntrack records. */
- #define CT_TCP_SYN         0x02
+ #define BUFFER_SIZE_MAX    (256 * 1024 * 1024)
+ /* A full dump of a multi-million-entry table under flood is itself expensive. */
+ #define RECOVERY_DUMP_MIN_INTERVAL_S 10
+ /*
+  * nf_conntrack ATTR_TCP_FLAGS_* are IP_CT_TCP_FLAG_* bits, not wire TCP flags.
+  * 0x02 is IP_CT_TCP_FLAG_SACK_PERM (not SYN). 0x10 is IP_CT_TCP_FLAG_SEEN_SYN.
+  */
+ #define CT_TCP_FLAG_SEEN_SYN  0x10
  
  static struct nfct_handle *h = NULL;
  extern int exiting;
@@ -289,8 +298,7 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
  }
  
  
- /* 1 if this flow was opened with a SYN. Loose pickup of a raw PSH+ACK
-  * has no SYN bit; those must not enter the established fast path. */
+ /* 1 if conntrack saw a real SYN for this flow (not a loose mid-stream pickup). */
  static int conntrack_saw_syn(const struct nf_conntrack *ct)
  {
      uint8_t flags = 0;
@@ -304,9 +312,10 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
          flags |= nfct_get_attr_u8(ct, ATTR_TCP_FLAGS_REPL);
          have_flags = 1;
      }
+     /* No flag attrs: allow only when loose is off (sysctl). Prefer SEEN_SYN. */
      if (!have_flags)
          return 1;
-     return (flags & CT_TCP_SYN) != 0;
+     return (flags & CT_TCP_FLAG_SEEN_SYN) != 0;
  }
 
  /* Connection event callback */
@@ -363,47 +372,34 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
           * Use BPF_NOEXIST during the dump to avoid re-counting.
           * After the dump, use BPF_ANY (idempotent — value is always 1).
           */
+         /* Phase 0 C2: insert only the inbound (orig) 4-tuple endpoint.
+          * Reply keys such as (server_ip, 443) let any spoof from that tuple
+          * skip flood checks toward any destination. */
          __u8 val = 1;
          __u64 key_orig = make_established_key(orig_sip, orig_sport);
-         __u64 key_repl = make_established_key(repl_sip, repl_sport);
  
          if (!initial_dump_complete) {
-             /* During dump: only insert if not already present.
-              * If BPF_NOEXIST fails (key exists), the entry was already counted. */
              int orig_new = (bpf_map_update_elem(established_map_fd, &key_orig, &val, BPF_NOEXIST) == 0);
-             bpf_map_update_elem(established_map_fd, &key_repl, &val, BPF_NOEXIST);
- 
-             /* Only count the connection once (keyed on original direction) */
-             if (orig_new) {
+             if (orig_new)
                  connection_count_adjust(orig_sip, +1);
-             }
          } else {
-             /* After dump: normal operation. Check if this is a genuinely new
-              * established session by trying NOEXIST first. If it fails, the
-              * entry already exists — it's just a conntrack state update, not
-              * a new connection. */
              int is_new = (bpf_map_update_elem(established_map_fd, &key_orig, &val, BPF_NOEXIST) == 0);
-             bpf_map_update_elem(established_map_fd, &key_repl, &val, BPF_ANY);
- 
-             if (is_new) {
+             if (is_new)
                  connection_count_adjust(orig_sip, +1);
-             }
          }
      }
  
      if (type == NFCT_T_DESTROY) {
-         /* Check if the entry actually existed before deleting,
-          * so we only decrement the counter if we actually tracked it */
          __u64 key_orig = make_established_key(orig_sip, orig_sport);
          __u8 val;
          int was_tracked = (bpf_map_lookup_elem(established_map_fd, &key_orig, &val) == 0);
  
          established_map_del(orig_sip, orig_sport);
+         /* Drop any legacy reply-tuple entries left from older builds. */
          established_map_del(repl_sip, repl_sport);
  
-         if (was_tracked) {
+         if (was_tracked)
              connection_count_adjust(orig_sip, -1);
-         }
      }
  
      return NFCT_CB_CONTINUE;
@@ -430,6 +426,9 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
          return NULL;
      }
  
+     time_t last_recovery_dump = 0;
+     unsigned long overflows_suppressed = 0;
+
      while (!exiting) {
          int n = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
          if (n < 0) {
@@ -441,10 +440,20 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
              if (events[i].data.fd == nfctfd) {
                  int ret = nfct_catch(handle);
                  if (ret < 0 && errno == ENOBUFS) {
-                     LOG_W("Conntrack buffer overflow, recovering...\n");
+                     time_t now = time(NULL);
+                     if (now - last_recovery_dump < RECOVERY_DUMP_MIN_INTERVAL_S) {
+                         overflows_suppressed++;
+                         continue;
+                     }
+                     LOG_W("Conntrack buffer overflow, recovering... (suppressed=%lu)\n",
+                           overflows_suppressed);
+                     overflows_suppressed = 0;
+                     last_recovery_dump = now;
                      usleep(RECOVERY_DELAY_US);
-                     current_buf_size *= 2;
-                     set_socket_buffer_size(nfctfd, current_buf_size);
+                     if (current_buf_size < BUFFER_SIZE_MAX) {
+                         current_buf_size *= 2;
+                         set_socket_buffer_size(nfctfd, current_buf_size);
+                     }
                      if (nfct_query(handle, NFCT_Q_DUMP, &ct_family) < 0) {
                          LOG_E("Recovery dump failed: %s\n", strerror(errno));
                      } else {
@@ -503,6 +512,35 @@ int flush_all_tcp_conntrack(void)
     return 0;
 }
 
+/*
+ * tcp_loose=1 lets conntrack adopt every mid-stream ACK/PSH+ACK that reaches the
+ * stack as a new ESTABLISHED entry (one NEW event per spoofed packet). sysctl.d
+ * cannot set it if nf_conntrack loads after boot-time sysctl, so enforce it here,
+ * after nfct_open has the module loaded.
+ */
+static void enforce_tcp_loose_off(void)
+{
+    const char *path = "/proc/sys/net/netfilter/nf_conntrack_tcp_loose";
+    int cur = -1;
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        LOG_W("%s: %s\n", path, strerror(errno));
+        return;
+    }
+    if (fscanf(f, "%d", &cur) != 1)
+        cur = -1;
+    fclose(f);
+    if (cur == 0)
+        return;
+
+    f = fopen(path, "w");
+    if (!f || fputs("0\n", f) < 0 || fclose(f) != 0) {
+        LOG_W("set %s=0 failed: %s\n", path, strerror(errno));
+        return;
+    }
+    LOG_I("nf_conntrack_tcp_loose %d -> 0\n", cur);
+}
+
  int init_conntrack(int tcp_established_fd, int tcp_connection_fd, int block_ips_fd) {
      pthread_t ct_thread;
  
@@ -514,6 +552,7 @@ int flush_all_tcp_conntrack(void)
          LOG_E("nfct_open %s\n", strerror(errno));
          return -1;
      }
+     enforce_tcp_loose_off();
  
      set_socket_buffer_size(nfct_fd(h), current_buf_size);
      established_map_fd = tcp_established_fd;

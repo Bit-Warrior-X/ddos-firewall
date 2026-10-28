@@ -15,6 +15,79 @@ l4_bp = Blueprint('l4', __name__, url_prefix='/API/L4')
 
 _GEO_NAME_TO_ISO_CACHE = {}
 
+# Adaptive firewall.config keys the panel may push (camelCase → snake_case).
+# Only these may be appended when absent; classic-only keys are never invented
+# on an adaptive file (avoids polluting prefer_adaptive layouts).
+_ADAPTIVE_CONFIG_KEYS = {
+    "prefer_adaptive",
+    "enforce_drop_invalid",
+    "detection_level",
+    "baseline_k",
+    "baseline_m",
+    "baseline_seasonal",
+    "learning_days",
+    "cusum",
+    "invalid_floor_pps",
+    "invalid_ratio",
+    "flow_pps_k",
+    "src_bucket_k",
+    "confirm_windows",
+    "exit_windows",
+    "quiet_clear_windows",
+    "alert_hold_windows",
+    "cooldown_seconds",
+    "escalate_after_windows",
+    "block_initial_seconds",
+    "block_max_seconds",
+    "service_http3",
+    "service_dns",
+    "service_gre_tunnels",
+    "quic_header_check",
+    "icmp_drop_fragments",
+    "synack_match_outbound",
+    "nic_drop_trigger_seconds",
+    "softirq_trigger_percent",
+    "softirq_trigger_seconds",
+    "attack_log_dir",
+    "ipv6",
+    "stats_detail_sample_divisor",
+}
+
+_ADAPTIVE_PAYLOAD_MAP = {
+    "preferAdaptive": ("prefer_adaptive", "bool_int"),
+    "enforceDropInvalid": ("enforce_drop_invalid", "bool_int"),
+    "detectionLevel": ("detection_level", "int"),
+    "baselineK": ("baseline_k", "int"),
+    "baselineM": ("baseline_m", "int"),
+    "baselineSeasonal": ("baseline_seasonal", "str"),
+    "learningDays": ("learning_days", "int"),
+    "cusum": ("cusum", "bool_int"),
+    "invalidFloorPps": ("invalid_floor_pps", "int"),
+    "invalidRatio": ("invalid_ratio", "float"),
+    "flowPpsK": ("flow_pps_k", "int"),
+    "srcBucketK": ("src_bucket_k", "int"),
+    "confirmWindows": ("confirm_windows", "int"),
+    "exitWindows": ("exit_windows", "int"),
+    "quietClearWindows": ("quiet_clear_windows", "int"),
+    "alertHoldWindows": ("alert_hold_windows", "int"),
+    "cooldownSeconds": ("cooldown_seconds", "int"),
+    "escalateAfterWindows": ("escalate_after_windows", "int"),
+    "blockInitialSeconds": ("block_initial_seconds", "int"),
+    "blockMaxSeconds": ("block_max_seconds", "int"),
+    "serviceHttp3": ("service_http3", "bool_int"),
+    "serviceDns": ("service_dns", "bool_int"),
+    "serviceGreTunnels": ("service_gre_tunnels", "bool_int"),
+    "quicHeaderCheck": ("quic_header_check", "bool_int"),
+    "icmpDropFragments": ("icmp_drop_fragments", "bool_int"),
+    "synackMatchOutbound": ("synack_match_outbound", "bool_int"),
+    "nicDropTriggerSeconds": ("nic_drop_trigger_seconds", "int"),
+    "softirqTriggerPercent": ("softirq_trigger_percent", "int"),
+    "softirqTriggerSeconds": ("softirq_trigger_seconds", "int"),
+    "attackLogDir": ("attack_log_dir", "str"),
+    "ipv6": ("ipv6", "bool_int"),
+    "statsDetailSampleDivisor": ("stats_detail_sample_divisor", "int"),
+}
+
 def _normalize_status(value):
     if isinstance(value, bool):
         return "on" if value else "off"
@@ -31,7 +104,14 @@ def _normalize_status(value):
 def _normalize_bool_int(value):
     return 1 if _normalize_status(value) == "on" else 0
 
-def _update_firewall_config(updates):
+def _update_firewall_config(updates, existing_keys=None):
+    """Merge key=value updates into firewall.config.
+
+    Existing keys are rewritten in place. Keys absent from the file are
+    appended only when they are adaptive (`_ADAPTIVE_CONFIG_KEYS`); classic
+    panel fields that the adaptive layout omits are skipped so we never
+    invent black_ip_duration / *_threshold / *_protection_duration rows.
+    """
     try:
         with open(config.FIREWALL_CONFIG_PATH, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
@@ -39,6 +119,14 @@ def _update_firewall_config(updates):
         return False, f"Config file not found at {config.FIREWALL_CONFIG_PATH}"
     except OSError as exc:
         return False, f"Failed to read config file: {exc}"
+
+    if existing_keys is None:
+        existing_keys = set()
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            existing_keys.add(stripped.split("=", 1)[0].strip())
 
     found = set()
     new_lines = []
@@ -50,14 +138,25 @@ def _update_firewall_config(updates):
 
         key = stripped.split("=", 1)[0].strip()
         if key in updates and updates[key] is not None:
-            new_lines.append(f"{key} = {updates[key]}\n")
+            # Preserve trailing inline comment when present.
+            comment = ""
+            raw = line.rstrip("\n")
+            hash_idx = raw.find("#")
+            if hash_idx >= 0 and "=" in raw[:hash_idx]:
+                comment = " " + raw[hash_idx:].rstrip()
+            new_lines.append(f"{key} = {updates[key]}{comment}\n")
             found.add(key)
         else:
             new_lines.append(line)
 
-    missing = [key for key, value in updates.items() if value is not None and key not in found]
+    missing = [
+        key for key, value in updates.items()
+        if value is not None
+        and key not in found
+        and (key in existing_keys or key in _ADAPTIVE_CONFIG_KEYS)
+    ]
     if missing:
-        new_lines.append("\n")
+        new_lines.append("\n#---- panel adaptive overrides ----\n")
         for key in missing:
             new_lines.append(f"{key} = {updates[key]}\n")
 
@@ -70,6 +169,16 @@ def _update_firewall_config(updates):
         return False, f"Failed to write config file: {exc}"
 
     return True, "Config updated"
+
+
+def _coerce_adaptive_value(kind, value):
+    if kind == "bool_int":
+        return _normalize_bool_int(value)
+    if kind == "int":
+        return int(value)
+    if kind == "float":
+        return float(value)
+    return str(value)
 
 def _resolve_geo_path(path_value):
     if not path_value:
@@ -142,7 +251,8 @@ def _read_firewall_config():
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        parsed[key.strip()] = value.strip()
+        value = value.split("#", 1)[0].strip()
+        parsed[key.strip()] = value
 
     return True, parsed
 
@@ -811,6 +921,19 @@ def l4_firewall_data():
             updates["socket_fin_threshold"] = int(data["socketFinThreshold"])
             updates["socket_fixed_threshold"] = int(data["socketFixedThreshold"])
             updates["socket_fixed_check_duration"] = int(data["socketFixedCheckDuration"])
+
+        # Optional adaptive keys (panel → Sparta). Snake_case passthrough also accepted.
+        for camel, (snake, kind) in _ADAPTIVE_PAYLOAD_MAP.items():
+            raw = data.get(camel, data.get(snake, None))
+            if raw is None:
+                continue
+            updates[snake] = _coerce_adaptive_value(kind, raw)
+        for snake in _ADAPTIVE_CONFIG_KEYS:
+            if snake in updates:
+                continue
+            if snake in data:
+                # Unknown typing — keep as string/int as sent
+                updates[snake] = data[snake]
     except (ValueError, TypeError) as exc:
         return jsonify({"status": "error", "message": f"Invalid parameter type: {exc}"}), 400
 
@@ -820,16 +943,22 @@ def l4_firewall_data():
 
     changed_updates = {}
     for key, value in updates.items():
+        # Never invent classic-only rows on an adaptive layout.
+        if key not in current_config and key not in _ADAPTIVE_CONFIG_KEYS:
+            continue
         new_value = str(value)
         if current_config.get(key) != new_value:
             changed_updates[key] = value
 
     if changed_updates:
-        config_ok, config_msg = _update_firewall_config(changed_updates)
+        config_ok, config_msg = _update_firewall_config(
+            changed_updates, existing_keys=set(current_config.keys())
+        )
         if not config_ok:
             return jsonify({"status": "error", "message": config_msg}), 500
 
     results = {}
+    adaptive_changed = [k for k in changed_updates if k in _ADAPTIVE_CONFIG_KEYS]
 
     syn_changed = any(key.startswith("syn_") or key == "challenge_timeout" for key in changed_updates)
     ack_changed = any(key.startswith("ack_") for key in changed_updates)
@@ -967,6 +1096,9 @@ def l4_firewall_data():
             data["dev"],
             data["attachMode"]
         )
+    elif adaptive_changed:
+        # Adaptive keys have no live CLI setters; reload after classic updates.
+        results["reload"] = execute_cli_command(["sparta_cli", "RELOAD_FW"])
 
     failures = {key: val for key, val in results.items() if val.get("status") == "error"}
     if failures:

@@ -89,6 +89,8 @@ USR_SRCS     := userspace/src/ebpf_firewall_unix.c \
                 userspace/src/ebpf_firewall_geo.c \
                 userspace/src/ebpf_firewall_nginx.c \
 				userspace/src/ebpf_firewall_utils.c \
+				userspace/src/ebpf_firewall_shadow.c \
+				userspace/src/ebpf_firewall_mapsize.c \
 				userspace/src/base64.c
 
 USR_CLI      := userspace/src/ebpf_firewall_cli.c
@@ -103,7 +105,7 @@ USR_INCLUDES = -I$(USR_INC_DIR) -I. $(MODE_FLAGS) $(LIBBPF_USR_CFLAGS)
 
 INSTALL_DIR := /usr/local/share/dorian/sparta
 
-USR_LIBS     := $(LIBBPF_LIBS) -lnetfilter_conntrack -lpthread -lcrypto -lsqlite3
+USR_LIBS     := $(LIBBPF_LIBS) -lnetfilter_conntrack -lpthread -lcrypto -lsqlite3 -lm
 USR_PROMLIBS := -lprom -lpromhttp -lmicrohttpd -pthread
 
 PROM_ENABLED := $(if $(wildcard /usr/include/prom.h),$(if $(wildcard /usr/include/promhttp.h),1,0),0)
@@ -160,6 +162,9 @@ install: all
 	@echo ">> Installing eBPF firewall to $(INSTALL_DIR)"
 	@sudo mkdir -p $(INSTALL_DIR)/bin
 	@sudo cp -r $(BUILD_DIR)/* $(INSTALL_DIR)/
+	@sudo cp -f $(USR_BIN) $(USR_CLIBIN) $(INSTALL_DIR)/bin/
+	@if [ -f "$(USR_PROMBIN)" ]; then sudo cp -f $(USR_PROMBIN) $(INSTALL_DIR)/bin/; fi
+	@sudo cp -f firewall.config $(INSTALL_DIR)/firewall.config
 	@sudo install -m 755 scripts/set-firewall-dev.sh $(INSTALL_DIR)/bin/set-firewall-dev.sh
 	@sudo $(INSTALL_DIR)/bin/set-firewall-dev.sh $(INSTALL_DIR)/firewall.config
 	@echo "Installation complete. Files copied to $(INSTALL_DIR)"

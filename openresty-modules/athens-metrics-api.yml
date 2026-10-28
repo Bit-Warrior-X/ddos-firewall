@@ -712,6 +712,16 @@ components:
         traffic_nic_tx: 3145728000
         bandwidth_nic_rx: 209715200
         bandwidth_nic_tx: 419430400
+        packets_nic_tx: 3145728
+        pps_nic_tx: 52428.8
+        packets_nic_rx: 1458000
+        pps_nic_rx: 24300
+        packets_nic_dropped: 60000
+        pps_nic_dropped: 1000
+        packets_xdp_rx: 1398000
+        pps_xdp_rx: 23300
+        packets_xdp_blocked: 180000
+        pps_xdp_blocked: 3000
         traffic_l7_rx: 52428800
         traffic_l7_tx: 209715200
         bandwidth_l7_rx: 6990506
@@ -1349,6 +1359,44 @@ components:
               description: NIC RX bits/s
             bandwidth_nic_tx:
               type: number
+            packets_nic_tx:
+              type: number
+              description: Outgoing packets on that NIC during this bucket (`tx_packets` delta)
+            pps_nic_tx:
+              type: number
+              description: Outgoing packets/s (`packets_nic_tx` / seconds since the previous NIC sample)
+            packets_nic_rx:
+              type: number
+              description: |
+                Incoming packets at the NIC during this bucket. Sum of bond slaves.
+                Equals `packets_xdp_rx` + `packets_nic_dropped`: frames passed up,
+                dropped or transmitted by XDP, plus frames discarded by the PHY.
+                Zero until a baseline exists.
+            pps_nic_rx:
+              type: number
+              description: NIC incoming packets/s (`packets_nic_rx` / seconds since the previous sample)
+            packets_nic_dropped:
+              type: number
+              description: |
+                Packets dropped by the NIC before XDP (`rx_discards_phy` delta).
+                Not included in `packets_xdp_rx`.
+            pps_nic_dropped:
+              type: number
+              description: NIC-level dropped packets/s
+            packets_xdp_rx:
+              type: number
+              description: |
+                Packets the XDP program received. max(sysfs, ethtool) `rx_packets`
+                plus `rx_xdp_drop`, `rx_xdp_tx_xmit` and `rx_xdp_redirect`.
+            pps_xdp_rx:
+              type: number
+              description: XDP incoming packets/s
+            packets_xdp_blocked:
+              type: number
+              description: Packets XDP dropped (`rx_xdp_drop` delta). Not counted in `rx_packets`.
+            pps_xdp_blocked:
+              type: number
+              description: XDP blocked packets/s
         - $ref: '#/components/schemas/L7Counters'
 
     SiteTrafficItem:
@@ -1593,6 +1641,12 @@ components:
         traffic_cached_tx:
           type: number
           description: Response bytes for those cached requests
+        cache_hit_ratio:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: cached_request_count / request_count
 
     ContentTypeRequestStatsResponse:
       type: object

@@ -236,11 +236,17 @@ function _M.run()
         end
     end
 
+    -- Resolve per-site origin. Never fall back to :9000 (stats "Welcome" page).
+    local backend
     if upstream_redis.get_backend then
-        ngx.var.backend = upstream_redis.get_backend(site_id)
-    else
-        ngx.var.backend = "http://127.0.0.1:9000"
+        backend = upstream_redis.get_backend(site_id)
     end
+    if type(backend) ~= "string" or backend == "" or backend:find("127%.0%.0%.1:9000", 1, false) then
+        ngx.log(ngx.ERR, "acl_access: no origin upstream for site_id=",
+            tostring(site_id), " host=", tostring(ngx.var.http_host or ngx.var.host))
+        return ngx.exit(502)
+    end
+    ngx.var.backend = backend
 end
 
 return _M

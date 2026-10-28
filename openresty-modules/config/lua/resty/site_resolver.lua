@@ -1,10 +1,14 @@
 -- Resolve request Host to site_id via Redis domain:{host} mapping.
 -- Also helpers to enumerate site→domains for ACL merging.
+--
+-- Panel often stores domain keys as "host:port" (e.g. xstream.wtf:8080).
+-- Cache keys MUST include server_port so :80 / :2052 / :8080 do not collide
+-- when the Host header is bare "xstream.wtf".
 
 local redis = require "resty.redis"
 local ngx = ngx
 
-local _M = { _VERSION = "1.0.0" }
+local _M = { _VERSION = "1.1.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
 local SHM_NAME = "site_resolver"
@@ -14,9 +18,14 @@ local DOMAIN_MAP_TTL = 5
 local function get_redis(timeout)
     local red = redis:new()
     red:set_timeout(timeout or 500)
-    local ok, err = red:connect(REDIS_SOCK)
+    local ok, err = red:connect(REDIS_SOCK, { pool = "athens_redis_db0" })
     if not ok then
         return nil, err
+    end
+    local ok_sel, sel_err = red:select(0)
+    if not ok_sel then
+        red:close()
+        return nil, sel_err or "select_0_failed"
     end
     return red
 end
@@ -27,20 +36,56 @@ local function release_redis(red)
     end
 end
 
-local function normalize_host(host)
+local function strip_port(host)
     if not host or host == "" then
         return ""
     end
     host = tostring(host)
-    host = host:match("^([^:]+)") or host
+    -- [ipv6]:port
+    local v6 = host:match("^%[(.+)%]")
+    if v6 then
+        return v6:lower()
+    end
+    -- hostname:port or ipv4:port — only strip if trailing :digits
+    local bare, port = host:match("^(.+):(%d+)$")
+    if bare and port then
+        return bare:lower()
+    end
     return host:lower()
 end
 
-local function cache_site_id(host, site_id)
+local function cache_get(cache_key)
     local dict = ngx.shared[SHM_NAME]
-    if dict then
-        dict:set("id:" .. host, site_id and tostring(site_id) or "", DOMAIN_MAP_TTL)
+    if not dict then
+        return nil, false
     end
+    local cached = dict:get("id:" .. cache_key)
+    if cached == nil then
+        return nil, false
+    end
+    if cached == "" then
+        return nil, true
+    end
+    return tonumber(cached), true
+end
+
+local function cache_set(cache_key, site_id)
+    local dict = ngx.shared[SHM_NAME]
+    if not dict then
+        return
+    end
+    dict:set("id:" .. cache_key, site_id and tostring(site_id) or "", DOMAIN_MAP_TTL)
+end
+
+local function redis_get_domain(red, name)
+    if not name or name == "" then
+        return nil
+    end
+    local val = red:get("domain:" .. name)
+    if val and val ~= ngx.null and val ~= "" then
+        return tonumber(val)
+    end
+    return nil
 end
 
 --- Return site_id (number) for current request Host, or nil.
@@ -49,41 +94,47 @@ function _M.lookup_site_id(host)
         return ngx.ctx._site_id
     end
 
-    host = normalize_host(host or ngx.var.host or ngx.var.http_host or "")
-    if host == "" then
+    local http_host = tostring(host or ngx.var.http_host or ngx.var.host or "")
+    local bare = strip_port(http_host)
+    local port = tostring(ngx.var.server_port or "")
+    if bare == "" then
         ngx.ctx._site_id_resolved = true
         ngx.ctx._site_id = nil
         return nil
     end
 
-    local dict = ngx.shared[SHM_NAME]
-    if dict then
-        local cached = dict:get("id:" .. host)
-        if cached ~= nil then
-            local site_id = tonumber(cached)
-            ngx.ctx._site_id_resolved = true
-            ngx.ctx._site_id = site_id
-            return site_id
-        end
+    -- Port-scoped cache key (bare host alone is unsafe when multiple sites share it).
+    local cache_key = port ~= "" and (bare .. ":" .. port) or bare
+    local cached_id, hit = cache_get(cache_key)
+    if hit then
+        ngx.ctx._site_id_resolved = true
+        ngx.ctx._site_id = cached_id
+        return cached_id
     end
 
     local red, err = get_redis(500)
     if not red then
+        -- Do not negative-cache Redis failures — retry next request.
         ngx.log(ngx.WARN, "site_resolver: redis connect failed: ", tostring(err))
         ngx.ctx._site_id_resolved = true
         ngx.ctx._site_id = nil
         return nil
     end
 
-    local val = red:get("domain:" .. host)
+    local site_id
+    -- Prefer host:port keys (panel form), then bare host, then raw Host as stored.
+    if port ~= "" then
+        site_id = redis_get_domain(red, bare .. ":" .. port)
+    end
+    if not site_id then
+        site_id = redis_get_domain(red, bare)
+    end
+    if not site_id and http_host ~= "" and http_host:lower() ~= bare then
+        site_id = redis_get_domain(red, http_host:lower())
+    end
     release_redis(red)
 
-    local site_id
-    if val and val ~= ngx.null and val ~= "" then
-        site_id = tonumber(val)
-    end
-
-    cache_site_id(host, site_id)
+    cache_set(cache_key, site_id)
     ngx.ctx._site_id_resolved = true
     ngx.ctx._site_id = site_id
     return site_id

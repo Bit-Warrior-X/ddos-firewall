@@ -21,6 +21,8 @@ extensions = [
     Extension("core.license_check", ["core/license_check.py"]),
     Extension("core.license_monitor", ["core/license_monitor.py"]),
     Extension("core.edge_list_sync", ["core/edge_list_sync.py"]),
+    Extension("core.athens_cache_stats", ["core/athens_cache_stats.py"]),
+    Extension("core.cache_hit_sync", ["core/cache_hit_sync.py"]),
     Extension("core.backend_whitelist", ["core/backend_whitelist.py"]),
     Extension("core.initializer", ["core/initializer.py"]),
     Extension("core.app_factory", ["core/app_factory.py"]),

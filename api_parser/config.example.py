@@ -29,21 +29,49 @@ SERVER_PORT = 5000
 # API URLs (override in production config.py)
 API_BASE_URL = "http://127.0.0.1:8080/api".rstrip("/")
 
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
+
 # L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
 
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
+
 # Block/white list sync APIs used by both startup and firewall_main route.
 BLOCKLIST_API_URL = f"{API_BASE_URL}/get_blocklist_ips"
+
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
 WHITELIST_API_URL = f"{API_BASE_URL}/get_whitelist_ips"
+
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
 CHECK_BLOCKLIST_API_URL = f"{API_BASE_URL}/check_blacklist"
+
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
 
 TEMPORARY_BLACKLIST_NOTIFY_URL = f"{API_BASE_URL}/temporary_blacklist_added"
 
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
+
 # Edge → backend periodic sync of L4+L7 configure (SQLite, firewall.config, Redis)
 EDGE_CONFIG_REPORT_URL = f"{API_BASE_URL}/report_edge_configure"
+
+# Prefer IPv4 to panel when the edge has no default IPv6 route
+FORCE_IPV4 = True
 EDGE_L4_LISTS_REPORT_URL = EDGE_CONFIG_REPORT_URL
 EDGE_LIST_SYNC_INTERVAL = 60
 EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS = False
+
+# L7 cache-hit UI (content-type ratios + top miss URLs from Athens :9000)
+CACHE_HIT_REPORT_URL = f"{API_BASE_URL}/report_cache_hit"
+CACHE_HIT_SYNC_INTERVAL = 60
+CACHE_HIT_BUCKET_SECONDS = 60
+CACHE_HIT_TOP_MISS_URLS = 50
+ATHENS_STATS_TIMEOUT = 5
 
 # Redis configuration
 REDIS_SOCK = "/tmp/redis.sock"

@@ -172,25 +172,162 @@ local function note_nic_choice(stats_cache, configured, chosen, reason)
     end
 end
 
-local function read_nic_bytes(dev)
+local function read_nic_counter(dev, name)
     if not dev or dev == "" then
-        return nil, nil
+        return nil
     end
+    local file = io.open("/sys/class/net/" .. dev .. "/statistics/" .. name, "r")
+    if not file then
+        return nil
+    end
+    local v = file:read("*l")
+    file:close()
+    return tonumber(v)
+end
 
-    local base = "/sys/class/net/" .. dev .. "/statistics/"
+--- Cumulative NIC counters. Bytes are required; packet counters are nil when
+--- that statistics file is missing. A missing previous sample yields a 0 delta.
+local function read_nic_counters(dev)
+    local rx_bytes = read_nic_counter(dev, "rx_bytes")
+    local tx_bytes = read_nic_counter(dev, "tx_bytes")
+    if not rx_bytes or not tx_bytes then
+        return nil
+    end
+    return {
+        rx_bytes = rx_bytes,
+        tx_bytes = tx_bytes,
+        rx_packets = read_nic_counter(dev, "rx_packets"),
+        tx_packets = read_nic_counter(dev, "tx_packets"),
+    }
+end
 
-    local function read_counter(name)
-        local path = base .. name
-        local file = io.open(path, "r")
-        if not file then
+local function counter_delta(current, previous)
+    if current and previous and current >= previous then
+        return current - previous
+    end
+    return 0
+end
+
+local function bond_slaves(dev)
+    if not valid_dev_name(dev) then
+        return nil
+    end
+    local f = io.open("/sys/class/net/" .. dev .. "/bonding/slaves", "r")
+    if not f then
+        return nil
+    end
+    local text = f:read("*a") or ""
+    f:close()
+    local slaves = {}
+    for name in text:gmatch("%S+") do
+        if valid_dev_name(name) then
+            slaves[#slaves + 1] = name
+        end
+    end
+    if #slaves == 0 then
+        return nil
+    end
+    return slaves
+end
+
+-- One ethtool -S pass. Aggregate keys win; per-queue rxN_* lines are used only
+-- when that aggregate is absent, so the two are never added together.
+local ETHTOOL_RX_KEYS = {
+    rx_packets = true,
+    rx_discards_phy = true,
+    rx_xdp_drop = true,
+    rx_xdp_tx_xmit = true,
+    rx_xdp_redirect = true,
+}
+
+local function ethtool_perq_key(key)
+    local rest = key:match("^rx%d+_(.+)$")
+    if not rest then
+        return nil
+    end
+    local agg = "rx_" .. rest
+    if ETHTOOL_RX_KEYS[agg] then
+        return agg
+    end
+    return nil
+end
+
+local function read_ethtool_rx(dev)
+    if not valid_dev_name(dev) then
+        return nil
+    end
+    local pipe = io.popen("ethtool -S " .. dev .. " 2>/dev/null")
+    if not pipe then
+        return nil
+    end
+    local agg, perq, any = {}, {}, false
+    for line in pipe:lines() do
+        local key, val = line:match("^%s*([%w_]+):%s*(%d+)%s*$")
+        local n = key and tonumber(val)
+        if n then
+            if ETHTOOL_RX_KEYS[key] then
+                agg[key] = n
+                any = true
+            else
+                local base = ethtool_perq_key(key)
+                if base then
+                    perq[base] = (perq[base] or 0) + n
+                    any = true
+                end
+            end
+        end
+    end
+    pipe:close()
+    if not any then
+        return nil
+    end
+    local out = {}
+    for key in pairs(ETHTOOL_RX_KEYS) do
+        if agg[key] ~= nil then
+            out[key] = agg[key]
+        else
+            out[key] = perq[key]
+        end
+    end
+    return out
+end
+
+--- Sum ethtool RX counters across bond slaves. The bond device itself has none.
+--- A failed slave fails the whole read so a partial sum cannot move the baseline.
+local function read_nic_ethtool_rx(dev)
+    local slaves = bond_slaves(dev) or { dev }
+    local sum, saw = {}, {}
+    for _, name in ipairs(slaves) do
+        local part = read_ethtool_rx(name)
+        if not part then
             return nil
         end
-        local v = file:read("*l")
-        file:close()
-        return tonumber(v)
+        for key, val in pairs(part) do
+            if val ~= nil then
+                sum[key] = (sum[key] or 0) + val
+                saw[key] = true
+            end
+        end
     end
+    for key in pairs(ETHTOOL_RX_KEYS) do
+        if not saw[key] then
+            sum[key] = nil
+        end
+    end
+    return sum
+end
 
-    return read_counter("rx_bytes"), read_counter("tx_bytes")
+local function has_baseline(current, previous)
+    return current == nil or previous ~= nil
+end
+
+local function max_delta(current_a, previous_a, current_b, previous_b)
+    local a = counter_delta(current_a, previous_a)
+    local b = counter_delta(current_b, previous_b)
+    if a > b then
+        return a
+    end
+    return b
 end
 
 -- Scalar L7 counters kept as shm keys "<name>" (edge) and "s:<site>:<name>" (site).
@@ -437,6 +574,13 @@ function _M.collect_content_type_items(stats_cache, keys, consume, site_filter)
     local items = {}
     for _, row in pairs(rows) do
         if row.request_count > 0 then
+            local denom = tonumber(row.request_count) or 0
+            local cached = tonumber(row.cached_request_count) or 0
+            if denom > 0 then
+                row.cache_hit_ratio = math.min(cached / denom, 1)
+            else
+                row.cache_hit_ratio = 0
+            end
             table.insert(items, row)
         end
     end
@@ -687,33 +831,87 @@ local function collect_stats()
 
     local nic_rx_delta = 0
     local nic_tx_delta = 0
+    local nic_tx_pkts = 0
+    local nic_incoming = 0
+    local nic_dropped = 0
+    local xdp_incoming = 0
+    local xdp_blocked = 0
     local nic_elapsed = interval
 
     local configured, dev, reason = resolve_nic_dev()
     if dev then
         note_nic_choice(stats_cache, configured, dev, reason)
-        local cur_rx, cur_tx = read_nic_bytes(dev)
-        if cur_rx and cur_tx then
+        local cur = read_nic_counters(dev)
+        if cur then
             local prev_dev = stats_cache:get("last_nic_dev")
             local prev_rx = tonumber(stats_cache:get("last_nic_rx_bytes"))
             local prev_tx = tonumber(stats_cache:get("last_nic_tx_bytes"))
+            local prev_rx_pkts = tonumber(stats_cache:get("last_nic_rx_packets"))
+            local prev_tx_pkts = tonumber(stats_cache:get("last_nic_tx_packets"))
+            local prev_ethtool_rx = tonumber(stats_cache:get("last_ethtool_rx_packets"))
+            local prev_phy = tonumber(stats_cache:get("last_rx_discards_phy"))
+            local prev_xdp_drop = tonumber(stats_cache:get("last_nic_rx_xdp_drop"))
+            local prev_xdp_tx = tonumber(stats_cache:get("last_rx_xdp_tx"))
+            local prev_xdp_redir = tonumber(stats_cache:get("last_rx_xdp_redirect"))
             local prev_ts = tonumber(stats_cache:get("nic_sample_ts"))
-            if prev_dev == dev and prev_rx and prev_tx then
-                if cur_rx >= prev_rx then
-                    nic_rx_delta = cur_rx - prev_rx
-                end
-                if cur_tx >= prev_tx then
-                    nic_tx_delta = cur_tx - prev_tx
-                end
+            local eth = read_nic_ethtool_rx(dev)
+            if prev_dev == dev then
+                nic_rx_delta = counter_delta(cur.rx_bytes, prev_rx)
+                nic_tx_delta = counter_delta(cur.tx_bytes, prev_tx)
+                nic_tx_pkts = counter_delta(cur.tx_packets, prev_tx_pkts)
                 if prev_ts and current_time > prev_ts then
                     local elapsed = current_time - prev_ts
                     if elapsed >= 1 then
                         nic_elapsed = elapsed
                     end
                 end
+                -- Publish the four RX layers only once every part has a baseline.
+                -- Otherwise the first sample would mix a real delta with a zero.
+                -- A stored 0 is a real baseline (Lua treats 0 as false).
+                if eth
+                    and (cur.rx_packets ~= nil or eth.rx_packets ~= nil)
+                    and has_baseline(cur.rx_packets, prev_rx_pkts)
+                    and has_baseline(eth.rx_packets, prev_ethtool_rx)
+                    and has_baseline(eth.rx_discards_phy, prev_phy)
+                    and has_baseline(eth.rx_xdp_drop, prev_xdp_drop)
+                    and has_baseline(eth.rx_xdp_tx_xmit, prev_xdp_tx)
+                    and has_baseline(eth.rx_xdp_redirect, prev_xdp_redir)
+                then
+                    local passed = max_delta(cur.rx_packets, prev_rx_pkts, eth.rx_packets, prev_ethtool_rx)
+                    nic_dropped = counter_delta(eth.rx_discards_phy, prev_phy)
+                    xdp_blocked = counter_delta(eth.rx_xdp_drop, prev_xdp_drop)
+                    local xdp_tx = counter_delta(eth.rx_xdp_tx_xmit, prev_xdp_tx)
+                    local xdp_redir = counter_delta(eth.rx_xdp_redirect, prev_xdp_redir)
+                    -- XDP saw PASS + DROP + TX + REDIRECT. NIC also saw PHY discards.
+                    xdp_incoming = passed + xdp_blocked + xdp_tx + xdp_redir
+                    nic_incoming = xdp_incoming + nic_dropped
+                end
             end
-            stats_cache:set("last_nic_rx_bytes", cur_rx)
-            stats_cache:set("last_nic_tx_bytes", cur_tx)
+            stats_cache:set("last_nic_rx_bytes", cur.rx_bytes)
+            stats_cache:set("last_nic_tx_bytes", cur.tx_bytes)
+            if cur.rx_packets ~= nil then
+                stats_cache:set("last_nic_rx_packets", cur.rx_packets)
+            end
+            if cur.tx_packets ~= nil then
+                stats_cache:set("last_nic_tx_packets", cur.tx_packets)
+            end
+            if eth then
+                if eth.rx_packets ~= nil then
+                    stats_cache:set("last_ethtool_rx_packets", eth.rx_packets)
+                end
+                if eth.rx_discards_phy ~= nil then
+                    stats_cache:set("last_rx_discards_phy", eth.rx_discards_phy)
+                end
+                if eth.rx_xdp_drop ~= nil then
+                    stats_cache:set("last_nic_rx_xdp_drop", eth.rx_xdp_drop)
+                end
+                if eth.rx_xdp_tx_xmit ~= nil then
+                    stats_cache:set("last_rx_xdp_tx", eth.rx_xdp_tx_xmit)
+                end
+                if eth.rx_xdp_redirect ~= nil then
+                    stats_cache:set("last_rx_xdp_redirect", eth.rx_xdp_redirect)
+                end
+            end
             stats_cache:set("last_nic_dev", dev)
             stats_cache:set("nic_sample_ts", current_time)
         end
@@ -729,6 +927,21 @@ local function collect_stats()
     stats.traffic_nic_tx = nic_tx_delta
     stats.bandwidth_nic_rx = nic_rx_delta * 8 / nic_elapsed
     stats.bandwidth_nic_tx = nic_tx_delta * 8 / nic_elapsed
+    stats.packets_nic_tx = nic_tx_pkts
+    stats.pps_nic_tx = nic_tx_pkts / nic_elapsed
+    -- Four RX layers for this bucket. pps_* divides by seconds since the previous sample.
+    --   NIC incoming  = XDP incoming + NIC-level discards
+    --   XDP incoming  = passed to the stack + XDP_DROP + XDP_TX + XDP_REDIRECT
+    --   NIC dropped   = rx_discards_phy (never reached XDP)
+    --   XDP blocked   = rx_xdp_drop
+    stats.packets_nic_rx = nic_incoming
+    stats.pps_nic_rx = nic_incoming / nic_elapsed
+    stats.packets_nic_dropped = nic_dropped
+    stats.pps_nic_dropped = nic_dropped / nic_elapsed
+    stats.packets_xdp_rx = xdp_incoming
+    stats.pps_xdp_rx = xdp_incoming / nic_elapsed
+    stats.packets_xdp_blocked = xdp_blocked
+    stats.pps_xdp_blocked = xdp_blocked / nic_elapsed
 
     local payloads = {}
     for _, dim in ipairs(DIMENSIONS) do
@@ -785,13 +998,37 @@ local function seed_nic_baseline()
         end
         return
     end
-    local rx, tx = read_nic_bytes(dev)
-    if not rx or not tx then
+    local cur = read_nic_counters(dev)
+    if not cur then
         return
     end
     note_nic_choice(stats_cache, configured, dev, reason)
-    stats_cache:set("last_nic_rx_bytes", rx)
-    stats_cache:set("last_nic_tx_bytes", tx)
+    stats_cache:set("last_nic_rx_bytes", cur.rx_bytes)
+    stats_cache:set("last_nic_tx_bytes", cur.tx_bytes)
+    if cur.rx_packets ~= nil then
+        stats_cache:set("last_nic_rx_packets", cur.rx_packets)
+    end
+    if cur.tx_packets ~= nil then
+        stats_cache:set("last_nic_tx_packets", cur.tx_packets)
+    end
+    local eth = read_nic_ethtool_rx(dev)
+    if eth then
+        if eth.rx_packets ~= nil then
+            stats_cache:set("last_ethtool_rx_packets", eth.rx_packets)
+        end
+        if eth.rx_discards_phy ~= nil then
+            stats_cache:set("last_rx_discards_phy", eth.rx_discards_phy)
+        end
+        if eth.rx_xdp_drop ~= nil then
+            stats_cache:set("last_nic_rx_xdp_drop", eth.rx_xdp_drop)
+        end
+        if eth.rx_xdp_tx_xmit ~= nil then
+            stats_cache:set("last_rx_xdp_tx", eth.rx_xdp_tx_xmit)
+        end
+        if eth.rx_xdp_redirect ~= nil then
+            stats_cache:set("last_rx_xdp_redirect", eth.rx_xdp_redirect)
+        end
+    end
     stats_cache:set("last_nic_dev", dev)
     stats_cache:set("nic_sample_ts", ngx.now())
 end

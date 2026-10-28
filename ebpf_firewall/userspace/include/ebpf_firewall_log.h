@@ -75,6 +75,27 @@ void func_print(int id, const char* fmt, ...);
 #endif
 
 void print_firewall_status(struct tm * tm_info, int reason, __u32 srcip, __u64 req_id);
+void print_firewall_status_ex(struct tm *tm_info, int reason, __u32 srcip, __u64 req_id,
+                              const struct alert_extra *extra);
+void build_block_ip_message(int reason, __u32 srcip, __u64 req_id,
+                            char *build_message, size_t build_message_size);
+void build_block_ip_message_ex(int reason, __u32 srcip, __u64 req_id,
+                               char *build_message, size_t build_message_size,
+                               const struct alert_extra *extra);
+void build_attack_episode_message(int is_start, __u64 req_id,
+                                  char *build_message, size_t build_message_size,
+                                  const struct alert_extra *extra);
+const char *alert_class_for_reason(int reason);
 __u64 generate_attack_req_id(void);
+
+/* Main daemon log under log_dir: hourly files sparta-YYYYMMDD-HH.log + latest.log */
+void set_main_log_path(const char *path);
+void ensure_main_log(void);
+
+/* Per-episode attack archive under attack_log_dir (one file per req_id). */
+void set_attack_log_dir(const char *dir);
+int attack_log_open(__u64 req_id, const char *classes, const char *source);
+void attack_log_note(const char *fmt, ...);
+void attack_log_close(const char *classes);
 
 #endif

@@ -206,409 +206,420 @@ int parse_config(const char *filename, FirewallConfig *config) {
         return -1;
     }
 
-    char line[MAX_LINE_LENGTH];
-    char current_section[MAX_COMMENT_LENGTH] = {0};
-    
+    char line[MAX_LINE_LENGTH * 4];
+
     while (fgets(line, sizeof(line), file)) {
-        // Trim trailing newline
         line[strcspn(line, "\n")] = 0;
-        
-        // Skip empty lines
-        if (line[0] == '\0') continue;
-        
-        // Check for section headers
-        if (strstr(line, "GLOBAL") != NULL) {
-            strncpy(config->global_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "GLOBAL");
+        line[strcspn(line, "\r")] = 0;
+
+        char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0' || *p == '#')
             continue;
-        } else if (strstr(line, "SOCKET") != NULL) {
-            strncpy(config->socket_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "SOCKET");
+
+        /* Strip inline comments so values like "native # note" parse cleanly. */
+        char *hash = strchr(p, '#');
+        if (hash)
+            *hash = '\0';
+
+        char *eq = strchr(p, '=');
+        if (!eq)
             continue;
-        } else if (strstr(line, "STOMP") != NULL) {
-            strncpy(config->stomp_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "STOMP");
+        *eq = '\0';
+
+        char *key = p;
+        char *key_end = eq;
+        while (key_end > key && (key_end[-1] == ' ' || key_end[-1] == '\t'))
+            key_end--;
+        *key_end = '\0';
+
+        char *value = eq + 1;
+        while (*value == ' ' || *value == '\t')
+            value++;
+        char *value_end = value + strlen(value);
+        while (value_end > value && (value_end[-1] == ' ' || value_end[-1] == '\t'))
+            value_end--;
+        *value_end = '\0';
+
+        if (*key == '\0' || *value == '\0')
             continue;
-        } else if (strstr(line, "HandShake") != NULL || strstr(line, "Handshake") != NULL) {
-            strncpy(config->handshake_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "HANDSHAKE");
-            continue;
-        } else if (strstr(line, "SYN") != NULL) {
-            strncpy(config->syn_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "SYN");
-            continue;
-        } else if (strstr(line, "ACK") != NULL) {
-            strncpy(config->ack_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "ACK");
-            continue;
-        } else if (strstr(line, "RST") != NULL) {
-            strncpy(config->rst_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "RST");
-            continue;
-        } else if (strstr(line, "ICMP") != NULL) {
-            strncpy(config->icmp_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "ICMP");
-            continue;
-        } else if (strstr(line, "UDP") != NULL) {
-            strncpy(config->udp_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "UDP");
-            continue;
-        } else if (strstr(line, "GRE") != NULL) {
-            strncpy(config->gre_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "GRE");
-            continue;
-        } else if (strstr(line, "TCP Segment check") != NULL) {
-            strncpy(config->tcp_seg_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "TCP_SEG");
-            continue;
-        } else if (strstr(line, "Geo Location Check") != NULL) {
-            strncpy(config->geo_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "GEO");
-            continue;
-        } else if (strstr(line, "TCP Connection Limit") != NULL) {
-            strncpy(config->tcp_conn_comment, line, MAX_COMMENT_LENGTH);
-            strcpy(current_section, "TCP_CONN");
-            continue;
+
+        /* Match by key name only — adaptive configs have free-form comments
+         * that used to false-trigger section detection (e.g. "SYN cookies"). */
+        if (strcmp(key, "log") == 0) {
+            free(config->log_path);
+            config->log_path = strdup(value);
+        } else if (strcmp(key, "dev") == 0) {
+            free(config->dev);
+            config->dev = strdup(value);
+        } else if (strcmp(key, "attach_mode") == 0) {
+            free(config->attach_mode);
+            config->attach_mode = strdup(value);
+        } else if (strcmp(key, "black_ip_duration") == 0) {
+            config->black_ip_duration = atoi(value);
+        } else if (strcmp(key, "syn_valid") == 0) {
+            config->syn_valid = atoi(value);
+        } else if (strcmp(key, "syn_threshold") == 0) {
+            config->syn_threshold = atoi(value);
+        } else if (strcmp(key, "syn_burst_pkt") == 0) {
+            config->syn_burst_pkt = atoi(value);
+        } else if (strcmp(key, "syn_burst_count_per_sec") == 0) {
+            config->syn_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "syn_fixed_threshold") == 0) {
+            config->syn_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "syn_fixed_check_duration") == 0) {
+            config->syn_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "challenge_timeout") == 0) {
+            config->challenge_timeout = atoi(value);
+        } else if (strcmp(key, "syn_protection_duration") == 0) {
+            config->syn_protection_duration = atoi(value);
+        } else if (strcmp(key, "ack_valid") == 0) {
+            config->ack_valid = atoi(value);
+        } else if (strcmp(key, "ack_threshold") == 0) {
+            config->ack_threshold = atoi(value);
+        } else if (strcmp(key, "ack_burst_pkt") == 0) {
+            config->ack_burst_pkt = atoi(value);
+        } else if (strcmp(key, "ack_burst_count_per_sec") == 0) {
+            config->ack_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "ack_fixed_threshold") == 0) {
+            config->ack_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "ack_fixed_check_duration") == 0) {
+            config->ack_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "ack_protection_duration") == 0) {
+            config->ack_protection_duration = atoi(value);
+        } else if (strcmp(key, "rst_valid") == 0) {
+            config->rst_valid = atoi(value);
+        } else if (strcmp(key, "rst_threshold") == 0) {
+            config->rst_threshold = atoi(value);
+        } else if (strcmp(key, "rst_burst_pkt") == 0) {
+            config->rst_burst_pkt = atoi(value);
+        } else if (strcmp(key, "rst_burst_count_per_sec") == 0) {
+            config->rst_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "rst_fixed_threshold") == 0) {
+            config->rst_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "rst_fixed_check_duration") == 0) {
+            config->rst_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "rst_protection_duration") == 0) {
+            config->rst_protection_duration = atoi(value);
+        } else if (strcmp(key, "stomp_valid") == 0) {
+            config->stomp_valid = atoi(value);
+        } else if (strcmp(key, "stomp_threshold") == 0) {
+            config->stomp_threshold = atoi(value);
+        } else if (strcmp(key, "stomp_burst_pkt") == 0) {
+            config->stomp_burst_pkt = atoi(value);
+        } else if (strcmp(key, "stomp_burst_count_per_sec") == 0) {
+            config->stomp_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "stomp_fixed_threshold") == 0) {
+            config->stomp_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "stomp_fixed_check_duration") == 0) {
+            config->stomp_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "stomp_protection_duration") == 0) {
+            config->stomp_protection_duration = atoi(value);
+        } else if (strcmp(key, "handshake_valid") == 0) {
+            config->handshake_valid = atoi(value);
+        } else if (strcmp(key, "handshake_threshold") == 0) {
+            config->handshake_threshold = atoi(value);
+        } else if (strcmp(key, "handshake_burst_pkt") == 0) {
+            config->handshake_burst_pkt = atoi(value);
+        } else if (strcmp(key, "handshake_burst_count_per_sec") == 0) {
+            config->handshake_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "handshake_fixed_threshold") == 0) {
+            config->handshake_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "handshake_fixed_check_duration") == 0) {
+            config->handshake_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "handshake_protection_duration") == 0) {
+            config->handshake_protection_duration = atoi(value);
+        } else if (strcmp(key, "socket_valid") == 0) {
+            config->socket_valid = atoi(value);
+        } else if (strcmp(key, "socket_fin_threshold") == 0) {
+            config->socket_fin_threshold = atoi(value);
+        } else if (strcmp(key, "socket_fixed_threshold") == 0) {
+            config->socket_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "socket_fixed_check_duration") == 0) {
+            config->socket_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "icmp_valid") == 0) {
+            config->icmp_valid = atoi(value);
+        } else if (strcmp(key, "icmp_threshold") == 0) {
+            config->icmp_threshold = atoi(value);
+        } else if (strcmp(key, "icmp_burst_pkt") == 0) {
+            config->icmp_burst_pkt = atoi(value);
+        } else if (strcmp(key, "icmp_burst_count_per_sec") == 0) {
+            config->icmp_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "icmp_fixed_threshold") == 0) {
+            config->icmp_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "icmp_fixed_check_duration") == 0) {
+            config->icmp_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "icmp_protection_duration") == 0) {
+            config->icmp_protection_duration = atoi(value);
+        } else if (strcmp(key, "udp_valid") == 0) {
+            config->udp_valid = atoi(value);
+        } else if (strcmp(key, "udp_threshold") == 0) {
+            config->udp_threshold = atoi(value);
+        } else if (strcmp(key, "udp_burst_pkt") == 0) {
+            config->udp_burst_pkt = atoi(value);
+        } else if (strcmp(key, "udp_burst_count_per_sec") == 0) {
+            config->udp_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "udp_fixed_threshold") == 0) {
+            config->udp_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "udp_fixed_check_duration") == 0) {
+            config->udp_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "udp_protection_duration") == 0) {
+            config->udp_protection_duration = atoi(value);
+        } else if (strcmp(key, "gre_valid") == 0) {
+            config->gre_valid = atoi(value);
+        } else if (strcmp(key, "gre_threshold") == 0) {
+            config->gre_threshold = atoi(value);
+        } else if (strcmp(key, "gre_burst_pkt") == 0) {
+            config->gre_burst_pkt = atoi(value);
+        } else if (strcmp(key, "gre_burst_count_per_sec") == 0) {
+            config->gre_burst_count_per_sec = atoi(value);
+        } else if (strcmp(key, "gre_fixed_threshold") == 0) {
+            config->gre_fixed_threshold = atoi(value);
+        } else if (strcmp(key, "gre_fixed_check_duration") == 0) {
+            config->gre_fixed_check_duration = atoi(value);
+        } else if (strcmp(key, "gre_protection_duration") == 0) {
+            config->gre_protection_duration = atoi(value);
+        } else if (strcmp(key, "tcp_seg_check") == 0) {
+            config->tcp_seg_check = atoi(value);
+        } else if (strcmp(key, "geo_check") == 0) {
+            config->geo_check = atoi(value);
+        } else if (strcmp(key, "geo_db_ipv4_path") == 0) {
+            free(config->geo_db_ipv4_path);
+            config->geo_db_ipv4_path = strdup(value);
+        } else if (strcmp(key, "geo_db_location_path") == 0) {
+            free(config->geo_db_location_path);
+            config->geo_db_location_path = strdup(value);
+        } else if (strcmp(key, "geo_countries") == 0) {
+            free(config->geo_countries);
+            config->geo_countries = strdup(value);
+        } else if (strcmp(key, "tcp_connection_limit_check") == 0) {
+            config->tcp_connection_limit_check = atoi(value);
+        } else if (strcmp(key, "tcp_connection_limit_cnt") == 0) {
+            config->tcp_connection_limit_cnt = atoi(value);
         }
-        
-        // Skip comments
-        if (line[0] == '#') continue;
-        
-        // Parse key-value pairs
-        char *key = strtok(line, " =");
-        char *value = strtok(NULL, " =\n");
-        
-        if (!key || !value) continue;
-        
-        if (strcmp(current_section, "GLOBAL") == 0) {
-            if (strcmp(key, "log") == 0) {
-                config->log_path = strdup(value);
-            } else if (strcmp(key, "dev") == 0) {
-                config->dev = strdup(value);
-            } else if (strcmp(key, "attach_mode") == 0) {
-                config->attach_mode = strdup(value);
-            } else if (strcmp(key, "black_ip_duration") == 0) {
-                config->black_ip_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "SYN") == 0) {
-            if (strcmp(key, "syn_valid") == 0) {
-                config->syn_valid = atoi(value);
-            } else if (strcmp(key, "syn_threshold") == 0) {
-                config->syn_threshold = atoi(value);
-            } else if (strcmp(key, "syn_burst_pkt") == 0) {
-                config->syn_burst_pkt = atoi(value);
-            } else if (strcmp(key, "syn_burst_count_per_sec") == 0) {
-                config->syn_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "syn_fixed_threshold") == 0) {
-                config->syn_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "syn_fixed_check_duration") == 0) {
-                config->syn_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "challenge_timeout") == 0) {
-                config->challenge_timeout = atoi(value);
-            } else if (strcmp(key, "syn_protection_duration") == 0) {
-                config->syn_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "ACK") == 0) {
-            if (strcmp(key, "ack_valid") == 0) {
-                config->ack_valid = atoi(value);
-            } else if (strcmp(key, "ack_threshold") == 0) {
-                config->ack_threshold = atoi(value);
-            } else if (strcmp(key, "ack_burst_pkt") == 0) {
-                config->ack_burst_pkt = atoi(value);
-            } else if (strcmp(key, "ack_burst_count_per_sec") == 0) {
-                config->ack_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "ack_fixed_threshold") == 0) {
-                config->ack_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "ack_fixed_check_duration") == 0) {
-                config->ack_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "ack_protection_duration") == 0) {
-                config->ack_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "RST") == 0) {
-            if (strcmp(key, "rst_valid") == 0) {
-                config->rst_valid = atoi(value);
-            } else if (strcmp(key, "rst_threshold") == 0) {
-                config->rst_threshold = atoi(value);
-            } else if (strcmp(key, "rst_burst_pkt") == 0) {
-                config->rst_burst_pkt = atoi(value);
-            } else if (strcmp(key, "rst_burst_count_per_sec") == 0) {
-                config->rst_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "rst_fixed_threshold") == 0) {
-                config->rst_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "rst_fixed_check_duration") == 0) {
-                config->rst_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "rst_protection_duration") == 0) {
-                config->rst_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "STOMP") == 0) {
-            if (strcmp(key, "stomp_valid") == 0) {
-                config->stomp_valid = atoi(value);
-            } else if (strcmp(key, "stomp_threshold") == 0) {
-                config->stomp_threshold = atoi(value);
-            } else if (strcmp(key, "stomp_burst_pkt") == 0) {
-                config->stomp_burst_pkt = atoi(value);
-            } else if (strcmp(key, "stomp_burst_count_per_sec") == 0) {
-                config->stomp_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "stomp_fixed_threshold") == 0) {
-                config->stomp_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "stomp_fixed_check_duration") == 0) {
-                config->stomp_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "stomp_protection_duration") == 0) {
-                config->stomp_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "HANDSHAKE") == 0) {
-            if (strcmp(key, "handshake_valid") == 0) {
-                config->handshake_valid = atoi(value);
-            } else if (strcmp(key, "handshake_threshold") == 0) {
-                config->handshake_threshold = atoi(value);
-            } else if (strcmp(key, "handshake_burst_pkt") == 0) {
-                config->handshake_burst_pkt = atoi(value);
-            } else if (strcmp(key, "handshake_burst_count_per_sec") == 0) {
-                config->handshake_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "handshake_fixed_threshold") == 0) {
-                config->handshake_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "handshake_fixed_check_duration") == 0) {
-                config->handshake_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "handshake_protection_duration") == 0) {
-                config->handshake_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "SOCKET") == 0) {
-            if (strcmp(key, "socket_valid") == 0) {
-                config->socket_valid = atoi(value);
-            } else if (strcmp(key, "socket_fin_threshold") == 0) {
-                config->socket_fin_threshold = atoi(value);
-            } else if (strcmp(key, "socket_fixed_threshold") == 0) {
-                config->socket_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "socket_fixed_check_duration") == 0) {
-                config->socket_fixed_check_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "ICMP") == 0) {
-            if (strcmp(key, "icmp_valid") == 0) {
-                config->icmp_valid = atoi(value);
-            } else if (strcmp(key, "icmp_threshold") == 0) {
-                config->icmp_threshold = atoi(value);
-            } else if (strcmp(key, "icmp_burst_pkt") == 0) {
-                config->icmp_burst_pkt = atoi(value);
-            } else if (strcmp(key, "icmp_burst_count_per_sec") == 0) {
-                config->icmp_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "icmp_fixed_threshold") == 0) {
-                config->icmp_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "icmp_fixed_check_duration") == 0) {
-                config->icmp_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "icmp_protection_duration") == 0) {
-                config->icmp_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "UDP") == 0) {
-            if (strcmp(key, "udp_valid") == 0) {
-                config->udp_valid = atoi(value);
-            } else if (strcmp(key, "udp_threshold") == 0) {
-                config->udp_threshold = atoi(value);
-            } else if (strcmp(key, "udp_burst_pkt") == 0) {
-                config->udp_burst_pkt = atoi(value);
-            } else if (strcmp(key, "udp_burst_count_per_sec") == 0) {
-                config->udp_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "udp_fixed_threshold") == 0) {
-                config->udp_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "udp_fixed_check_duration") == 0) {
-                config->udp_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "udp_protection_duration") == 0) {
-                config->udp_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "GRE") == 0) {
-            if (strcmp(key, "gre_valid") == 0) {
-                config->gre_valid = atoi(value);
-            } else if (strcmp(key, "gre_threshold") == 0) {
-                config->gre_threshold = atoi(value);
-            } else if (strcmp(key, "gre_burst_pkt") == 0) {
-                config->gre_burst_pkt = atoi(value);
-            } else if (strcmp(key, "gre_burst_count_per_sec") == 0) {
-                config->gre_burst_count_per_sec = atoi(value);
-            } else if (strcmp(key, "gre_fixed_threshold") == 0) {
-                config->gre_fixed_threshold = atoi(value);
-            } else if (strcmp(key, "gre_fixed_check_duration") == 0) {
-                config->gre_fixed_check_duration = atoi(value);
-            } else if (strcmp(key, "gre_protection_duration") == 0) {
-                config->gre_protection_duration = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "TCP_SEG") == 0) {
-            if (strcmp(key, "tcp_seg_check") == 0) {
-                config->tcp_seg_check = atoi(value);
-            }
-        }
-        else if (strcmp(current_section, "GEO") == 0) {
-            if (strcmp(key, "geo_check") == 0) {
-                config->geo_check = atoi(value);
-            } else if (strcmp(key, "geo_db_ipv4_path") == 0) {
-                config->geo_db_ipv4_path = strdup(value);
-            } else if (strcmp(key, "geo_db_location_path") == 0) {
-                config->geo_db_location_path = strdup(value);
-            } else if (strcmp(key, "geo_countries") == 0) {
-                config->geo_countries = strdup(value);
-            }   
-        }
-        else if (strcmp(current_section, "TCP_CONN") == 0) {
-            if (strcmp(key, "tcp_connection_limit_check") == 0) {
-                config->tcp_connection_limit_check = atoi(value);
-            } else if (strcmp(key, "tcp_connection_limit_cnt") == 0) {
-                config->tcp_connection_limit_cnt = atoi(value);
-            }
-        }
+        /* Adaptive / unknown keys intentionally ignored here; merge write preserves them. */
     }
 
     fclose(file);
     return 0;
 }
 
+/*
+ * Merge classic CLI-managed keys into an existing firewall.config.
+ * Preserves adaptive/unknown keys, comments, and layout. Only rewrites
+ * values for keys already present in the file (never appends classic-only
+ * fields like black_ip_duration / *_threshold that adaptive configs omit).
+ */
+typedef struct {
+    const char *key;
+    char value[128];
+} ConfigUpdate;
+
+static int collect_classic_updates(const FirewallConfig *config, ConfigUpdate *out, int max_out)
+{
+    int n = 0;
+#define ADD_I(k, v) do { \
+        if (n >= max_out) return -1; \
+        out[n].key = (k); \
+        snprintf(out[n].value, sizeof out[n].value, "%d", (int)(v)); \
+        n++; \
+    } while (0)
+#define ADD_S(k, v) do { \
+        if (n >= max_out) return -1; \
+        out[n].key = (k); \
+        snprintf(out[n].value, sizeof out[n].value, "%s", (v) ? (v) : ""); \
+        n++; \
+    } while (0)
+
+    ADD_S("log", config->log_path);
+    ADD_S("dev", config->dev);
+    ADD_S("attach_mode", config->attach_mode);
+    ADD_I("black_ip_duration", config->black_ip_duration);
+
+    ADD_I("syn_valid", config->syn_valid);
+    ADD_I("syn_threshold", config->syn_threshold);
+    ADD_I("syn_burst_pkt", config->syn_burst_pkt);
+    ADD_I("syn_burst_count_per_sec", config->syn_burst_count_per_sec);
+    ADD_I("syn_fixed_threshold", config->syn_fixed_threshold);
+    ADD_I("syn_fixed_check_duration", config->syn_fixed_check_duration);
+    ADD_I("challenge_timeout", config->challenge_timeout);
+    ADD_I("syn_protection_duration", config->syn_protection_duration);
+
+    ADD_I("ack_valid", config->ack_valid);
+    ADD_I("ack_threshold", config->ack_threshold);
+    ADD_I("ack_burst_pkt", config->ack_burst_pkt);
+    ADD_I("ack_burst_count_per_sec", config->ack_burst_count_per_sec);
+    ADD_I("ack_fixed_threshold", config->ack_fixed_threshold);
+    ADD_I("ack_fixed_check_duration", config->ack_fixed_check_duration);
+    ADD_I("ack_protection_duration", config->ack_protection_duration);
+
+    ADD_I("rst_valid", config->rst_valid);
+    ADD_I("rst_threshold", config->rst_threshold);
+    ADD_I("rst_burst_pkt", config->rst_burst_pkt);
+    ADD_I("rst_burst_count_per_sec", config->rst_burst_count_per_sec);
+    ADD_I("rst_fixed_threshold", config->rst_fixed_threshold);
+    ADD_I("rst_fixed_check_duration", config->rst_fixed_check_duration);
+    ADD_I("rst_protection_duration", config->rst_protection_duration);
+
+    ADD_I("stomp_valid", config->stomp_valid);
+    ADD_I("stomp_threshold", config->stomp_threshold);
+    ADD_I("stomp_burst_pkt", config->stomp_burst_pkt);
+    ADD_I("stomp_burst_count_per_sec", config->stomp_burst_count_per_sec);
+    ADD_I("stomp_fixed_threshold", config->stomp_fixed_threshold);
+    ADD_I("stomp_fixed_check_duration", config->stomp_fixed_check_duration);
+    ADD_I("stomp_protection_duration", config->stomp_protection_duration);
+
+    ADD_I("handshake_valid", config->handshake_valid);
+    ADD_I("handshake_threshold", config->handshake_threshold);
+    ADD_I("handshake_burst_pkt", config->handshake_burst_pkt);
+    ADD_I("handshake_burst_count_per_sec", config->handshake_burst_count_per_sec);
+    ADD_I("handshake_fixed_threshold", config->handshake_fixed_threshold);
+    ADD_I("handshake_fixed_check_duration", config->handshake_fixed_check_duration);
+    ADD_I("handshake_protection_duration", config->handshake_protection_duration);
+
+    ADD_I("socket_valid", config->socket_valid);
+    ADD_I("socket_fin_threshold", config->socket_fin_threshold);
+    ADD_I("socket_fixed_threshold", config->socket_fixed_threshold);
+    ADD_I("socket_fixed_check_duration", config->socket_fixed_check_duration);
+
+    ADD_I("icmp_valid", config->icmp_valid);
+    ADD_I("icmp_threshold", config->icmp_threshold);
+    ADD_I("icmp_burst_pkt", config->icmp_burst_pkt);
+    ADD_I("icmp_burst_count_per_sec", config->icmp_burst_count_per_sec);
+    ADD_I("icmp_fixed_threshold", config->icmp_fixed_threshold);
+    ADD_I("icmp_fixed_check_duration", config->icmp_fixed_check_duration);
+    ADD_I("icmp_protection_duration", config->icmp_protection_duration);
+
+    ADD_I("udp_valid", config->udp_valid);
+    ADD_I("udp_threshold", config->udp_threshold);
+    ADD_I("udp_burst_pkt", config->udp_burst_pkt);
+    ADD_I("udp_burst_count_per_sec", config->udp_burst_count_per_sec);
+    ADD_I("udp_fixed_threshold", config->udp_fixed_threshold);
+    ADD_I("udp_fixed_check_duration", config->udp_fixed_check_duration);
+    ADD_I("udp_protection_duration", config->udp_protection_duration);
+
+    ADD_I("gre_valid", config->gre_valid);
+    ADD_I("gre_threshold", config->gre_threshold);
+    ADD_I("gre_burst_pkt", config->gre_burst_pkt);
+    ADD_I("gre_burst_count_per_sec", config->gre_burst_count_per_sec);
+    ADD_I("gre_fixed_threshold", config->gre_fixed_threshold);
+    ADD_I("gre_fixed_check_duration", config->gre_fixed_check_duration);
+    ADD_I("gre_protection_duration", config->gre_protection_duration);
+
+    ADD_I("tcp_seg_check", config->tcp_seg_check);
+    ADD_I("geo_check", config->geo_check);
+    ADD_S("geo_db_ipv4_path", config->geo_db_ipv4_path);
+    ADD_S("geo_db_location_path", config->geo_db_location_path);
+    ADD_S("geo_countries", config->geo_countries);
+    ADD_I("tcp_connection_limit_check", config->tcp_connection_limit_check);
+    ADD_I("tcp_connection_limit_cnt", config->tcp_connection_limit_cnt);
+
+#undef ADD_I
+#undef ADD_S
+    return n;
+}
+
+static const char *lookup_update(const ConfigUpdate *updates, int n, const char *key)
+{
+    for (int i = 0; i < n; i++) {
+        if (strcmp(updates[i].key, key) == 0)
+            return updates[i].value;
+    }
+    return NULL;
+}
+
 int write_config(const char *filename, const FirewallConfig *config) {
+    ConfigUpdate updates[96];
+    int n_updates = collect_classic_updates(config, updates, 96);
+    if (n_updates < 0) {
+        fprintf(stderr, "Failed to collect config updates\n");
+        return -1;
+    }
+
+    FILE *in = fopen(filename, "r");
+    if (!in) {
+        perror("Failed to open config file for merge");
+        return -1;
+    }
+
     char temp_filename[] = TEMP_FILE_TEMPLATE;
     int fd = mkstemp(temp_filename);
     if (fd == -1) {
         perror("Failed to create temporary file");
+        fclose(in);
         return -1;
     }
 
-    FILE *file = fdopen(fd, "w");
-    if (!file) {
+    FILE *out = fdopen(fd, "w");
+    if (!out) {
         perror("Failed to open temporary file");
         close(fd);
+        unlink(temp_filename);
+        fclose(in);
+        return -1;
+    }
+
+    char line[MAX_LINE_LENGTH * 4];
+    while (fgets(line, sizeof line, in)) {
+        char *nl = strchr(line, '\n');
+        int had_nl = nl != NULL;
+        if (nl) *nl = '\0';
+        if (had_nl && nl > line && nl[-1] == '\r')
+            nl[-1] = '\0';
+
+        char *hash = strchr(line, '#');
+        char comment[MAX_LINE_LENGTH * 2] = "";
+        if (hash) {
+            strncpy(comment, hash, sizeof comment - 1);
+            *hash = '\0';
+        }
+
+        char *eq = strchr(line, '=');
+        if (!eq) {
+            /* blank / comment-only / section header — keep as-is */
+            fprintf(out, "%s%s\n", line, comment);
+            continue;
+        }
+
+        /* Extract key (trim) */
+        char keybuf[128];
+        size_t key_len = (size_t)(eq - line);
+        while (key_len > 0 && (line[key_len - 1] == ' ' || line[key_len - 1] == '\t'))
+            key_len--;
+        if (key_len >= sizeof keybuf)
+            key_len = sizeof keybuf - 1;
+        memcpy(keybuf, line, key_len);
+        keybuf[key_len] = '\0';
+        char *key = keybuf;
+        while (*key == ' ' || *key == '\t')
+            key++;
+
+        const char *new_val = lookup_update(updates, n_updates, key);
+        if (!new_val) {
+            /* Unknown / adaptive key — restore comment and keep original */
+            if (comment[0])
+                fprintf(out, "%s%s\n", line, comment);
+            else
+                fprintf(out, "%s\n", line);
+            continue;
+        }
+
+        /* Preserve key spacing before '='; rewrite value; keep trailing comment */
+        *eq = '\0';
+        if (comment[0])
+            fprintf(out, "%s= %s %s\n", line, new_val, comment);
+        else
+            fprintf(out, "%s= %s\n", line, new_val);
+    }
+
+    fclose(in);
+    if (ferror(out) || fclose(out) != 0) {
+        perror("Failed writing merged config");
         unlink(temp_filename);
         return -1;
     }
 
-    // Write GLOBAL section
-    fprintf(file, "%s\n", config->global_comment);
-    fprintf(file, "log = %s\n", config->log_path);
-    fprintf(file, "dev = %s\n", config->dev);
-    fprintf(file, "# mode can be skb, native, drv, hw\n");
-    fprintf(file, "attach_mode = %s\n", config->attach_mode);
-    fprintf(file, "black_ip_duration = %d\n", config->black_ip_duration);
-    
-    // Write SYN section
-    fprintf(file, "%s\n", config->syn_comment);
-    fprintf(file, "syn_valid = %d\n", config->syn_valid);
-    fprintf(file, "syn_threshold = %d\n", config->syn_threshold);
-    fprintf(file, "syn_burst_pkt = %d\n", config->syn_burst_pkt);
-    fprintf(file, "syn_burst_count_per_sec = %d\n", config->syn_burst_count_per_sec);
-    fprintf(file, "syn_fixed_threshold = %d\n", config->syn_fixed_threshold);
-    fprintf(file, "syn_fixed_check_duration = %d\n", config->syn_fixed_check_duration);
-    fprintf(file, "challenge_timeout = %d\n", config->challenge_timeout);
-    fprintf(file, "syn_protection_duration = %d\n", config->syn_protection_duration);
-    
-    // Write ACK section
-    fprintf(file, "%s\n", config->ack_comment);
-    fprintf(file, "ack_valid = %d\n", config->ack_valid);
-    fprintf(file, "ack_threshold = %d\n", config->ack_threshold);
-    fprintf(file, "ack_burst_pkt = %d\n", config->ack_burst_pkt);
-    fprintf(file, "ack_burst_count_per_sec = %d\n", config->ack_burst_count_per_sec);
-    fprintf(file, "ack_fixed_threshold = %d\n", config->ack_fixed_threshold);
-    fprintf(file, "ack_fixed_check_duration = %d\n", config->ack_fixed_check_duration);
-    fprintf(file, "ack_protection_duration = %d\n", config->ack_protection_duration);
-    
-    // Write RST section
-    fprintf(file, "%s\n", config->rst_comment);
-    fprintf(file, "rst_valid = %d\n", config->rst_valid);
-    fprintf(file, "rst_threshold = %d\n", config->rst_threshold);
-    fprintf(file, "rst_burst_pkt = %d\n", config->rst_burst_pkt);
-    fprintf(file, "rst_burst_count_per_sec = %d\n", config->rst_burst_count_per_sec);
-    fprintf(file, "rst_fixed_threshold = %d\n", config->rst_fixed_threshold);
-    fprintf(file, "rst_fixed_check_duration = %d\n", config->rst_fixed_check_duration);
-    fprintf(file, "rst_protection_duration = %d\n", config->rst_protection_duration);
-
-    // Write STOMP section
-    if (config->stomp_comment[0] == '\0')
-        fprintf(file, "\n#------------------STOMP------------------------\n");
-    else
-        fprintf(file, "%s\n", config->stomp_comment);
-    fprintf(file, "stomp_valid = %d\n", config->stomp_valid);
-    fprintf(file, "stomp_threshold = %d\n", config->stomp_threshold);
-    fprintf(file, "stomp_burst_pkt = %d\n", config->stomp_burst_pkt);
-    fprintf(file, "stomp_burst_count_per_sec = %d\n", config->stomp_burst_count_per_sec);
-    fprintf(file, "stomp_fixed_threshold = %d\n", config->stomp_fixed_threshold);
-    fprintf(file, "stomp_fixed_check_duration = %d\n", config->stomp_fixed_check_duration);
-    fprintf(file, "stomp_protection_duration = %d\n", config->stomp_protection_duration);
-
-    if (config->handshake_comment[0] == '\0')
-        fprintf(file, "\n#------------------HandShake--------------------\n");
-    else
-        fprintf(file, "%s\n", config->handshake_comment);
-    fprintf(file, "handshake_valid = %d\n", config->handshake_valid);
-    fprintf(file, "handshake_threshold = %d\n", config->handshake_threshold);
-    fprintf(file, "handshake_burst_pkt = %d\n", config->handshake_burst_pkt);
-    fprintf(file, "handshake_burst_count_per_sec = %d\n", config->handshake_burst_count_per_sec);
-    fprintf(file, "handshake_fixed_threshold = %d\n", config->handshake_fixed_threshold);
-    fprintf(file, "handshake_fixed_check_duration = %d\n", config->handshake_fixed_check_duration);
-    fprintf(file, "handshake_protection_duration = %d\n", config->handshake_protection_duration);
-
-    if (config->socket_comment[0] == '\0')
-        fprintf(file, "\n#------------------SOCKET------------------------\n");
-    else
-        fprintf(file, "%s\n", config->socket_comment);
-    fprintf(file, "socket_valid = %d\n", config->socket_valid);
-    fprintf(file, "socket_fin_threshold = %d\n", config->socket_fin_threshold);
-    fprintf(file, "socket_fixed_threshold = %d\n", config->socket_fixed_threshold);
-    fprintf(file, "socket_fixed_check_duration = %d\n", config->socket_fixed_check_duration);
-    
-    // Write ICMP section
-    fprintf(file, "%s\n", config->icmp_comment);
-    fprintf(file, "icmp_valid = %d\n", config->icmp_valid);
-    fprintf(file, "icmp_threshold = %d\n", config->icmp_threshold);
-    fprintf(file, "icmp_burst_pkt = %d\n", config->icmp_burst_pkt);
-    fprintf(file, "icmp_burst_count_per_sec = %d\n", config->icmp_burst_count_per_sec);
-    fprintf(file, "icmp_fixed_threshold = %d\n", config->icmp_fixed_threshold);
-    fprintf(file, "icmp_fixed_check_duration = %d\n", config->icmp_fixed_check_duration);
-    fprintf(file, "icmp_protection_duration = %d\n", config->icmp_protection_duration);
-    
-    // Write UDP section
-    fprintf(file, "%s\n", config->udp_comment);
-    fprintf(file, "udp_valid = %d\n", config->udp_valid);
-    fprintf(file, "udp_threshold = %d\n", config->udp_threshold);
-    fprintf(file, "udp_burst_pkt = %d\n", config->udp_burst_pkt);
-    fprintf(file, "udp_burst_count_per_sec = %d\n", config->udp_burst_count_per_sec);
-    fprintf(file, "udp_fixed_threshold = %d\n", config->udp_fixed_threshold);
-    fprintf(file, "udp_fixed_check_duration = %d\n", config->udp_fixed_check_duration);
-    fprintf(file, "udp_protection_duration = %d\n", config->udp_protection_duration);
-    
-    // Write GRE section
-    fprintf(file, "%s\n", config->gre_comment);
-    fprintf(file, "gre_valid = %d\n", config->gre_valid);
-    fprintf(file, "gre_threshold = %d\n", config->gre_threshold);
-    fprintf(file, "gre_burst_pkt = %d\n", config->gre_burst_pkt);
-    fprintf(file, "gre_burst_count_per_sec = %d\n", config->gre_burst_count_per_sec);
-    fprintf(file, "gre_fixed_threshold = %d\n", config->gre_fixed_threshold);
-    fprintf(file, "gre_fixed_check_duration = %d\n", config->gre_fixed_check_duration);
-    fprintf(file, "gre_protection_duration = %d\n", config->gre_protection_duration);
-    
-    // Write TCP Segment check
-    fprintf(file, "\n%s\n", config->tcp_seg_comment);
-    fprintf(file, "tcp_seg_check = %d\n", config->tcp_seg_check);
-
-    // Write Geo Location Check
-    fprintf(file, "\n%s\n", config->geo_comment);
-    fprintf(file, "geo_check = %d\n", config->geo_check);
-    fprintf(file, "geo_db_ipv4_path = %s\n", config->geo_db_ipv4_path);
-    fprintf(file, "geo_db_location_path = %s\n", config->geo_db_location_path);
-    fprintf(file, "geo_countries = %s\n", config->geo_countries);
-    
-    // Write TCP Connection Limit
-    fprintf(file, "\n%s\n", config->tcp_conn_comment);
-    fprintf(file, "tcp_connection_limit_check = %d\n", config->tcp_connection_limit_check);
-    fprintf(file, "tcp_connection_limit_cnt = %d\n", config->tcp_connection_limit_cnt);
-    
-    fprintf(file, "\n");
-
-    fclose(file);
-
-    // Replace the original file with the new one
     if (rename(temp_filename, filename) != 0) {
         perror("Failed to replace config file");
         unlink(temp_filename);

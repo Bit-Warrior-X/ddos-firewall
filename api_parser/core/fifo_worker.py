@@ -144,6 +144,28 @@ def _deliver_report(payload: Dict[str, str], reliable: bool) -> None:
         delay = min(delay * 2, 8)
 
 
+_OPTIONAL_ALERT_FIELDS = (
+    "class",
+    "state",
+    "mode",
+    "rate",
+    "enter",
+    "exit",
+    "peak",
+    "why",
+    "source",
+    "classes",
+)
+
+
+def _copy_optional_alert_fields(cmd: Dict[str, str], payload: Dict[str, str]) -> None:
+    """Pass through adaptive/classic detail fields when present on the wire."""
+    for key in _OPTIONAL_ALERT_FIELDS:
+        val = cmd.get(key)
+        if val is not None and str(val) != "":
+            payload[key] = str(val)
+
+
 def process_command(cmd: Dict[str, str], reliable: bool = False) -> None:
     """Processes a single command dictionary."""
     print(f"[API_PARSER] Processing command: {cmd}")
@@ -169,6 +191,7 @@ def process_command(cmd: Dict[str, str], reliable: bool = False) -> None:
                 'req_id': str(cmd.get('req_id', '')),
                 'token': token
             }
+            _copy_optional_alert_fields(cmd, payload)
             _deliver_report(payload, reliable)
         elif cmd['command'] == 'report_attack':
             payload = {
@@ -178,6 +201,7 @@ def process_command(cmd: Dict[str, str], reliable: bool = False) -> None:
                 'req_id': str(cmd.get('req_id', '')),
                 'token': token
             }
+            _copy_optional_alert_fields(cmd, payload)
             _deliver_report(payload, reliable)
         elif cmd['command'] == 'report_block_ip':
             payload = {
@@ -189,6 +213,7 @@ def process_command(cmd: Dict[str, str], reliable: bool = False) -> None:
                 'req_id': str(cmd.get('req_id', '')),
                 'token': token
             }
+            _copy_optional_alert_fields(cmd, payload)
             _deliver_report(payload, reliable)
 
             # Also add this IP to temporaryblacklist in Redis (for L7 WAF), and publish.

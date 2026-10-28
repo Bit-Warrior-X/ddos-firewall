@@ -4,8 +4,10 @@
 #include <ebpf_firewall_geo.h>
 #include <ebpf_firewall_core.h>
 #include <ebpf_firewall_utils.h>
+#include <ebpf_firewall_shadow.h>
 
 #include <stdio.h>
+#include <dirent.h>
 #include <sqlite3.h>
 
 // Global configuration
@@ -24,12 +26,160 @@ char geo_db_location_path[512]; // Geo location code database path
 __u64 time_offset_ns = 0;
 long tz_offset_sec = 0;      // Timezone offset
 
+struct capacity_profile global_capacity_profile = {0};
+/* Optional overrides from redesign keys; -1 = use refresh defaults. */
+static int cfg_http3_override = -1;
+static int cfg_gre_tunnels_override = -1;
+static int cfg_dns_override = -1;
+static char gre_peers_buf[512];
+static char udp_extra_ports_buf[256];
+
+static int map_put_u16(int fd, __u16 k)
+{
+    __u8 one = 1;
+    return bpf_map_update_elem(fd, &k, &one, BPF_ANY);
+}
+
+static int map_put_u8(int fd, __u8 k)
+{
+    __u8 one = 1;
+    return bpf_map_update_elem(fd, &k, &one, BPF_ANY);
+}
+
+static int map_put_u32(int fd, __u32 k)
+{
+    __u8 one = 1;
+    return bpf_map_update_elem(fd, &k, &one, BPF_ANY);
+}
+
+static __u64 cap_clamp(__u64 v, __u64 floor, __u64 cap)
+{
+    if (v < floor)
+        return floor;
+    if (v > cap)
+        return cap;
+    return v;
+}
+
+static __u32 read_sysfs_u32(const char *path, __u32 fallback)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return fallback;
+    long v = -1;
+    if (fscanf(f, "%ld", &v) != 1) {
+        fclose(f);
+        return fallback;
+    }
+    fclose(f);
+    if (v <= 0)
+        return fallback;
+    return (__u32)v;
+}
+
+static __u32 count_combined_rx_queues(const char *dev)
+{
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/queues", dev);
+    DIR *d = opendir(path);
+    if (!d)
+        return 1;
+    __u32 n = 0;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (strncmp(de->d_name, "rx-", 3) == 0)
+            n++;
+    }
+    closedir(d);
+    return n ? n : 1;
+}
+
+/* Phase 2: derive host/class ceilings from NIC line rate and RX/CPU budget.
+ * Shadow only — does not change static gates until Phase 3+. */
+int refresh_capacity_profile(void)
+{
+    struct capacity_profile p = {0};
+    p.http3 = (cfg_http3_override >= 0) ? (cfg_http3_override ? 1 : 0) : 1;
+    p.gre_tunnels = (cfg_gre_tunnels_override >= 0) ? (cfg_gre_tunnels_override ? 1 : 0) : 0;
+
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/class/net/%s/speed", ifname);
+    p.link_mbps = read_sysfs_u32(path, CAP_LINK_FALLBACK_MBPS);
+    p.rx_queues = count_combined_rx_queues(ifname);
+
+    long nproc = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nproc < 1)
+        nproc = 1;
+    p.xdp_cores = p.rx_queues < (__u32)nproc ? p.rx_queues : (__u32)nproc;
+    if (p.xdp_cores < 1)
+        p.xdp_cores = 1;
+
+    /* 64B frame + 20B preamble/IFG → bits per minimum packet on the wire. */
+    __u64 link_bps = (__u64)p.link_mbps * 1000000ULL;
+    p.line_pps = link_bps / ((64ULL + 20ULL) * 8ULL);
+    p.cpu_pps = (__u64)p.xdp_cores * CAP_PER_CORE_PPS_DEFAULT;
+
+    __u64 bottleneck = p.line_pps < p.cpu_pps ? p.line_pps : p.cpu_pps;
+    p.host_ceiling_pps = (bottleneck * CAP_CEILING_FRACTION_NUM) / CAP_CEILING_FRACTION_DEN;
+    p.host_ceiling_bps = (link_bps * 80ULL) / 100ULL;
+
+    __u64 cap_syn = (p.host_ceiling_pps * 2ULL) / 100ULL;
+    __u64 cap_ack = (p.host_ceiling_pps * 5ULL) / 100ULL;
+    __u64 cap_rst = (p.host_ceiling_pps * 1ULL) / 100ULL;
+    __u64 cap_icmp = (p.host_ceiling_pps * 5ULL) / 1000ULL;
+    __u64 cap_udp = p.http3
+                        ? (p.host_ceiling_pps * 15ULL) / 100ULL
+                        : (p.host_ceiling_pps * 5ULL) / 100ULL;
+    __u64 cap_gre = (p.host_ceiling_pps * 5ULL) / 1000ULL;
+    __u64 cap_data = (p.host_ceiling_pps * 10ULL) / 100ULL;
+
+    p.cap_syn = cap_clamp(cap_syn, 20000ULL, cap_syn ? cap_syn : 20000ULL);
+    p.cap_ack = cap_clamp(cap_ack, 50000ULL, cap_ack ? cap_ack : 50000ULL);
+    p.cap_rst = cap_clamp(cap_rst, 10000ULL, cap_rst ? cap_rst : 10000ULL);
+    p.cap_icmp = cap_clamp(cap_icmp, 2000ULL, cap_icmp ? cap_icmp : 2000ULL);
+    p.cap_udp = cap_clamp(cap_udp,
+                          p.http3 ? 50000ULL : 20000ULL,
+                          cap_udp ? cap_udp : (p.http3 ? 50000ULL : 20000ULL));
+    /* No tunnels: GRE gate sits at the floor. */
+    p.cap_gre = p.gre_tunnels
+                    ? cap_clamp(cap_gre, 1000ULL, cap_gre ? cap_gre : 1000ULL)
+                    : 1000ULL;
+    p.cap_data = cap_clamp(cap_data, 50000ULL, cap_data ? cap_data : 50000ULL);
+
+    global_capacity_profile = p;
+
+    LOG_I("Capacity[%s]: link=%uMb/s queues=%u cores=%u line=%llu cpu=%llu "
+          "ceiling=%llu pps  caps SYN=%llu ACK=%llu RST=%llu ICMP=%llu "
+          "UDP=%llu GRE=%llu DATA=%llu (shadow)\n",
+          ifname, p.link_mbps, p.rx_queues, p.xdp_cores,
+          (unsigned long long)p.line_pps, (unsigned long long)p.cpu_pps,
+          (unsigned long long)p.host_ceiling_pps,
+          (unsigned long long)p.cap_syn, (unsigned long long)p.cap_ack,
+          (unsigned long long)p.cap_rst, (unsigned long long)p.cap_icmp,
+          (unsigned long long)p.cap_udp, (unsigned long long)p.cap_gre,
+          (unsigned long long)p.cap_data);
+    return 0;
+}
+
 struct global_firewall_config global_fw_config ={
     .g_attack_stats = {0},
     .g_config = {
         .tcp_seg_check = 0,
+        .enforce_drop_invalid = 1, /* Phase 4 on by default */
+        .prefer_adaptive = 1,      /* Phase 5: adaptive owns Attack start */
         .stats_detail_sample_divisor = 1,
         .black_ip_duration = 0,
+        .block_initial_ns = 60ULL * ONE_SECOND_NS,
+        .block_max_ns = 3600ULL * ONE_SECOND_NS,
+        .svc = {
+            .http3 = 1,
+            .dns = 0,
+            .gre_tunnels = 0,
+            .quic_header_check = 1,
+            .icmp_drop_fragments = 1,
+            .synack_match_outbound = 1,
+            .ipv6_enabled = 1,
+        },
     },
     .g_syn_config = {
         .valid = 1,
@@ -172,25 +322,39 @@ static int append_expired_blocked_id(struct load_block_white_ctx *ctx, sqlite3_i
 
 static int delete_expired_blocked_rows(sqlite3 *db, struct load_block_white_ctx *ctx)
 {
-    char *err_msg = NULL;
     int any_err = 0;
+    sqlite3_stmt *stmt = NULL;
 
+    if (ctx->expired_n == 0)
+        return 0;
+
+    /* One transaction: per-row autocommit costs an fdatasync each, which after a
+     * large episode (300k+ rows) delays XDP attach by hours. */
+    if (sqlite3_exec(db, "BEGIN;", NULL, NULL, NULL) != SQLITE_OK) {
+        LOG_E("BEGIN for expired blocked_ips delete: %s\n", sqlite3_errmsg(db));
+        return -1;
+    }
+    if (sqlite3_prepare_v2(db, "DELETE FROM blocked_ips WHERE id=?;", -1, &stmt, NULL) != SQLITE_OK) {
+        LOG_E("prepare expired blocked_ips delete: %s\n", sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
     for (size_t i = 0; i < ctx->expired_n; i++) {
-        char sql[96];
-        snprintf(sql, sizeof(sql), "DELETE FROM blocked_ips WHERE id=%lld;",
-                 (long long)ctx->expired_blocked_ids[i]);
-        int r = sqlite3_exec(db, sql, NULL, NULL, &err_msg);
-        if (r != SQLITE_OK) {
+        sqlite3_bind_int64(stmt, 1, ctx->expired_blocked_ids[i]);
+        if (sqlite3_step(stmt) != SQLITE_DONE) {
             LOG_E("Failed to delete expired blocked_ips row id %lld: %s\n",
-                  (long long)ctx->expired_blocked_ids[i],
-                  err_msg ? err_msg : "(unknown)");
+                  (long long)ctx->expired_blocked_ids[i], sqlite3_errmsg(db));
             any_err = 1;
         }
-        if (err_msg) {
-            sqlite3_free(err_msg);
-            err_msg = NULL;
-        }
+        sqlite3_reset(stmt);
     }
+    sqlite3_finalize(stmt);
+    if (sqlite3_exec(db, "COMMIT;", NULL, NULL, NULL) != SQLITE_OK) {
+        LOG_E("COMMIT expired blocked_ips delete: %s\n", sqlite3_errmsg(db));
+        sqlite3_exec(db, "ROLLBACK;", NULL, NULL, NULL);
+        return -1;
+    }
+    LOG_I("Deleted %zu expired blocked_ips rows\n", ctx->expired_n);
     return any_err ? -1 : 0;
 }
 
@@ -550,6 +714,77 @@ static int ensure_usable_ifname(void)
     return -1;
 }
 
+/* Populate validity allowlist maps from service profile + redesign keys. */
+static int populate_validity_maps(struct bpf_object *obj)
+{
+    int udp_fd = bpf_object__find_map_fd_by_name(obj, "udp_allowed_dports");
+    int refl_fd = bpf_object__find_map_fd_by_name(obj, "udp_reflection_sports");
+    int icmp_fd = bpf_object__find_map_fd_by_name(obj, "icmp_allowed_types");
+    int gre_fd = bpf_object__find_map_fd_by_name(obj, "gre_allowed_peers");
+    if (udp_fd < 0 || refl_fd < 0 || icmp_fd < 0 || gre_fd < 0) {
+        LOG_W("Validity maps missing; allowlists skipped\n");
+        return 0;
+    }
+
+    struct service_profile *svc = &global_fw_config.g_config.svc;
+    if (cfg_http3_override >= 0)
+        svc->http3 = cfg_http3_override ? 1 : 0;
+    if (cfg_gre_tunnels_override >= 0)
+        svc->gre_tunnels = cfg_gre_tunnels_override ? 1 : 0;
+    if (cfg_dns_override >= 0)
+        svc->dns = cfg_dns_override ? 1 : 0;
+
+    /* Clear by replacing entries — HASH maps: delete not required for boot. */
+    if (svc->http3) {
+        map_put_u16(udp_fd, 443);
+    }
+    if (svc->dns) {
+        map_put_u16(udp_fd, 53);
+    }
+    /* Always allow common management / NTP when listed in redesign defaults —
+     * only ports explicitly opened by service profile + extras are valid under mode≥1.
+     * Add udp_extra_allowed_ports. */
+    if (udp_extra_ports_buf[0]) {
+        char *save = NULL;
+        char buf[256];
+        strncpy(buf, udp_extra_ports_buf, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            int p = atoi(tok);
+            if (p > 0 && p < 65536)
+                map_put_u16(udp_fd, (__u16)p);
+        }
+    }
+
+    /* Reflection source ports (plan defaults). */
+    static const __u16 refl[] = {19, 53, 123, 161, 389, 1900, 3702, 11211};
+    for (unsigned i = 0; i < sizeof(refl) / sizeof(refl[0]); i++)
+        map_put_u16(refl_fd, refl[i]);
+
+    /* ICMP: echo reply/request, dest unreachable, time exceeded. */
+    static const __u8 ict[] = {0, 3, 8, 11};
+    for (unsigned i = 0; i < sizeof(ict); i++)
+        map_put_u8(icmp_fd, ict[i]);
+
+    if (svc->gre_tunnels && gre_peers_buf[0]) {
+        char *save = NULL;
+        char buf[512];
+        strncpy(buf, gre_peers_buf, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+        for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+            struct in_addr a;
+            if (inet_pton(AF_INET, tok, &a) == 1)
+                map_put_u32(gre_fd, a.s_addr);
+        }
+    }
+
+    LOG_I("Validity maps: http3=%u dns=%u gre=%u synack_match=%u ipv6=%u\n",
+          svc->http3, svc->dns, svc->gre_tunnels, svc->synack_match_outbound,
+          svc->ipv6_enabled);
+    return 0;
+}
+
+
 int load_config(struct bpf_object *obj) {
     char* env_path = getenv(CONFIG_FILE);
     if (!env_path) {
@@ -599,12 +834,17 @@ int load_config(struct bpf_object *obj) {
             }
 #endif
             if (strcmp(key, "log") == 0) {
-                if (str_value[0] == '/' || str_value[0] == '\\') {
-                    strcpy(log_path, str_value);
-                    if (log_file) fclose(log_file);
-                    log_file = fopen(log_path, "a");
-                }
-                LOG_I("Loaded config: %s = %s\n", key, log_path);
+                /* Directory (preferred) or legacy .log file path → hourly rotation
+                 * under that folder: sparta-YYYYMMDD-HH.log + latest.log */
+                set_main_log_path(str_value);
+                ensure_main_log();
+                LOG_I("Loaded config: %s = %s (hourly under log dir)\n", key, str_value);
+                continue;
+            }
+
+            if (strcmp(key, "attack_log_dir") == 0) {
+                set_attack_log_dir(str_value);
+                LOG_I("Loaded config: %s = %s\n", key, str_value);
                 continue;
             }
 
@@ -620,18 +860,23 @@ int load_config(struct bpf_object *obj) {
                 XDP_FLAGS_HW_MODE = (1 << 3)
                 XDP_FLAGS_REPLACE = (1 << 4)*/
                 LOG_I("Loaded config: %s = %s\n", key, str_value);
-                if (strcmp(str_value, "skb") == 0)
+                if (strcmp(str_value, "skb") == 0 || strcmp(str_value, "generic") == 0)
                     attach_mode = XDP_FLAGS_SKB_MODE;
-                else if (strcmp(str_value, "native") == 0)
-                    attach_mode = 0;
+                else if (strcmp(str_value, "native") == 0 || strcmp(str_value, "auto") == 0)
+                    attach_mode = 0; /* prefer native; loader falls back if needed */
                 else if (strcmp(str_value, "drv") == 0)
                     attach_mode = XDP_FLAGS_DRV_MODE;
                 else if (strcmp(str_value, "hw") == 0)
                     attach_mode = XDP_FLAGS_HW_MODE;
                 else {
-                    LOG_E("Unkown attach_mode\n");
-                    return -1;
+                    LOG_W("Unknown attach_mode '%s', keeping current\n", str_value);
                 }
+                continue;
+            }
+            /* Applied before bpf_object__load by apply_host_map_sizing(). */
+            if (strcmp(key, "map_size_profile") == 0 ||
+                strcmp(key, "map_memory_budget_percent") == 0) {
+                LOG_I("Loaded config: %s = %s\n", key, str_value);
                 continue;
             }
             if (strcmp(key, "geo_db_ipv4_path") == 0) {
@@ -657,6 +902,75 @@ int load_config(struct bpf_object *obj) {
                 }
                 continue;
             }
+            if (strcmp(key, "gre_allowed_peers") == 0) {
+                strncpy(gre_peers_buf, str_value, sizeof(gre_peers_buf) - 1);
+                LOG_I("Loaded config: %s = %s\n", key, gre_peers_buf);
+                continue;
+            }
+            if (strcmp(key, "udp_extra_allowed_ports") == 0) {
+                strncpy(udp_extra_ports_buf, str_value, sizeof(udp_extra_ports_buf) - 1);
+                LOG_I("Loaded config: %s = %s\n", key, udp_extra_ports_buf);
+                continue;
+            }
+            if (strcmp(key, "baseline_seasonal") == 0) {
+                shadow_cfg.seasonal_enable =
+                    (strcmp(str_value, "hour_of_week") == 0 || strcmp(str_value, "1") == 0) ? 1 : 0;
+                LOG_I("Loaded config: %s = %s\n", key, str_value);
+                continue;
+            }
+            /* detection_level aliases (proficiency 1..10). */
+            if (strcmp(key, "detection_level") == 0) {
+                int lvl = -1;
+                if (strcmp(str_value, "minimal") == 0) lvl = 1;
+                else if (strcmp(str_value, "very_low") == 0) lvl = 2;
+                else if (strcmp(str_value, "low") == 0) lvl = 3;
+                else if (strcmp(str_value, "moderate_low") == 0) lvl = 4;
+                else if (strcmp(str_value, "normal") == 0) lvl = 5;
+                else if (strcmp(str_value, "moderate_high") == 0) lvl = 6;
+                else if (strcmp(str_value, "elevated") == 0) lvl = 7;
+                else if (strcmp(str_value, "high") == 0) lvl = 8;
+                else if (strcmp(str_value, "very_high") == 0) lvl = 9;
+                else if (strcmp(str_value, "max") == 0 ||
+                         strcmp(str_value, "paranoid") == 0) lvl = 10;
+                else {
+                    char *end = NULL;
+                    long v = strtol(str_value, &end, 10);
+                    if (end != str_value && v >= 1 && v <= 10)
+                        lvl = (int)v;
+                }
+                if (lvl >= 1 && lvl <= 10) {
+                    shadow_cfg.detection_level = (__u32)lvl;
+                    LOG_I("Loaded config: %s = %d\n", key, lvl);
+                } else {
+                    LOG_W("Invalid detection_level '%s' (use 1..10 or name)\n",
+                          str_value);
+                }
+                continue;
+            }
+        }
+
+        /* Float redesign keys (invalid_ratio, ceiling_fraction, …). */
+        {
+            double dbl_value = 0;
+            if (sscanf(line, "%127[^=]= %lf", key, &dbl_value) == 2) {
+                trim_whitespace(key);
+                if (strcmp(key, "invalid_ratio") == 0) {
+                    if (dbl_value > 0.0 && dbl_value < 1.0)
+                        shadow_cfg.invalid_ratio = dbl_value;
+                    LOG_I("Loaded config: %s = %g\n", key, dbl_value);
+                    continue;
+                }
+                if (strcmp(key, "baseline_k") == 0 && dbl_value > 0.0) {
+                    shadow_cfg.baseline_k = dbl_value;
+                    LOG_I("Loaded config: %s = %g\n", key, dbl_value);
+                    continue;
+                }
+                if (strcmp(key, "baseline_m") == 0 && dbl_value > 0.0) {
+                    shadow_cfg.baseline_m = dbl_value;
+                    LOG_I("Loaded config: %s = %g\n", key, dbl_value);
+                    continue;
+                }
+            }
         }
 
         // Try to parse as key=integer
@@ -668,6 +982,14 @@ int load_config(struct bpf_object *obj) {
             // Global config
             if (strcmp(key, "black_ip_duration") == 0) {
                 global_fw_config.g_config.black_ip_duration = int_value * ONE_SECOND_NS;
+            } else if (strcmp(key, "block_initial_seconds") == 0) {
+                if (int_value > 0)
+                    global_fw_config.g_config.block_initial_ns =
+                        (__u64)int_value * ONE_SECOND_NS;
+            } else if (strcmp(key, "block_max_seconds") == 0) {
+                if (int_value > 0)
+                    global_fw_config.g_config.block_max_ns =
+                        (__u64)int_value * ONE_SECOND_NS;
             } 
             // SYN config
             else if (strcmp(key, "syn_valid") == 0) {
@@ -829,10 +1151,82 @@ int load_config(struct bpf_object *obj) {
             } else if (strcmp(key, "tcp_connection_limit_cnt") == 0) {
                 global_fw_config.g_tcp_connection_config.limit_cnt = int_value;
             }
+            /* Phase 4–5 / redesign subset (safe keys mapped into 0.4.0 structures). */
+            else if (strcmp(key, "enforce_drop_invalid") == 0) {
+                global_fw_config.g_config.enforce_drop_invalid = int_value ? 1 : 0;
+            } else if (strcmp(key, "prefer_adaptive") == 0) {
+                global_fw_config.g_config.prefer_adaptive = int_value ? 1 : 0;
+            } else if (strcmp(key, "service_http3") == 0 || strcmp(key, "http3") == 0) {
+                cfg_http3_override = int_value ? 1 : 0;
+                global_fw_config.g_config.svc.http3 = int_value ? 1 : 0;
+            } else if (strcmp(key, "service_gre_tunnels") == 0 || strcmp(key, "gre_tunnels") == 0) {
+                cfg_gre_tunnels_override = int_value ? 1 : 0;
+                global_fw_config.g_config.svc.gre_tunnels = int_value ? 1 : 0;
+            } else if (strcmp(key, "service_dns") == 0) {
+                cfg_dns_override = int_value ? 1 : 0;
+                global_fw_config.g_config.svc.dns = int_value ? 1 : 0;
+            } else if (strcmp(key, "quic_header_check") == 0) {
+                global_fw_config.g_config.svc.quic_header_check = int_value ? 1 : 0;
+            } else if (strcmp(key, "icmp_drop_fragments") == 0) {
+                global_fw_config.g_config.svc.icmp_drop_fragments = int_value ? 1 : 0;
+            } else if (strcmp(key, "synack_match_outbound") == 0) {
+                global_fw_config.g_config.svc.synack_match_outbound = int_value ? 1 : 0;
+            } else if (strcmp(key, "ipv6") == 0) {
+                global_fw_config.g_config.svc.ipv6_enabled = int_value ? 1 : 0;
+            } else if (strcmp(key, "cusum") == 0) {
+                shadow_cfg.cusum_enable = int_value ? 1 : 0;
+            } else if (strcmp(key, "nic_drop_trigger_seconds") == 0) {
+                if (int_value > 0) shadow_cfg.nic_drop_trigger_seconds = (__u32)int_value;
+            } else if (strcmp(key, "softirq_trigger_percent") == 0) {
+                if (int_value > 0) shadow_cfg.softirq_trigger_percent = (__u32)int_value;
+            } else if (strcmp(key, "softirq_trigger_seconds") == 0) {
+                if (int_value > 0) shadow_cfg.softirq_trigger_seconds = (__u32)int_value;
+            } else if (strcmp(key, "confirm_windows") == 0) {
+                if (int_value > 0) shadow_cfg.confirm_windows = (__u32)int_value;
+            } else if (strcmp(key, "exit_windows") == 0) {
+                if (int_value > 0) shadow_cfg.exit_windows = (__u32)int_value;
+            } else if (strcmp(key, "cooldown_seconds") == 0) {
+                if (int_value > 0) shadow_cfg.cooldown_seconds = (__u32)int_value;
+            } else if (strcmp(key, "quiet_clear_windows") == 0) {
+                if (int_value > 0) shadow_cfg.quiet_clear_windows = (__u32)int_value;
+            } else if (strcmp(key, "alert_hold_windows") == 0) {
+                if (int_value > 0) shadow_cfg.alert_hold_windows = (__u32)int_value;
+            } else if (strcmp(key, "escalate_after_windows") == 0) {
+                if (int_value > 0) shadow_cfg.escalate_after_windows = (__u32)int_value;
+            } else if (strcmp(key, "surge_factor") == 0) {
+                if (int_value >= 0) shadow_cfg.surge_factor = (__u32)int_value; /* 0 = off */
+            } else if (strcmp(key, "rearm_seconds") == 0) {
+                if (int_value >= 0) shadow_cfg.rearm_seconds = (__u32)int_value;
+            } else if (strcmp(key, "src_bucket_k") == 0) {
+                if (int_value > 0) shadow_cfg.src_bucket_k = (__u32)int_value;
+            } else if (strcmp(key, "flow_pps_k") == 0) {
+                if (int_value > 0) shadow_cfg.flow_pps_k = (__u32)int_value;
+            } else if (strcmp(key, "invalid_floor_pps") == 0) {
+                if (int_value >= 0) shadow_cfg.invalid_floor_pps = (__u32)int_value;
+            } else if (strcmp(key, "learning_days") == 0) {
+                /* 0 = skip learning bootstrap (immediate baseline gates). */
+                if (int_value >= 0) shadow_cfg.learning_days = (__u32)int_value;
+            } else if (strcmp(key, "detection_level") == 0) {
+                if (int_value >= 1 && int_value <= 10)
+                    shadow_cfg.detection_level = (__u32)int_value;
+                else
+                    LOG_W("Invalid detection_level %d (use 1..10)\n", int_value);
+            } else if (strcmp(key, "baseline_k") == 0) {
+                if (int_value > 0) shadow_cfg.baseline_k = (double)int_value;
+            } else if (strcmp(key, "baseline_m") == 0) {
+                if (int_value > 0) shadow_cfg.baseline_m = (double)int_value;
+            } else if (strcmp(key, "vlan_parse") == 0 ||
+                       strcmp(key, "syn_cookies") == 0 ||
+                       strcmp(key, "stage0_drop_invalid_flags") == 0 ||
+                       strcmp(key, "stage0_drop_land") == 0 ||
+                       strcmp(key, "data_class_by_payload") == 0 ||
+                       strcmp(key, "labels_independent") == 0) {
+                LOG_I("Accepted redesign key (no-op or default): %s = %d\n", key, int_value);
+            }
 
             else {
-                LOG_E("Unkown %s directive\n", key);
-                return -1;
+                /* redesign.config and future keys: warn and continue (do not abort). */
+                LOG_W("Ignoring unknown config key: %s = %d\n", key, int_value);
             }
         }
     }
@@ -939,10 +1333,16 @@ int load_config(struct bpf_object *obj) {
         }
     }
 
+    if (populate_validity_maps(obj) < 0) {
+        LOG_W("Validity allowlist populate had issues (continuing)\n");
+    }
+
     if (load_block_white_list(obj) < 0) {
         LOG_E("Failed to load white/block list ips from sqlite db\n");
         return -1;
     }
+
+    refresh_capacity_profile();
 
     LOG_I("Setup config success\n");
 

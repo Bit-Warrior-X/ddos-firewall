@@ -55,10 +55,16 @@ local applied_version = 0
 local function get_redis_connection(timeout)
     local red = redis:new()
     red:set_timeout(timeout or 2000)
-    local ok, err = red:connect(REDIS_SOCK)
+    local ok, err = red:connect(REDIS_SOCK, { pool = "athens_redis_db0" })
     if not ok then
         log(ERR, "redis connect failed: ", tostring(err))
         return nil, err
+    end
+    local ok_sel, sel_err = red:select(0)
+    if not ok_sel then
+        red:close()
+        log(ERR, "redis SELECT 0 failed: ", tostring(sel_err))
+        return nil, sel_err or "select_0_failed"
     end
     return red
 end
@@ -132,11 +138,32 @@ local function current_version()
     return tonumber(state:get(VERSION_KEY)) or 0
 end
 
+--- Host header may be bare ("xstream.wtf") on :80/:443, or host:port on
+--- non-default ports. Panel Redis keys are often "host:port"; include both.
+local function host_match_list(domains)
+    local out = {}
+    local seen = {}
+    for _, d in ipairs(domains) do
+        d = tostring(d or ""):lower()
+        if d ~= "" and not seen[d] then
+            seen[d] = true
+            out[#out + 1] = d
+        end
+        local bare = d:match("^([^:]+)") or d
+        if bare ~= "" and not seen[bare] then
+            seen[bare] = true
+            out[#out + 1] = bare
+        end
+    end
+    return out
+end
+
 local function wrap_rule_with_hosts(rule_body, domains)
-    if not domains or #domains == 0 then
+    local hosts = host_match_list(domains)
+    if not hosts or #hosts == 0 then
         return nil
     end
-    local host_list = table.concat(domains, ",")
+    local host_list = table.concat(hosts, ",")
     local host_clause = '["Header","Host","is in","' .. host_list .. '"]'
     if not rule_body or rule_body == "" then
         return host_clause
