@@ -213,6 +213,17 @@ paths:
                   temporaryblacklist: []
                   acl_rules: []
                   acl_apply_rules: []
+                  l7guard:
+                    enabled: true
+                    xdp: true
+                    window: 10
+                    rst_threshold: 100
+                    rej_threshold: 200
+                    bad_threshold: 20
+                    req_threshold: 1000
+                    block_ttl: 600
+                    block_max_ttl: 3600
+                    allow_ips: []
                   legacy_global:
                     whitelist: {}
                     blacklist: {}
@@ -955,6 +966,92 @@ paths:
           description: Compress settings applied
         "4XX":
           $ref: "#/components/responses/AgentError"
+
+  /API/L7/l7_update_l7guard:
+    post:
+      tags: [L7 WAF]
+      summary: Update L7 abuse detector (l7_guard) settings
+      description: |
+        Server-scoped. Sets the per-IP L7 abuse detector that runs in OpenResty
+        (`resty.l7_guard`) and escalates offenders to the XDP blocklist.
+
+        Per client IP, counted over `window` seconds; an IP is blocked when any
+        threshold is reached:
+
+        - `rst_threshold` — HTTP/2 streams reset by the client before a response
+          (Rapid Reset; logged as 499 with ~0 request time)
+        - `rej_threshold` — requests already rejected with 444 (per-IP rate /
+          concurrency limit or an existing temporary block)
+        - `bad_threshold` — malformed requests / empty connections (400/408 with
+          no request line)
+        - `req_threshold` — all requests (halved when most requests from the IP
+          are HTTP/2 without `Accept` / `Accept-Language`)
+
+        Blocked IPs are dropped by nginx immediately and, when `xdp` is true,
+        added to the XDP blocklist for `block_ttl` seconds, doubling per repeat
+        offense (within 24h) up to `block_max_ttl`. Loopback, private ranges,
+        the server's own address, IPv6 and `allow_ips` are never blocked.
+
+        The `l7guard` object **replaces** the stored settings; omitted fields use
+        the defaults. `reset: true` (or an empty object) restores all defaults.
+        Applied within ~10 s, no nginx reload. Requires the agent `token`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/L7GuardUpdate"
+            example:
+              token: edge-agent-token-example
+              serverId: 1033
+              l7guard:
+                enabled: true
+                xdp: true
+                window: 10
+                rst_threshold: 100
+                rej_threshold: 200
+                bad_threshold: 20
+                req_threshold: 1000
+                block_ttl: 600
+                block_max_ttl: 3600
+                allow_ips: ["198.51.100.20"]
+      responses:
+        "200":
+          description: Settings stored; `l7guard` is the effective configuration
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/L7GuardState"
+        "400":
+          description: Validation error (`message` names the offending field)
+        "403":
+          description: Invalid token
+
+  /API/L7/l7guard:
+    get:
+      tags: [L7 WAF]
+      summary: Read L7 abuse detector (l7_guard) settings
+      description: |
+        Server-scoped. Returns the effective settings, the stored overrides and
+        the built-in defaults. The same effective settings are included in
+        `report_edge_configure` under `l7.edge.l7guard`.
+      parameters:
+        - $ref: "#/components/parameters/AgentBearer"
+        - name: token
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Agent token (alternative to the Bearer header)
+      responses:
+        "200":
+          description: Current settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/L7GuardState"
+        "403":
+          description: Invalid token
 
   /API/L7/l7_update_cacherules:
     post:
@@ -1770,6 +1867,105 @@ components:
         compress:
           $ref: "#/components/schemas/CompressSettingsL7"
 
+    L7GuardSettings:
+      type: object
+      description: |
+        camelCase aliases are also accepted on input (e.g. `rstThreshold`,
+        `blockTtl`, `allowIps`, `windowSeconds`, `xdpEscalation`).
+      properties:
+        enabled:
+          type: boolean
+          default: true
+          description: Turn the detector on/off
+        xdp:
+          type: boolean
+          default: true
+          description: Escalate blocked IPs to the XDP blocklist (false = nginx-level block only)
+        window:
+          type: integer
+          minimum: 1
+          maximum: 300
+          default: 10
+          description: Counting window in seconds
+        rst_threshold:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          default: 100
+          description: Client-reset HTTP/2 streams per window
+        rej_threshold:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          default: 200
+          description: Requests rejected with 444 per window
+        bad_threshold:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          default: 100
+          description: Malformed requests (400/408, no request line) per window
+        req_threshold:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          default: 1000
+          description: Total requests per window
+        block_ttl:
+          type: integer
+          minimum: 10
+          maximum: 86400
+          default: 600
+          description: First block duration in seconds
+        block_max_ttl:
+          type: integer
+          minimum: 10
+          maximum: 604800
+          default: 3600
+          description: Maximum block duration for repeat offenders (>= block_ttl)
+        allow_ips:
+          type: array
+          maxItems: 1000
+          items:
+            type: string
+            format: ipv4
+          default: []
+          description: Client IPs never blocked by l7_guard (single addresses, no CIDR)
+
+    L7GuardUpdate:
+      type: object
+      required: [token, serverId]
+      properties:
+        token:
+          type: string
+        serverId:
+          type: integer
+          format: int64
+        l7guard:
+          $ref: "#/components/schemas/L7GuardSettings"
+        reset:
+          type: boolean
+          default: false
+          description: Restore all defaults (ignores `l7guard`)
+
+    L7GuardState:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        serverId:
+          type: integer
+          format: int64
+          description: Only on POST
+        l7guard:
+          $ref: "#/components/schemas/L7GuardSettings"
+        overrides:
+          type: object
+          description: Fields explicitly stored (the rest are defaults)
+        defaults:
+          $ref: "#/components/schemas/L7GuardSettings"
+
     L7CacheRulesUpdate:
       type: object
       required: [serverId, siteId, cacherules]
@@ -2396,6 +2592,8 @@ components:
               items:
                 type: object
                 additionalProperties: true
+            l7guard:
+              $ref: "#/components/schemas/L7GuardSettings"
             legacy_global:
               type: object
               additionalProperties: true

@@ -2,6 +2,7 @@
 """L7 firewall API routes (Redis-backed rule sync and nginx listening-port updates)."""
 import base64
 import binascii
+import ipaddress
 import json
 import re
 import subprocess
@@ -14,7 +15,7 @@ from flask import Blueprint, request, jsonify
 import config
 from core.backend_whitelist import ensure_backend_ips_whitelisted
 from core.redis_client import RedisClient
-from utils.auth import token_required, extract_token
+from utils.auth import token_required, extract_token, get_token
 from utils.validators import validate_url
 
 l7_bp = Blueprint('l7', __name__, url_prefix='/API/L7')
@@ -1601,6 +1602,166 @@ def l7_update_compress():
         "serverId": server_id,
         "siteId": site_id,
         "compress": flags
+    }), 200
+
+
+# field -> (accepted keys, kind, min, max)
+_L7GUARD_FIELDS = {
+    "enabled": (("enabled",), "bool", None, None),
+    "xdp": (("xdp", "xdpEscalation", "xdp_escalation"), "bool", None, None),
+    "window": (("window", "windowSeconds", "window_seconds"), "int", 1, 300),
+    "rst_threshold": (("rst_threshold", "rstThreshold"), "int", 1, 1000000),
+    "rej_threshold": (("rej_threshold", "rejThreshold"), "int", 1, 1000000),
+    "bad_threshold": (("bad_threshold", "badThreshold"), "int", 1, 1000000),
+    "req_threshold": (("req_threshold", "reqThreshold"), "int", 1, 1000000),
+    "block_ttl": (("block_ttl", "blockTtl"), "int", 10, 86400),
+    "block_max_ttl": (("block_max_ttl", "blockMaxTtl"), "int", 10, 604800),
+    "allow_ips": (("allow_ips", "allowIps"), "ipv4_list", None, 1000),
+}
+
+_BOOL_STRINGS = {
+    "true": True, "on": True, "1": True, "yes": True, "enable": True, "enabled": True,
+    "false": False, "off": False, "0": False, "no": False, "disable": False, "disabled": False,
+}
+
+
+def _parse_l7guard_value(name, kind, raw, lo, hi):
+    """Return (value, error_message)."""
+    if kind == "bool":
+        if isinstance(raw, bool):
+            return raw, None
+        if isinstance(raw, (int, str)) and str(raw).strip().lower() in _BOOL_STRINGS:
+            return _BOOL_STRINGS[str(raw).strip().lower()], None
+        return None, f"'{name}' must be a boolean."
+
+    if kind == "int":
+        if isinstance(raw, bool):
+            return None, f"'{name}' must be an integer."
+        try:
+            value = int(str(raw).strip())
+        except (TypeError, ValueError):
+            return None, f"'{name}' must be an integer."
+        if value < lo or value > hi:
+            return None, f"'{name}' must be between {lo} and {hi}."
+        return value, None
+
+    if isinstance(raw, str):
+        raw = [p for p in re.split(r"[\s,]+", raw) if p]
+    if not isinstance(raw, list):
+        return None, f"'{name}' must be an array of IPv4 addresses."
+    if len(raw) > hi:
+        return None, f"'{name}' accepts at most {hi} addresses."
+    ips = []
+    for item in raw:
+        try:
+            addr = ipaddress.ip_address(str(item).strip())
+        except ValueError:
+            return None, f"'{name}': '{item}' is not a single IP address (CIDR ranges are not supported)."
+        if addr.version != 4:
+            return None, f"'{name}': '{item}' is IPv6; IPv6 clients are never blocked by l7_guard."
+        if str(addr) not in ips:
+            ips.append(str(addr))
+    return ips, None
+
+
+def _parse_l7guard_settings(settings_in):
+    """Validate panel settings. Returns (overrides_dict, error_message)."""
+    overrides = {}
+    for name, (keys, kind, lo, hi) in _L7GUARD_FIELDS.items():
+        raw = _pick_field(settings_in, *keys)
+        if raw is None:
+            continue
+        value, msg = _parse_l7guard_value(name, kind, raw, lo, hi)
+        if msg:
+            return None, msg
+        overrides[name] = value
+
+    block_ttl = overrides.get("block_ttl", RedisClient.L7GUARD_DEFAULTS["block_ttl"])
+    block_max_ttl = overrides.get("block_max_ttl", RedisClient.L7GUARD_DEFAULTS["block_max_ttl"])
+    if block_max_ttl < block_ttl:
+        return None, "'block_max_ttl' must be greater than or equal to 'block_ttl'."
+    return overrides, None
+
+
+@l7_bp.route('/l7_update_l7guard', methods=['POST'])
+@token_required
+def l7_update_l7guard():
+    """Server-scoped: set the L7 abuse detector (resty.l7_guard) settings.
+
+    Expected JSON:
+      {
+        "token": "<agent token>",
+        "serverId": 1033,
+        "l7guard": {
+          "enabled": true,
+          "xdp": true,
+          "window": 10,
+          "rst_threshold": 100,
+          "rej_threshold": 200,
+          "bad_threshold": 20,
+          "req_threshold": 1000,
+          "block_ttl": 600,
+          "block_max_ttl": 3600,
+          "allow_ips": ["1.2.3.4"]
+        },
+        "reset": false
+      }
+
+    The l7guard object replaces the stored settings; omitted fields use the
+    defaults. "reset": true (or an empty object) restores all defaults.
+    OpenResty picks the change up within ~10s; no reload needed.
+    """
+    data, err = _json_object_or_error()
+    if err:
+        return err
+
+    server_id, err = _require_int_id(data, "serverId", "server_id")
+    if err:
+        return err
+
+    reset = _parse_l7guard_value("reset", "bool", data.get("reset", False), None, None)[0]
+    settings_in = _pick_field(data, "l7guard", "l7_guard", default={})
+    if not isinstance(settings_in, dict):
+        return jsonify({"status": "error", "message": "Invalid 'l7guard' (must be object)."}), 400
+
+    overrides = {}
+    if not reset:
+        overrides, msg = _parse_l7guard_settings(settings_in)
+        if msg:
+            return jsonify({"status": "error", "message": msg}), 400
+
+    ok, store_err = RedisClient.store_l7guard_config(overrides)
+    if not ok:
+        return jsonify({
+            "status": "error",
+            "message": "Failed to write l7guard settings to Redis.",
+            "details": store_err or "Unknown error"
+        }), 500
+
+    return jsonify({
+        "status": "success",
+        "message": "L7 guard settings updated (applied within ~10s).",
+        "serverId": server_id,
+        "l7guard": RedisClient.get_l7guard_config(),
+        "overrides": overrides,
+    }), 200
+
+
+@l7_bp.route('/l7guard', methods=['GET'])
+def l7guard_get():
+    """Server-scoped: effective L7 guard settings, stored overrides and defaults.
+
+    Token via 'Authorization: Bearer <token>' or '?token='.
+    """
+    token = extract_token(request)
+    if not token or token != get_token():
+        return jsonify({"status": "error", "message": "Invalid token"}), 403
+
+    return jsonify({
+        "status": "success",
+        "l7guard": RedisClient.get_l7guard_config(),
+        "overrides": RedisClient.get_l7guard_overrides(),
+        "defaults": RedisClient.L7GUARD_DEFAULTS,
     }), 200
 
 

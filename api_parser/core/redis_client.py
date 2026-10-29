@@ -858,6 +858,58 @@ class RedisClient:
         except Exception:
             return []
 
+    # Server-scoped L7 abuse detector settings, polled by OpenResty resty.l7_guard
+    # (worker 0, every 10s). Omitted fields fall back to L7GUARD_DEFAULTS.
+    L7GUARD_CONFIG_KEY = "l7guard:config"
+    # Must match DEFAULTS in openresty-modules/config/lua/resty/l7_guard.lua.
+    L7GUARD_DEFAULTS = {
+        "enabled": True,
+        "xdp": True,
+        "window": 10,
+        "rst_threshold": 100,
+        "rej_threshold": 200,
+        "bad_threshold": 100,
+        "req_threshold": 1000,
+        "block_ttl": 600,
+        "block_max_ttl": 3600,
+        "allow_ips": [],
+    }
+
+    @staticmethod
+    def get_l7guard_overrides() -> Dict:
+        """Stored l7guard:config overrides (only the fields set by the panel)."""
+        try:
+            raw = RedisClient.get_client().get(RedisClient.L7GUARD_CONFIG_KEY)
+            if not raw:
+                return {}
+            obj = json.loads(raw)
+            return obj if isinstance(obj, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def get_l7guard_config() -> Dict:
+        """Effective l7_guard settings (defaults merged with stored overrides)."""
+        effective = dict(RedisClient.L7GUARD_DEFAULTS)
+        for key, value in RedisClient.get_l7guard_overrides().items():
+            if key in effective:
+                effective[key] = value
+        return effective
+
+    @staticmethod
+    def store_l7guard_config(settings: Optional[Dict]) -> tuple:
+        """Replace l7guard:config with settings; None/empty restores defaults."""
+        try:
+            rcli = RedisClient.get_client()
+            if settings:
+                rcli.set(RedisClient.L7GUARD_CONFIG_KEY,
+                         json.dumps(settings, separators=(",", ":")))
+            else:
+                rcli.delete(RedisClient.L7GUARD_CONFIG_KEY)
+            return True, None
+        except Exception as e:
+            return False, str(e)
+
     @staticmethod
     def store_site_listening(site_id: int, ports_payload: Any) -> tuple:
         """Store site-scoped listening ports under key 'listening:{site_id}'.
@@ -1156,7 +1208,7 @@ class RedisClient:
 
         Returns:
           {
-            "edge": { listeningports, temporaryblacklist, acl_rules, acl_apply_rules, legacy_global },
+            "edge": { listeningports, temporaryblacklist, acl_rules, acl_apply_rules, l7guard, legacy_global },
             "sites": { "<site_id>": { domain, domains, waf, cache, listening, upstreamservers, compress, ssl } },
             "meta": { site_count, temporaryblacklist_count }
           }
@@ -1276,6 +1328,7 @@ class RedisClient:
             "temporaryblacklist": RedisClient.get_all_temporaryblacklist(),
             "acl_rules": RedisClient.get_acl_rules(),
             "acl_apply_rules": RedisClient.get_acl_apply_rules(),
+            "l7guard": RedisClient.get_l7guard_config(),
             "legacy_global": {
                 "whitelist": RedisClient.get_whitelist(),
                 "blacklist": RedisClient.get_blacklist(),
