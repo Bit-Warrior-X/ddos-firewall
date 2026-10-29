@@ -12,6 +12,7 @@ from core.temporary_blacklist_monitor import start_temporary_blacklist_monitor
 from core.license_monitor import start_license_monitor
 from core.edge_list_sync import start_edge_list_sync
 from core.cache_hit_sync import start_cache_hit_sync
+from core.l7_attack_sync import start_l7_attack_sync
 import config
 
 def create_app() -> Flask:
@@ -58,6 +59,8 @@ def initialize_app():
     start_edge_list_sync()
     # Push L7 cache-hit breakdowns (content types + top miss URLs) to backend
     start_cache_hit_sync()
+    # Record L7 attack incidents (Athens detector) locally and report them to backend
+    start_l7_attack_sync()
 
 def cleanup_on_exit():
     """Cleanup resources on application exit."""

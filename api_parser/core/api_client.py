@@ -182,6 +182,39 @@ class APIClient:
             return False
 
     @staticmethod
+    def report_l7_attack(payload: Dict[str, Any]) -> bool:
+        """Push an L7 attack incident event (start / update / stop) to the panel."""
+        headers = {"Content-Type": "application/json"}
+        token = payload.get("token") or get_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        url = getattr(config, "L7_ATTACK_REPORT_URL", None) or (
+            f"{config.API_BASE_URL}/report_l7_attack"
+        )
+        try:
+            response = _session().post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30,
+                verify=False,
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            body = ""
+            resp = getattr(e, "response", None)
+            if resp is not None and getattr(resp, "text", None):
+                body = resp.text.replace("\n", " ")[:300]
+            print(
+                f"[L7_ATTACK] report_l7_attack {payload.get('data')} "
+                f"id={payload.get('req_id')} failed: {e}"
+                + (f" body={body}" if body else ""),
+                flush=True,
+            )
+            return False
+
+    @staticmethod
     def report_cache_hit(payload: Dict[str, Any]) -> bool:
         """Push L7 cache-hit breakdown (content types + top miss URLs) to the panel."""
         headers = {"Content-Type": "application/json"}

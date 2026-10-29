@@ -17,6 +17,7 @@
 --   {"enabled":true,"xdp":true,"window":10,"rst_threshold":100,
 --    "rej_threshold":200,"bad_threshold":100,"req_threshold":1000,"block_ttl":600,
 --    "block_max_ttl":3600,"allow_ips":["1.2.3.4"]}
+-- The attack_* keys in DEFAULTS configure resty.l7_attack.
 
 local ngx = ngx
 local cjson = require "cjson.safe"
@@ -43,6 +44,15 @@ local DEFAULTS = {
     block_ttl = 600,
     block_max_ttl = 3600,
     allow_ips = {},
+    -- resty.l7_attack incident detector (per-second floors, seconds)
+    attack_detect = true,
+    attack_floor_flood = 500,
+    attack_floor_reset = 100,
+    attack_floor_malformed = 200,
+    attack_floor_blocked = 200,
+    attack_confirm_seconds = 3,
+    attack_exit_seconds = 30,
+    attack_cooldown_seconds = 60,
 }
 
 _M.SHM_NAME = SHM_NAME
@@ -169,6 +179,11 @@ local function escalate(dict, ip, cfg, reason, counters)
                 ngx.log(ngx.ERR, "l7_guard: queue push failed for ", ip, ": ", err)
             end
         end
+    end
+
+    local ok_atk, l7_attack = pcall(require, "resty.l7_attack")
+    if ok_atk then
+        l7_attack.on_escalate(ip, reason, ttl)
     end
 
     local stats_cache = ngx.shared.stats_cache

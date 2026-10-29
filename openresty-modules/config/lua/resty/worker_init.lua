@@ -84,6 +84,13 @@ function _M.run()
         ngx.log(ngx.ERR, "failed to require resty.l7_guard: ", tostring(l7_guard))
     end
 
+    local ok_la, l7_attack = pcall(require, "resty.l7_attack")
+    if ok_la and l7_attack and l7_attack.start then
+        l7_attack.start()
+    else
+        ngx.log(ngx.ERR, "failed to require resty.l7_attack: ", tostring(l7_attack))
+    end
+
     local ok_lgf, l7_guard_flusher = pcall(require, "resty.l7_guard_flusher")
     if ok_lgf and l7_guard_flusher and l7_guard_flusher.start then
         l7_guard_flusher.start()

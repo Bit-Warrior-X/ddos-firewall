@@ -63,6 +63,15 @@ CACHE_HIT_BUCKET_SECONDS = 60
 CACHE_HIT_TOP_MISS_URLS = 50
 ATHENS_STATS_TIMEOUT = 5
 
+# L7 attack incidents (Athens resty.l7_attack -> SQLite/JSON archive -> panel)
+L7_ATTACK_REPORT_URL = f"{API_BASE_URL}/report_l7_attack"
+L7_ATTACK_POLL_INTERVAL = 5
+L7_ATTACK_UPDATE_INTERVAL = 30
+L7_ATTACK_RETENTION_DAYS = 180
+L7_ATTACK_DATA_DIR = "/usr/local/share/dorian/athens/attacks"
+L7_ATTACK_DB = f"{L7_ATTACK_DATA_DIR}/l7_attacks.db"
+L7_ATTACK_ARCHIVE_DIR = f"{L7_ATTACK_DATA_DIR}/archive"
+
 # Redis configuration
 REDIS_SOCK = "/tmp/redis.sock"
 REDIS_DB = 0

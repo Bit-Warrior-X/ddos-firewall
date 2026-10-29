@@ -1617,6 +1617,14 @@ _L7GUARD_FIELDS = {
     "block_ttl": (("block_ttl", "blockTtl"), "int", 10, 86400),
     "block_max_ttl": (("block_max_ttl", "blockMaxTtl"), "int", 10, 604800),
     "allow_ips": (("allow_ips", "allowIps"), "ipv4_list", None, 1000),
+    "attack_detect": (("attack_detect", "attackDetect"), "bool", None, None),
+    "attack_floor_flood": (("attack_floor_flood", "attackFloorFlood"), "int", 10, 10000000),
+    "attack_floor_reset": (("attack_floor_reset", "attackFloorReset"), "int", 10, 10000000),
+    "attack_floor_malformed": (("attack_floor_malformed", "attackFloorMalformed"), "int", 10, 10000000),
+    "attack_floor_blocked": (("attack_floor_blocked", "attackFloorBlocked"), "int", 10, 10000000),
+    "attack_confirm_seconds": (("attack_confirm_seconds", "attackConfirmSeconds"), "int", 1, 60),
+    "attack_exit_seconds": (("attack_exit_seconds", "attackExitSeconds"), "int", 5, 3600),
+    "attack_cooldown_seconds": (("attack_cooldown_seconds", "attackCooldownSeconds"), "int", 0, 3600),
 }
 
 _BOOL_STRINGS = {
@@ -1753,8 +1761,7 @@ def l7guard_get():
 
     Token via 'Authorization: Bearer <token>' or '?token='.
     """
-    token = extract_token(request)
-    if not token or token != get_token():
+    if not _request_token_ok():
         return jsonify({"status": "error", "message": "Invalid token"}), 403
 
     return jsonify({
@@ -1763,6 +1770,80 @@ def l7guard_get():
         "overrides": RedisClient.get_l7guard_overrides(),
         "defaults": RedisClient.L7GUARD_DEFAULTS,
     }), 200
+
+
+def _request_token_ok() -> bool:
+    token = extract_token(request)
+    return bool(token) and token == get_token()
+
+
+def _optional_int_arg(name):
+    raw = request.args.get(name)
+    if raw is None or raw == "":
+        return None, None
+    try:
+        return int(raw), None
+    except ValueError:
+        return None, (jsonify({"status": "error", "message": f"Invalid '{name}' (must be integer)."}), 400)
+
+
+@l7_bp.route('/l7_attacks', methods=['GET'])
+def l7_attacks_list():
+    """Server-scoped: recorded L7 attack incidents, newest first (summary rows).
+
+    Query: from / to (unix seconds, on started_at), status (active|ended),
+    limit (1-500, default 50). Token via Bearer header or ?token=.
+    Also returns the live detector state.
+    """
+    if not _request_token_ok():
+        return jsonify({"status": "error", "message": "Invalid token"}), 403
+    from core import l7_attack_sync
+
+    since, err = _optional_int_arg("from")
+    if err:
+        return err
+    until, err = _optional_int_arg("to")
+    if err:
+        return err
+    limit, err = _optional_int_arg("limit")
+    if err:
+        return err
+    limit = max(1, min(500, limit or 50))
+    status = (request.args.get("status") or "").strip().lower() or None
+    if status not in (None, "active", "ended"):
+        return jsonify({"status": "error", "message": "Invalid 'status' (active|ended)."}), 400
+
+    try:
+        attacks = l7_attack_sync.list_attacks(since, until, status, limit)
+    except Exception as exc:
+        return jsonify({"status": "error", "message": f"Failed to read incidents: {exc}"}), 500
+    ok, live = l7_attack_sync.detector_status()
+    return jsonify({
+        "status": "success",
+        "count": len(attacks),
+        "attacks": attacks,
+        "detector": live if ok else None,
+    }), 200
+
+
+@l7_bp.route('/l7_attack', methods=['GET'])
+def l7_attack_detail():
+    """Server-scoped: full L7 attack incident (?id=<incident id>).
+
+    Includes vectors, totals, peaks, top IPs / URLs / user agents / countries,
+    status codes, per-site breakdown, blocked IPs and the 10-second timeline.
+    """
+    if not _request_token_ok():
+        return jsonify({"status": "error", "message": "Invalid token"}), 403
+    from core import l7_attack_sync
+
+    incident_id = (request.args.get("id") or "").strip()
+    if not incident_id.isdigit():
+        return jsonify({"status": "error", "message": "Missing or invalid 'id'."}), 400
+    attack = l7_attack_sync.get_attack(incident_id)
+    if attack is None:
+        return jsonify({"status": "error", "message": "Incident not found."}), 404
+    return jsonify({"status": "success", "attack": attack}), 200
 
 
 @l7_bp.route('/l7_update_temporaryblacklist', methods=['POST'])

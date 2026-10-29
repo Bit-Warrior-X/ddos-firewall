@@ -873,6 +873,14 @@ class RedisClient:
         "block_ttl": 600,
         "block_max_ttl": 3600,
         "allow_ips": [],
+        "attack_detect": True,
+        "attack_floor_flood": 500,
+        "attack_floor_reset": 100,
+        "attack_floor_malformed": 200,
+        "attack_floor_blocked": 200,
+        "attack_confirm_seconds": 3,
+        "attack_exit_seconds": 30,
+        "attack_cooldown_seconds": 60,
     }
 
     @staticmethod
