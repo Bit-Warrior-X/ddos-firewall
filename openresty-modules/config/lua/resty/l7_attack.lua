@@ -390,6 +390,7 @@ local function build_snapshot(dict, cfg, inc, status, now)
         status = status,
         started_at = inc.started_at,
         ended_at = ended_at,
+        closed_at = status == "ended" and inc.closed_at or cjson.null,
         updated_at = now,
         duration = math.max(1, last - inc.started_at + 1),
         vector_list = names,
@@ -537,7 +538,8 @@ end
 
 local function close_incident(dict, cfg, now, why)
     local inc = S.inc
-    inc.ended_at = inc.last_attack_at or now
+    inc.ended_at = inc.last_hot_at or inc.last_attack_at or now
+    inc.closed_at = now
     if inc.tb then
         dict:rpush("tl:" .. inc.id, cjson.encode(inc.tb))
         inc.tb = nil
@@ -689,8 +691,13 @@ local function step(dict, cfg, s)
         end
         if info then
             info.active = st.state == "attack"
-            if info.active then
+            -- last_at / ended_at mark the last second of attack-level traffic
+            -- (>= exit threshold), not the end of the exit confirmation window.
+            if info.active and (rates[v] >= st.t_exit or not info.last_at) then
                 info.last_at = s
+                if s > (inc.last_hot_at or 0) then
+                    inc.last_hot_at = s
+                end
             end
         end
     end

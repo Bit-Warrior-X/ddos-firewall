@@ -2140,6 +2140,12 @@ components:
         - `malformed` — no valid request line (400/408), rejected by nginx
         - `rapid_reset` — HTTP/2 stream cancelled by the client
 
+        Times: display `started_at` / `ended_at` / `duration` from this object,
+        never the time a report was received. attack_start is sent ~3-8 s after
+        `started_at` (confirmation + poll); attack_stop ~70 s after `ended_at`
+        (exit confirmation + cooldown + poll). While active, duration =
+        now - started_at.
+
         Recommended view: blocked vs passed requests per second from `timeline`
         (bucket value / 10), `blocked_ratio`, `peak_blocked_rps` /
         `peak_passed_rps`, and top IPs / URLs / countries with their blocked and
@@ -2154,7 +2160,8 @@ components:
         id: { type: string }
         status: { type: string, enum: [active, ended] }
         started_at: { type: integer }
-        ended_at: { type: integer, nullable: true, description: Last second any vector was under attack }
+        ended_at: { type: integer, nullable: true, description: "Last second with attack-level traffic (any vector at/above its exit threshold); null while active" }
+        closed_at: { type: integer, nullable: true, description: "When the detector closed the incident (ended_at + exit confirmation + cooldown); null while active" }
         updated_at: { type: integer }
         duration: { type: integer }
         vector_list: { type: array, items: { type: string, enum: [flood, rapid_reset, malformed, blocked] } }
@@ -2164,7 +2171,7 @@ components:
             type: object
             properties:
               first_at: { type: integer }
-              last_at: { type: integer }
+              last_at: { type: integer, description: Last second this vector was at/above its exit threshold }
               active: { type: boolean }
               peak: { type: integer, description: Per second }
               peak_at: { type: integer }
@@ -2238,7 +2245,13 @@ components:
                   ttl: { type: integer }
         timeline:
           type: array
-          description: 10-second buckets (only in attack_stop and the GET API)
+          description: |
+            10-second buckets (only in attack_stop and the GET API). `t` is the
+            bucket START; a bucket covers [t, t+10). Draw it as a step/bar over
+            that interval (or plot at t+5) — plotting the value at `t` with
+            linear interpolation from the previous point makes the attack
+            appear up to 10 s earlier than it started. Buckets cover the whole
+            incident from the bucket containing started_at until closed_at.
           items:
             type: object
             properties:
