@@ -24,6 +24,7 @@ extern struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS];
 
 #define BUF_SZ    1024
 #define BULK_CMD      "ADD_BLOCK_IPS"
+#define BULK_STATS_CMD "GET_BLOCK_STATS"
 #define BULK_BUF_SZ   (64 * 1024)
 #define BULK_MAX_IPS  4096
 #define CLIENT_RCV_TIMEOUT_S 2
@@ -336,6 +337,43 @@ static void handle_add_block_ip(int cfd, char **argv, int argc) {
     } else {
         reply(cfd, "failed\nError occured while adding %s to blacklist\n", ip);
     }
+}
+
+/*
+ * GET_BLOCK_STATS\n<ip>\n<ip>...\nEND\n
+ * Replies "ok\n" then one line per IP (see get_block_drop_stats):
+ *   <ip> <packets> <bytes> <conn_attempts> <first_unix> <last_unix> <block_left_s>
+ */
+static void handle_get_block_stats(int cfd, char *buf)
+{
+    char **ips = malloc(BULK_MAX_IPS * sizeof(*ips));
+    if (!ips) {
+        reply(cfd, "failed\nout of memory\n");
+        return;
+    }
+    char *save = NULL;
+    char *line = strtok_r(buf, "\n", &save);
+    int n = 0;
+    while (n < BULK_MAX_IPS && (line = strtok_r(NULL, "\n", &save))) {
+        size_t len = strlen(line);
+        while (len && isspace((unsigned char)line[len - 1]))
+            line[--len] = '\0';
+        while (*line && isspace((unsigned char)*line))
+            line++;
+        if (strcmp(line, "END") == 0)
+            break;
+        if (*line)
+            ips[n++] = line;
+    }
+
+    char *out = NULL;
+    if (get_block_drop_stats(ips, n, &out) == 0) {
+        reply(cfd, "ok\n%s", out ? out : "");
+    } else {
+        reply(cfd, "failed\nError reading block stats\n");
+    }
+    free(out);
+    free(ips);
 }
 
 /*
@@ -828,6 +866,13 @@ static void dispatch(int cfd, char *line) {
     reply(cfd, "ERR unknown command\n");
 }
 
+static bool is_bulk_cmd(const char *buf, size_t n, const char *cmd)
+{
+    size_t len = strlen(cmd);
+    return n >= len && strncasecmp(buf, cmd, len) == 0 &&
+           (buf[len] == ' ' || buf[len] == '\n' || buf[len] == '\r');
+}
+
 /* Bulk requests span several reads: keep reading until the END line, EOF,
  * timeout or BULK_BUF_SZ. Returns a malloc'd NUL-terminated buffer. */
 static char *read_bulk_request(int cfd, const char *first, size_t first_len)
@@ -869,16 +914,17 @@ static void * unix_socket_worker(void * arg)
         /* Handle exactly one request per connection (simple) */
         if ((n = read(cfd, buf, sizeof buf - 1)) > 0) {
             buf[n] = '\0';
-            if ((size_t)n >= sizeof(BULK_CMD) - 1 &&
-                strncasecmp(buf, BULK_CMD, sizeof(BULK_CMD) - 1) == 0 &&
-                (buf[sizeof(BULK_CMD) - 1] == ' ' || buf[sizeof(BULK_CMD) - 1] == '\n')) {
+            bool is_add = is_bulk_cmd(buf, (size_t)n, BULK_CMD);
+            bool is_stats = !is_add && is_bulk_cmd(buf, (size_t)n, BULK_STATS_CMD);
+            if (is_add || is_stats) {
                 char *big = read_bulk_request(cfd, buf, (size_t)n);
-                if (big) {
-                    handle_add_block_ips(cfd, big);
-                    free(big);
-                } else {
+                if (!big)
                     reply(cfd, "failed\nout of memory\n");
-                }
+                else if (is_add)
+                    handle_add_block_ips(cfd, big);
+                else
+                    handle_get_block_stats(cfd, big);
+                free(big);
             } else {
                 dispatch(cfd, buf);
             }

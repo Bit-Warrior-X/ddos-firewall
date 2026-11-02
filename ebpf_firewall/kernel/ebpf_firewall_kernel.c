@@ -68,6 +68,23 @@ struct {
     __type(value, __u64);
 } blocked_ips SEC(".maps");
 
+/* Per-source drop accounting while blocklisted. Reset by userspace whenever the
+ * source is (re)added to blocked_ips, so values cover the current block only. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAP_SIZE_MEDIUM);
+    __type(key, __u32);
+    __type(value, struct blocked_drop_stat);
+} blocked_drop_stats SEC(".maps");
+
+/* (src_ip << 16 | src_port) -> last SYN ISN, to skip SYN retransmissions. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, MAP_SIZE_LARGE);
+    __type(key, __u64);
+    __type(value, __u32);
+} blocked_syn_seen SEC(".maps");
+
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 256 * 1024);
@@ -514,10 +531,12 @@ static __always_inline int block_ip_with_event(
 
     __u64 block_exp = now + ttl;
     __u64 *blocked_time_p = bpf_map_lookup_elem(&blocked_ips, &src_ip);
-    if (!blocked_time_p)
+    if (!blocked_time_p) {
         bpf_map_update_elem(&blocked_ips, &src_ip, &block_exp, BPF_ANY);
-    else
+        bpf_map_delete_elem(&blocked_drop_stats, &src_ip);
+    } else {
         *blocked_time_p = block_exp;
+    }
 
     struct event evt = {0};
     evt.time = now;
@@ -575,6 +594,33 @@ static __always_inline void invalid_count(__u32 dst, __u8 reason)
     __u64 *tot = bpf_map_lookup_elem(&invalid_totals, &rk);
     if (tot)
         *tot += 1;
+}
+
+/* tcp: NULL for non-TCP packets; caller has bounds-checked *tcp. */
+static __always_inline void count_blocked_drop(__u32 src_ip, __u64 bytes, __u64 now,
+                                               struct tcphdr *tcp)
+{
+    struct blocked_drop_stat *st = bpf_map_lookup_elem(&blocked_drop_stats, &src_ip);
+    if (!st) {
+        struct blocked_drop_stat init = { .first_ns = now };
+        bpf_map_update_elem(&blocked_drop_stats, &src_ip, &init, BPF_NOEXIST);
+        st = bpf_map_lookup_elem(&blocked_drop_stats, &src_ip);
+        if (!st)
+            return;
+    }
+    __sync_fetch_and_add(&st->packets, 1);
+    __sync_fetch_and_add(&st->bytes, bytes);
+    st->last_ns = now;
+
+    if (tcp && tcp->syn && !tcp->ack) {
+        __u64 k = ((__u64)src_ip << 16) | tcp->source;
+        __u32 seq = tcp->seq;
+        __u32 *prev = bpf_map_lookup_elem(&blocked_syn_seen, &k);
+        if (!prev || *prev != seq) {
+            __sync_fetch_and_add(&st->conn_attempts, 1);
+            bpf_map_update_elem(&blocked_syn_seen, &k, &seq, BPF_ANY);
+        }
+    }
 }
 
 static __always_inline void count_drop_invalid(void)
@@ -1605,6 +1651,26 @@ int xdp_main(struct xdp_md *ctx) {
 
     __u64 now = bpf_ktime_get_ns();
 
+    /* Blocklist check first, so every drop of a blocked source is accounted to it
+     * (blocked_drop_stats) instead of to stage 0 / mitigation counters. */
+    __u64 *blocked_exp = bpf_map_lookup_elem(&blocked_ips, &src_ip);
+    if (blocked_exp) {
+        if (now < *blocked_exp) {
+            struct tcphdr *btcp = NULL;
+            if (have_tcp && l4 && (void *)((struct tcphdr *)l4 + 1) <= data_end)
+                btcp = l4;
+            if (have_tcp && tcp_psh && tcp_ack && !tcp_syn && !tcp_rst)
+                count_psh_ack_filtered();
+            count_blocked_drop(src_ip, packet_size, now, btcp);
+            traffic_stats->blocked_traffic += packet_size;
+            return XDP_DROP;
+        }
+        struct event evt = {0};
+        evt.time = now; evt.srcip = src_ip; evt.reason = EVENT_IP_BLOCK_END;
+        bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
+        bpf_map_delete_elem(&blocked_ips, &src_ip);
+    }
+
     /* Stage 0: always-on drops (land, flag anomalies, bad lens, TCP frags, SYN+data). */
     {
         __u8 stage0 = 0;
@@ -1765,21 +1831,6 @@ int xdp_main(struct xdp_md *ctx) {
         }
     }
 
-    /* Blocklist check */
-    __u64 *blocked_exp = bpf_map_lookup_elem(&blocked_ips, &src_ip);
-    if (blocked_exp) {
-        if (now < *blocked_exp) {
-            if (have_tcp && tcp_psh && tcp_ack && !tcp_syn && !tcp_rst)
-                count_psh_ack_filtered();
-            traffic_stats->blocked_traffic += packet_size;
-            return XDP_DROP;
-        }
-        struct event evt = {0};
-        evt.time = now; evt.srcip = src_ip; evt.reason = EVENT_IP_BLOCK_END;
-        bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
-        bpf_map_delete_elem(&blocked_ips, &src_ip);
-    }
-
     /* Fragment mitigation */
     __u8 tcp_seg_check = gcfg->tcp_seg_check;
     if (tcp_seg_check) {
@@ -1929,6 +1980,7 @@ int xdp_parse_syn(struct xdp_md *ctx) {
     __u64 *blocked_exp = bpf_map_lookup_elem(&blocked_ips, &src_ip);
     if (blocked_exp) {
         if (now < *blocked_exp) {
+            count_blocked_drop(src_ip, packet_size, now, tcp);
             traffic_stats->blocked_traffic += packet_size;
             return XDP_DROP;
         }

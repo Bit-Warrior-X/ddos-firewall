@@ -46,6 +46,8 @@ static void usage(void) {
 "  CLEAR_BLOCK_IP_ALL : Remove all ips from blacklist\n"
 "  ADD_BLOCK_IP <ip> [seconds] : Add ip to blacklist. Default duration if seconds omitted.\n"
 "  ADD_BLOCK_IPS <seconds> [reason] : Add IPs read from stdin (one per line) to blacklist.\n"
+"  GET_BLOCK_STATS : For IPs read from stdin, print XDP drops since blocked:\n"
+"                    ip packets bytes conn_attempts first_unix last_unix block_left_s\n"
 "  LIST_ALLOW_IP : Dump whitelist ip list\n"
 "  CLEAR_ALLOW_IP <ip> : Remove ip from whitelist\n"
 "  CLEAR_ALLOW_IP_ALL : Remove all ips from blacklist\n"
@@ -670,14 +672,17 @@ static int send_and_print(const char *msg) {
 
 #define BULK_BUF_SZ (64 * 1024)
 
-/* ADD_BLOCK_IPS <seconds> [reason] : IPs are read from stdin, one per line. */
+/* ADD_BLOCK_IPS <seconds> [reason] / GET_BLOCK_STATS : IPs are read from stdin, one per line. */
 static int send_bulk_block(int argc, char *argv[]) {
-    if (argc < 3 || argc > 4) usage();
+    bool stats = strcmp(argv[1], "GET_BLOCK_STATS") == 0;
+    if (stats ? argc != 2 : (argc < 3 || argc > 4)) usage();
 
     char *msg = malloc(BULK_BUF_SZ);
     if (!msg) { perror("malloc"); return 2; }
-    size_t pos = (size_t)snprintf(msg, BULK_BUF_SZ, "ADD_BLOCK_IPS %d %s\n",
-                                  atoi(argv[2]), argc == 4 ? argv[3] : "cli");
+    size_t pos = stats
+        ? (size_t)snprintf(msg, BULK_BUF_SZ, "GET_BLOCK_STATS\n")
+        : (size_t)snprintf(msg, BULK_BUF_SZ, "ADD_BLOCK_IPS %d %s\n",
+                           atoi(argv[2]), argc == 4 ? argv[3] : "cli");
 
     char ip[64];
     while (fgets(ip, sizeof ip, stdin)) {
@@ -963,7 +968,7 @@ int main(int argc, char *argv[]) {
         }
     }   
 
-    if (strcmp(argv[1], "ADD_BLOCK_IPS") == 0)
+    if (strcmp(argv[1], "ADD_BLOCK_IPS") == 0 || strcmp(argv[1], "GET_BLOCK_STATS") == 0)
         return send_bulk_block(argc, argv);
 
     /* Build the outgoing line */

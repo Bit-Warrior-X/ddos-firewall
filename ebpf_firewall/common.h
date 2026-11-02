@@ -507,6 +507,16 @@ struct traffic_stats_config {
     __u64 other;
 };
 
+/* Drops of a blocklisted source since it was (re)blocked (map blocked_drop_stats).
+ * conn_attempts counts distinct SYNs (src port + ISN), not retransmissions. */
+struct blocked_drop_stat {
+    __u64 packets;
+    __u64 bytes;
+    __u64 conn_attempts;
+    __u64 first_ns;   /* bpf_ktime_get_ns() of the first counted drop */
+    __u64 last_ns;
+};
+
 struct fixed_ip_pkt_stats {
     __u64 normal_syn;
     __u64 attack_syn;

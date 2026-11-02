@@ -2267,6 +2267,62 @@ components:
           type: object
           additionalProperties: true
           description: Floors and timings in effect
+        xdp:
+          type: object
+          description: |
+            Traffic dropped by XDP from IPs this incident blocked at L7. Once an IP
+            is blocked, its handshakes fail and it never reaches L7 again, so the
+            L7 counters stop; these are the exact XDP drop counters (since each IP
+            was blocked, measured at `measured_at`), plus an estimate of the
+            requests behind them:
+            estimated_requests = connection_attempts x requests per connection
+            the IP made at L7 before it was blocked (malformed: 1 per connection,
+            so malformed estimates are effectively exact). connection_attempts
+            counts distinct SYNs (retransmissions excluded).
+          properties:
+            measured_at: { type: integer }
+            blocked_ips: { type: integer, description: IPs blocked by l7_guard in this incident }
+            ips: { type: integer, description: Blocked IPs that kept sending (had XDP drops) }
+            packets: { type: integer }
+            bytes: { type: integer }
+            connection_attempts: { type: integer }
+            estimated_requests: { type: integer }
+            by_reason:
+              type: object
+              description: "rapid-reset | rejected | malformed | flood → same counters"
+              additionalProperties:
+                type: object
+                properties:
+                  ips: { type: integer }
+                  packets: { type: integer }
+                  bytes: { type: integer }
+                  connection_attempts: { type: integer }
+                  estimated_requests: { type: integer }
+            top_ips:
+              type: array
+              items:
+                type: object
+                properties:
+                  ip: { type: string }
+                  reason: { type: string }
+                  packets: { type: integer }
+                  bytes: { type: integer }
+                  connection_attempts: { type: integer }
+                  requests_per_connection: { type: number }
+                  estimated_requests: { type: integer }
+                  first_drop_at: { type: integer }
+                  last_drop_at: { type: integer }
+        filtered:
+          type: object
+          description: |
+            Attack requests stopped by the product (L7 exact + XDP estimated).
+            Use these for "how many attack requests were filtered".
+          properties:
+            at_l7: { type: integer, description: "totals.blocked + totals.malformed (exact)" }
+            at_xdp_estimated: { type: integer, description: xdp.estimated_requests }
+            total_estimated: { type: integer }
+            malformed_at_l7: { type: integer }
+            malformed_total_estimated: { type: integer, description: Malformed requests at L7 + malformed attempts dropped by XDP }
 
     L7GuardState:
       type: object

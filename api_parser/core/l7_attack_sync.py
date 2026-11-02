@@ -12,11 +12,17 @@ attack_start once, attack_update every L7_ATTACK_UPDATE_INTERVAL while the
 attack is active, attack_stop with the final snapshot. Undelivered start/stop
 reports are retried on later polls with backoff, so incidents that happen
 while the panel or angelos is down are still delivered.
+
+IPs blocked by l7_guard are dropped by XDP afterwards, so L7 stops seeing
+them. Each snapshot is enriched with sparta's per-IP drop counters
+(GET_BLOCK_STATS) for those IPs: `xdp` (dropped packets / bytes / connection
+attempts + estimated requests) and `filtered` (L7 + XDP totals).
 """
 from __future__ import annotations
 
 import json
 import os
+import socket
 import sqlite3
 import threading
 import time
@@ -39,6 +45,9 @@ REQUEST_TIMEOUT = float(getattr(config, "ATHENS_STATS_TIMEOUT", 5))
 RETRY_MAX_DELAY = 600
 RETRY_GIVE_UP_DAYS = 7
 STALE_ACTIVE_SECONDS = 300
+SPARTA_SOCK = getattr(config, "SPARTA_UNIX_SOCK", "/tmp/ebpf_fw.sock")
+SPARTA_CHUNK = 3000
+XDP_TOP_N = 50
 
 _db_lock = threading.Lock()
 
@@ -127,7 +136,7 @@ def _get_row(conn: sqlite3.Connection, incident_id: str) -> Optional[sqlite3.Row
 _LIST_FIELDS = ("vector_list", "top_ips", "top_urls", "top_user_agents", "top_countries",
                 "sites", "timeline")
 _MAP_FIELDS = ("vectors", "totals", "status_codes", "protocols", "methods", "block_rules",
-               "sampling", "detector")
+               "sampling", "detector", "xdp", "filtered")
 
 
 def _normalize_snapshot(snap: Dict[str, Any]) -> Dict[str, Any]:
@@ -203,6 +212,117 @@ def _write_archive(snap: Dict[str, Any]) -> Optional[str]:
         return None
 
 
+def _sparta_block_stats(ips: List[str]) -> Dict[str, Dict[str, int]]:
+    """XDP drops per blocked IP since it was blocked (sparta GET_BLOCK_STATS)."""
+    out: Dict[str, Dict[str, int]] = {}
+    for i in range(0, len(ips), SPARTA_CHUNK):
+        chunk = ips[i:i + SPARTA_CHUNK]
+        payload = ("GET_BLOCK_STATS\n" + "\n".join(chunk) + "\nEND\n").encode()
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(REQUEST_TIMEOUT)
+        try:
+            sock.connect(SPARTA_SOCK)
+            sock.sendall(payload)
+            data = b""
+            while True:
+                part = sock.recv(65536)
+                if not part:
+                    break
+                data += part
+        finally:
+            sock.close()
+        lines = data.decode(errors="replace").splitlines()
+        if not lines or lines[0].strip() != "ok":
+            raise RuntimeError(f"GET_BLOCK_STATS failed: {lines[:2]}")
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) != 7:
+                continue
+            ip, packets, nbytes, conns, first, last, left = parts
+            out[ip] = {
+                "packets": int(packets), "bytes": int(nbytes), "connection_attempts": int(conns),
+                "first_drop_at": int(first), "last_drop_at": int(last), "block_left": int(left),
+            }
+    return out
+
+
+def _enrich_xdp(snap: Dict[str, Any]) -> None:
+    """Add what XDP dropped from IPs this incident blocked at L7.
+
+    estimated_requests = XDP-dropped connection attempts x the requests per
+    connection the IP made at L7 before it was blocked (malformed: 1)."""
+    incident_id = str(snap.get("id") or "")
+    if not incident_id:
+        return
+    ok, escalated = _athens_get({"id": incident_id, "escalated": 1})
+    if not ok or not isinstance(escalated, list) or not escalated:
+        return
+    try:
+        stats = _sparta_block_stats([e["ip"] for e in escalated if e.get("ip")])
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"[L7_ATTACK] XDP block stats unavailable for {incident_id}: {exc}", flush=True)
+        return
+
+    # Fallback ratio when an IP was blocked before L7 saw a full connection from it.
+    ratios: Dict[str, List[float]] = {}
+    for e in escalated:
+        if int(e.get("connections") or 0) > 0:
+            ratios.setdefault(e.get("reason") or "", []).append(
+                int(e.get("requests") or 0) / int(e["connections"]))
+
+    def median(values: List[float]) -> float:
+        values = sorted(values)
+        return values[len(values) // 2] if values else 1.0
+
+    zero = {"ips": 0, "packets": 0, "bytes": 0, "connection_attempts": 0, "estimated_requests": 0}
+    total = dict(zero)
+    by_reason: Dict[str, Dict[str, int]] = {}
+    rows = []
+    for e in escalated:
+        st = stats.get(e.get("ip"))
+        if not st or not (st["packets"] or st["connection_attempts"]):
+            continue
+        reason = e.get("reason") or "unknown"
+        if reason == "malformed":
+            rpc = 1.0
+        elif int(e.get("connections") or 0) > 0:
+            rpc = int(e.get("requests") or 0) / int(e["connections"])
+        else:
+            rpc = median(ratios.get(reason, []))
+        est = int(round(st["connection_attempts"] * rpc))
+        for bucket in (total, by_reason.setdefault(reason, dict(zero))):
+            bucket["ips"] += 1
+            bucket["packets"] += st["packets"]
+            bucket["bytes"] += st["bytes"]
+            bucket["connection_attempts"] += st["connection_attempts"]
+            bucket["estimated_requests"] += est
+        rows.append({
+            "ip": e["ip"], "reason": reason, "packets": st["packets"], "bytes": st["bytes"],
+            "connection_attempts": st["connection_attempts"],
+            "requests_per_connection": round(rpc, 2), "estimated_requests": est,
+            "first_drop_at": st["first_drop_at"], "last_drop_at": st["last_drop_at"],
+        })
+    rows.sort(key=lambda r: (r["estimated_requests"], r["packets"]), reverse=True)
+
+    snap["xdp"] = {
+        "measured_at": int(time.time()),
+        "blocked_ips": len(escalated),
+        **total,
+        "by_reason": by_reason,
+        "top_ips": rows[:XDP_TOP_N],
+    }
+    totals = snap.get("totals") or {}
+    at_l7 = int(totals.get("blocked") or 0) + int(totals.get("malformed") or 0)
+    malformed_xdp = by_reason.get("malformed", {}).get("estimated_requests", 0)
+    snap["filtered"] = {
+        "at_l7": at_l7,
+        "at_xdp_estimated": total["estimated_requests"],
+        "total_estimated": at_l7 + total["estimated_requests"],
+        "malformed_at_l7": int(totals.get("malformed") or 0),
+        "malformed_total_estimated": int(totals.get("malformed") or 0) + malformed_xdp,
+    }
+
+
 def _payload(token: str, data: str, snap: Dict[str, Any]) -> Dict[str, Any]:
     attack = _normalize_snapshot(dict(snap))
     if data != "attack_stop":
@@ -232,6 +352,7 @@ def _schedule_retry(conn: sqlite3.Connection, row: sqlite3.Row) -> None:
 
 
 def _handle_active(conn: sqlite3.Connection, token: str, snap: Dict[str, Any]) -> None:
+    _enrich_xdp(snap)
     _upsert(conn, snap)
     row = _get_row(conn, str(snap["id"]))
     now = int(time.time())
@@ -275,6 +396,8 @@ def _handle_closed(conn: sqlite3.Connection, token: str, incident_id: str) -> No
                 snap["status"] = "ended"
             else:
                 return
+        else:
+            _enrich_xdp(snap)
         _upsert(conn, snap)
         path = _write_archive(snap)
         if path:

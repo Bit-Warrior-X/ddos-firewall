@@ -129,6 +129,11 @@ local function record_detail(cls, status, is_error, sample)
     if split then
         d:incr("ip" .. split .. ip, sample, 0)
     end
+    -- First request on a connection (HTTP/2 streams share it): requests per
+    -- connection, used to estimate requests behind XDP-dropped connections.
+    if var.connection_requests == "1" then
+        d:incr("ipc:" .. ip, sample, 0)
+    end
     d:incr("st:" .. status, sample, 0)
     d:incr(site_prefix .. "requests", sample, 0)
     d:incr(site_prefix .. cls, sample, 0)
@@ -274,7 +279,7 @@ end
 local function collect_detail()
     local d = ngx.shared[DETAIL]
     local buckets = {
-        ip = {}, ipb = {}, ipp = {}, url = {}, urlb = {}, urlp = {}, cc = {}, ccb = {}, ccp = {},
+        ip = {}, ipb = {}, ipp = {}, ipc = {}, url = {}, urlb = {}, urlp = {}, cc = {}, ccb = {}, ccp = {},
         ua = {}, st = {}, proto = {}, method = {}, rule = {},
     }
     local sites, esc = {}, setmetatable({}, cjson.array_mt)
@@ -362,8 +367,12 @@ local function build_snapshot(dict, cfg, inc, status, now)
     local by_reason = {}
     for _, e in ipairs(esc) do
         by_reason[e.reason] = (by_reason[e.reason] or 0) + 1
+        e.requests = buckets.ip[e.ip] or 0
+        e.connections = buckets.ipc[e.ip] or 0
     end
     local esc_total = #esc
+    -- Full list for XDP drop accounting (angelos); the snapshot keeps the first ESC_IPS_N.
+    dict:set("escl:" .. inc.id, cjson.encode(esc), INCIDENT_TTL)
     for i = #esc, ESC_IPS_N + 1, -1 do
         esc[i] = nil
     end
@@ -812,6 +821,9 @@ end
 -- Internal API (stats listener, localhost only)
 --   GET    /l7_attack            detector view, current incident, recent ids
 --   GET    /l7_attack?id=<id>    full incident snapshot
+--   GET    /l7_attack?id=<id>&escalated=1
+--                                every IP blocked by l7_guard in the incident
+--                                (with its requests / connections at L7)
 --   DELETE /l7_attack?id=<id>    drop a closed incident from shm
 -- ---------------------------------------------------------------------------
 
@@ -834,6 +846,7 @@ function _M.api()
             return
         end
         dict:delete("inc:" .. id)
+        dict:delete("escl:" .. id)
         local recent = cjson.decode(dict:get("recent") or "[]") or {}
         local kept = setmetatable({}, cjson.array_mt)
         for _, r in ipairs(recent) do
@@ -843,6 +856,11 @@ function _M.api()
         end
         dict:set("recent", cjson.encode(kept))
         ngx.say('{"status":"success"}')
+        return
+    end
+
+    if id and args.escalated then
+        ngx.say(dict:get("escl:" .. id) or "[]")
         return
     end
 

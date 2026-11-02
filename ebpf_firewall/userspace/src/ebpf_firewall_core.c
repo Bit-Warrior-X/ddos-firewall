@@ -2901,6 +2901,72 @@ int clear_deny_ip_all() {
 }
 
 
+/* Start a fresh drop-accounting period for a source that is (re)blocked. */
+static void reset_block_drop_stats(__u32 key)
+{
+    int fd = bpf_object__find_map_fd_by_name(obj, "blocked_drop_stats");
+    if (fd >= 0)
+        bpf_map_delete_elem(fd, &key);
+}
+
+/*
+ * Text report of blocked_drop_stats for the given IPv4s, one line per IP:
+ *   <ip> <packets> <bytes> <conn_attempts> <first_unix> <last_unix> <block_left_s>
+ * first/last are 0 when nothing was dropped; block_left_s is -1 when permanent,
+ * 0 when not (or no longer) blocked. Caller frees *out.
+ */
+int get_block_drop_stats(char **ips, int n, char **out)
+{
+    *out = NULL;
+    int stats_fd = bpf_object__find_map_fd_by_name(obj, "blocked_drop_stats");
+    int blocked_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
+    if (stats_fd < 0 || blocked_fd < 0) {
+        LOG_E("get_block_drop_stats: map not found\n");
+        return -1;
+    }
+
+    size_t cap = (size_t)(n > 0 ? n : 1) * 112 + 1;
+    char *buf = malloc(cap);
+    if (!buf)
+        return -1;
+    size_t len = 0;
+    buf[0] = '\0';
+
+    __u64 mono_now = now_ns();
+    time_t wall_now = time(NULL);
+    for (int i = 0; i < n; i++) {
+        __u32 key;
+        if (inet_pton(AF_INET, ips[i], &key) != 1)
+            continue;
+
+        struct blocked_drop_stat st = {0};
+        bool have = bpf_map_lookup_elem(stats_fd, &key, &st) == 0;
+        long long first = 0, last = 0;
+        if (have && st.first_ns && st.first_ns <= mono_now)
+            first = (long long)wall_now - (long long)((mono_now - st.first_ns) / ONE_SECOND_NS);
+        if (have && st.last_ns && st.last_ns <= mono_now)
+            last = (long long)wall_now - (long long)((mono_now - st.last_ns) / ONE_SECOND_NS);
+
+        long long left = 0;
+        __u64 exp;
+        if (bpf_map_lookup_elem(blocked_fd, &key, &exp) == 0) {
+            if (exp == (__u64)-1)
+                left = -1;
+            else if (exp > mono_now)
+                left = (long long)((exp - mono_now) / ONE_SECOND_NS);
+        }
+
+        int w = snprintf(buf + len, cap - len, "%s %llu %llu %llu %lld %lld %lld\n", ips[i],
+                         (unsigned long long)st.packets, (unsigned long long)st.bytes,
+                         (unsigned long long)st.conn_attempts, first, last, left);
+        if (w < 0 || (size_t)w >= cap - len)
+            break;
+        len += (size_t)w;
+    }
+    *out = buf;
+    return 0;
+}
+
 int add_block_ip(char *ip, int seconds) {
     __u64 expire_duration = (seconds == 0) 
                           ? now_ns() + global_fw_config.g_config.black_ip_duration 
@@ -2929,12 +2995,15 @@ int add_block_ip(char *ip, int seconds) {
     
     __u64 existing_val;
     bool is_new_entry = (bpf_map_lookup_elem(blocked_ips_fd, &key, &existing_val) != 0);
+    bool new_period = is_new_entry || existing_val < now_ns();
 
     int err = bpf_map_update_elem(blocked_ips_fd, &key, &expire_duration, BPF_ANY);
     if (err) {
         LOG_E("Failed to update map %s\n", strerror(errno));
         return err;
     }
+    if (new_period)
+        reset_block_drop_stats(key);
 
     int tcp_established_map_fd =
         bpf_object__find_map_fd_by_name(obj, "tcp_established_map");
@@ -2977,16 +3046,22 @@ int add_block_ips_bulk(char **ips, int n, int seconds, __u32 **out_keys, int *ou
         return -1;
 
     int added = 0;
+    __u64 now = now_ns();
     for (int i = 0; i < n; i++) {
         __u32 key;
         if (inet_pton(AF_INET, ips[i], &key) != 1) {
             LOG_W("add_block_ips_bulk: invalid IPv4 '%s'\n", ips[i]);
             continue;
         }
+        __u64 existing;
+        bool new_period = bpf_map_lookup_elem(blocked_ips_fd, &key, &existing) != 0 ||
+                          existing < now;
         if (bpf_map_update_elem(blocked_ips_fd, &key, &expire, BPF_ANY)) {
             LOG_E("add_block_ips_bulk: map update for %s failed: %s\n", ips[i], strerror(errno));
             continue;
         }
+        if (new_period)
+            reset_block_drop_stats(key);
         keys[added++] = key;
     }
 
