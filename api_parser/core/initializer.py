@@ -30,9 +30,28 @@ def _read_firewall_config():
         if not stripped or stripped.startswith("#") or "=" not in stripped:
             continue
         key, value = stripped.split("=", 1)
-        parsed[key.strip()] = value.strip()
+        # Values carry inline comments ("native # native | generic"); passing
+        # them on made sparta append the comment again on every start.
+        parsed[key.strip()] = value.split("#", 1)[0].strip()
 
     return True, parsed
+
+
+def panel_list(data):
+    """Panel list payload as a list of dicts, or None when it is unusable.
+
+    An error object such as {"status": "error"} must not be taken as an empty
+    list, or the sync would wipe the panel-owned rows."""
+    if isinstance(data, dict):
+        if data.get("IP") or data.get("ip"):
+            data = [data]
+        elif isinstance(data.get("data"), list):
+            data = data["data"]
+        else:
+            return None
+    if not isinstance(data, list) or not all(isinstance(e, dict) for e in data):
+        return None
+    return data
 
 
 def sync_l4_lists_and_start_firewall():
@@ -73,38 +92,23 @@ def sync_l4_lists_and_start_firewall():
     else:
         print("[INIT] Skipping L4 list fetch because token is unavailable", flush=True)
 
-    # Only when we got at least one success: init DB, clear, and update with response
-    if blocklist_ok and whitelist_ok:
-        try:
-            DatabaseManager.init_database()
-            DatabaseManager.clear_all_tables()
-            print("[INIT] Initialized and cleared firewall SQLite tables", flush=True)
-        except Exception as exc:
-            print(f"[INIT] Failed to init/clear firewall DB: {exc}", flush=True)
-        else:
-            if blocklist_ok and blocklist_data is not None:
-                data = [blocklist_data] if isinstance(blocklist_data, dict) else blocklist_data
-                if isinstance(data, list):
-                    db_ok, msg = DatabaseManager.store_blocklist(data)
-                    if db_ok:
-                        print(f"[INIT] {msg}", flush=True)
-                    else:
-                        print(f"[INIT] store_blocklist failed: {msg}", flush=True)
-                else:
-                    print(f"[INIT] Unexpected blocklist payload type: {type(blocklist_data)}", flush=True)
-            if whitelist_ok and whitelist_data is not None:
-                data = [whitelist_data] if isinstance(whitelist_data, dict) else whitelist_data
-                if isinstance(data, list):
-                    db_ok, msg = DatabaseManager.store_whitelist(data)
-                    if db_ok:
-                        print(f"[INIT] {msg}", flush=True)
-                    else:
-                        print(f"[INIT] store_whitelist failed: {msg}", flush=True)
-                else:
-                    print(f"[INIT] Unexpected whitelist payload type: {type(whitelist_data)}", flush=True)
+    try:
+        DatabaseManager.init_database()
+    except Exception as exc:
+        print(f"[INIT] Failed to init firewall DB: {exc}", flush=True)
+
+    # Replace the lists only when both fetches succeeded and look valid, in one
+    # transaction; otherwise keep what sparta already has.
+    blocklist = panel_list(blocklist_data) if blocklist_ok else None
+    whitelist = panel_list(whitelist_data) if whitelist_ok else None
+    if blocklist is not None and whitelist is not None:
+        db_ok, msg = DatabaseManager.replace_lists(blocklist, whitelist)
+        print(f"[INIT] {'Synced L4 lists: ' if db_ok else 'L4 list sync failed: '}{msg}", flush=True)
+    else:
+        print("[INIT] Keeping existing L4 lists (panel lists unavailable or invalid)", flush=True)
 
     # Always whitelist L7 upstream backends before XDP attach / restart.
-    # Must run after store_whitelist (which wipes white_ips) and before Sparta start.
+    # Must run after the whitelist replace (which wipes white_ips) and before Sparta start.
     try:
         ensure_backend_ips_whitelisted(apply_live=True)
     except Exception as exc:

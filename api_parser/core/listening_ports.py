@@ -40,6 +40,9 @@ def normalize_api_ports(listeningports_in: list) -> Tuple[List[Dict], List[Dict]
     redis_entries: List[Dict] = []
     enabled_ports: List[Dict] = []
     seen = set()
+    # The panel has sent thousands of rows for the same few ports; keep one row
+    # per (port, protocol), preferring an ENABLE row (same rule as the conf).
+    entry_index: Dict[Tuple[int, str], int] = {}
 
     for entry in listeningports_in or []:
         if not isinstance(entry, dict):
@@ -81,10 +84,15 @@ def normalize_api_ports(listeningports_in: list) -> Tuple[List[Dict], List[Dict]
         if desc is not None:
             item["description"] = str(desc)
 
-        redis_entries.append(item)
+        key = (port, protocol)
+        idx = entry_index.get(key)
+        if idx is None:
+            entry_index[key] = len(redis_entries)
+            redis_entries.append(item)
+        elif status == "ENABLE" and redis_entries[idx]["status"] != "ENABLE":
+            redis_entries[idx] = item
 
         if status == "ENABLE":
-            key = (port, protocol)
             if key not in seen:
                 seen.add(key)
                 enabled_ports.append({"port": port, "protocol": protocol})

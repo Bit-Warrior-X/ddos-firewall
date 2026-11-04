@@ -1,3 +1,5 @@
+#include <net/if.h>
+#include <ctype.h>
 // gcc -o firewall_cli firewall_cli.c
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,9 +11,10 @@
 #include <stdbool.h>
 
 
-#define FIREWALL_START "systemctl start ebpf-firewall"
-#define FIREWALL_STOP  "systemctl stop ebpf-firewall"
-#define FIREWALL_RESTART  "systemctl restart ebpf-firewall"
+/* ebpf-firewall.service is the pre-rename unit (binary no longer exists). */
+#define FIREWALL_START "systemctl start sparta.service"
+#define FIREWALL_STOP  "systemctl stop sparta.service"
+#define FIREWALL_RESTART  "systemctl restart sparta.service"
 
 #define MAX_LINE_LENGTH 256
 #define MAX_COMMENT_LENGTH 256
@@ -706,6 +709,22 @@ static int send_bulk_block(int argc, char *argv[]) {
 }
 
 
+/* Interface / attach-mode arguments reach system() and firewall.config. */
+static int valid_ifname(const char *s) {
+    size_t n = strlen(s);
+    if (n == 0 || n >= IF_NAMESIZE) return 0;
+    for (size_t i = 0; i < n; i++)
+        if (!isalnum((unsigned char)s[i]) && !strchr("_.:-", s[i])) return 0;
+    return if_nametoindex(s) != 0;
+}
+
+static int valid_word(const char *s) {
+    if (!*s) return 0;
+    for (; *s; s++)
+        if (!isalnum((unsigned char)*s)) return 0;
+    return 1;
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 2) usage();
 
@@ -718,6 +737,10 @@ int main(int argc, char *argv[]) {
 
     if (strncmp(argv[1], "START_FW", strlen("START_FW")) == 0) {
         if (argc != 4) usage();
+        if (!valid_ifname(argv[2]) || !valid_word(argv[3])) {
+            fprintf(stderr, "failed\nInvalid interface or attach mode\n");
+            return EXIT_FAILURE;
+        }
 
         // Update the configuration
         free(config.dev);
@@ -739,6 +762,10 @@ int main(int argc, char *argv[]) {
         return EXIT_SUCCESS;
     } else if (strncmp(argv[1], "STOP_FW", strlen("STOP_FW")) == 0) {
         if (argc != 4) usage();
+        if (!valid_ifname(argv[2]) || !valid_word(argv[3])) {
+            fprintf(stderr, "failed\nInvalid interface or attach mode\n");
+            return EXIT_FAILURE;
+        }
         int ret = system(FIREWALL_STOP);
         if (ret == 0) {
             char command[1024];
@@ -751,6 +778,10 @@ int main(int argc, char *argv[]) {
         return EXIT_SUCCESS;
     } else if (strncmp(argv[1], "RESTART_FW", strlen("RESTART_FW")) == 0) {
         if (argc != 4) usage();
+        if (!valid_ifname(argv[2]) || !valid_word(argv[3])) {
+            fprintf(stderr, "failed\nInvalid interface or attach mode\n");
+            return EXIT_FAILURE;
+        }
 
         // Update the configuration
         free(config.dev);

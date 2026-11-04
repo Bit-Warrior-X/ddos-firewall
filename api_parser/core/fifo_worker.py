@@ -260,16 +260,23 @@ def fifo_reader_thread():
     """AF_UNIX datagram listener for firewall commands."""
     global _dgram_drop_count, _critical_drop_count
 
-    if os.path.exists(config.UNIX_DGRAM_PATH):
-        os.unlink(config.UNIX_DGRAM_PATH)
-
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
-    except OSError as e:
-        print(f"[API_PARSER] Failed to set SO_RCVBUF: {e}")
-    sock.bind(config.UNIX_DGRAM_PATH)
-    os.chmod(config.UNIX_DGRAM_PATH, 0o666)
+    # A bind failure used to kill this thread silently, stopping all L4 reports.
+    while True:
+        try:
+            if os.path.exists(config.UNIX_DGRAM_PATH):
+                os.unlink(config.UNIX_DGRAM_PATH)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4 * 1024 * 1024)
+            except OSError as e:
+                print(f"[API_PARSER] Failed to set SO_RCVBUF: {e}")
+            sock.bind(config.UNIX_DGRAM_PATH)
+            # Only sparta (root) sends here; anyone else could forge block reports.
+            os.chmod(config.UNIX_DGRAM_PATH, 0o600)
+            break
+        except OSError as e:
+            print(f"[API_PARSER] AF_UNIX DGRAM bind failed: {e}; retrying in 5s", flush=True)
+            time.sleep(5)
     print(f"[API_PARSER] AF_UNIX DGRAM listening at {config.UNIX_DGRAM_PATH}")
 
     threading.Thread(target=_critical_worker, daemon=True).start()

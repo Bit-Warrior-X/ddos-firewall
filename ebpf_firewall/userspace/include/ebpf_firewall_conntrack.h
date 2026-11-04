@@ -6,8 +6,8 @@
 struct bpf_object;
 
 int init_conntrack(int tcp_established_fd, int tcp_connection_map_fd, int block_ips_map_fd);
-int purge_conntrack_for_blocked_ips(int blocked_ips_fd);
 int flush_all_tcp_conntrack(void);
+void conntrack_prepare_start(void);
 
 /*
  * When an IP is added to blocked_ips: drop its TCP conntrack entries in the

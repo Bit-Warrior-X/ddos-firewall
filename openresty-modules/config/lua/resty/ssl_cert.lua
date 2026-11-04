@@ -28,6 +28,13 @@ if not cache then
     ngx.log(ngx.ERR, "ssl_cert: failed to create lrucache: ", tostring(cache_err))
 end
 
+-- Unknown SNI names, kept apart so a random-SNI flood cannot evict real
+-- certificates from `cache` (and does not cost a Redis GET per handshake).
+local NEG_TTL = 30
+local neg_cache = lrucache.new(2000)
+
+local site_resolver = require "resty.site_resolver"
+
 local function shm()
     return ngx.shared[SHM_NAME]
 end
@@ -85,28 +92,53 @@ local function load_ssl_for_host(host)
     end
 
     local gen = current_gen()
-    if cache then
-        local hit = cache:get(host)
-        if hit and hit.gen == gen and hit.expire and hit.expire > ngx.now() then
-            if hit.disabled then
-                return nil, "ssl_disabled"
-            end
+    local hit = cache and cache:get(host)
+    if hit and hit.gen == gen and hit.expire and hit.expire > ngx.now() then
+        if hit.disabled then
+            return nil, "ssl_disabled"
+        end
+        return hit
+    end
+    if neg_cache and neg_cache:get(host) == gen then
+        return nil, "domain_not_found"
+    end
+
+    -- On Redis trouble keep serving the last known certificate (even if its
+    -- TTL ran out) instead of failing the handshake.
+    local function redis_failed(err)
+        site_resolver.mark_redis_down(err)
+        if hit and not hit.disabled then
             return hit
         end
+        return nil, "redis_error:" .. tostring(err)
+    end
+    if site_resolver.redis_down() then
+        return redis_failed("circuit open")
     end
 
     local red, err = get_redis(1000)
     if not red then
-        return nil, "redis_connect:" .. tostring(err)
+        return redis_failed(err)
     end
 
-    local site_id = red:get("domain:" .. host)
+    local site_id, gerr = red:get("domain:" .. host)
+    if gerr then
+        red:close()
+        return redis_failed(gerr)
+    end
     if not site_id or site_id == ngx.null or site_id == "" then
         release_redis(red)
+        if neg_cache then
+            neg_cache:set(host, gen, NEG_TTL)
+        end
         return nil, "domain_not_found"
     end
 
-    local raw = red:get("ssl:" .. tostring(site_id))
+    local raw, rerr = red:get("ssl:" .. tostring(site_id))
+    if rerr then
+        red:close()
+        return redis_failed(rerr)
+    end
     release_redis(red)
 
     if not raw or raw == ngx.null or raw == "" then
@@ -161,8 +193,14 @@ function _M.clear_cache(host)
     end
     if host and host ~= "" then
         cache:delete(normalize_host(host))
+        if neg_cache then
+            neg_cache:delete(normalize_host(host))
+        end
     else
         cache:flush_all()
+        if neg_cache then
+            neg_cache:flush_all()
+        end
     end
 end
 
@@ -206,8 +244,14 @@ function _M.certificate()
     end
 
     if err == "domain_not_found" or err == "empty_sni" then
-        -- Unknown host: keep the default server certificate.
-        ngx.log(ngx.WARN, "ssl_cert: no dynamic cert for sni=", host, " err=", tostring(err))
+        -- Unknown host: keep the default server certificate. INFO: random-SNI
+        -- floods would otherwise write one error-log line per handshake.
+        ngx.log(ngx.INFO, "ssl_cert: no dynamic cert for sni=", host, " err=", tostring(err))
+        return
+    end
+    if err and err:sub(1, 12) == "redis_error:" then
+        -- Redis unavailable and nothing cached: default cert, never abort.
+        ngx.log(ngx.WARN, "ssl_cert: ", err, " for sni=", host, "; using default certificate")
         return
     end
 

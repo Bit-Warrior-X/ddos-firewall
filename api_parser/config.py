@@ -26,6 +26,9 @@ L7_CACHE_PURGE_BASE = os.environ.get("L7_CACHE_PURGE_BASE", "http://127.0.0.1:90
 # Server configuration
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
+# Only these peers may call the agent API (panel backend + local tools); every
+# other source gets 403 before any route runs. PANEL_BACKEND_IPS is added below.
+API_ALLOWED_IPS = ("127.0.0.1", "::1")
 
 # API URLs (base with no trailing slash to avoid double slashes)
 #API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
@@ -35,6 +38,15 @@ API_BASE_URL = "https://panel.dorian.center/api".rstrip("/")
 # This edge often has IPv6 addresses but no default IPv6 route. DNS AAAA then
 # yields Errno 101 (Network is unreachable) in requests. Force IPv4 to panel.
 FORCE_IPV4 = True
+
+# TLS verification for panel calls: True (system CAs), a CA bundle path, or
+# False for a panel with a self-signed certificate.
+_tls_verify = os.environ.get("PANEL_TLS_VERIFY", "1").strip()
+PANEL_TLS_VERIFY = (
+    False if _tls_verify.lower() in ("0", "false", "no", "off")
+    else True if _tls_verify.lower() in ("", "1", "true", "yes", "on")
+    else _tls_verify
+)
 
 # L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"

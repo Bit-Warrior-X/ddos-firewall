@@ -11,7 +11,11 @@ if not app.logger.handlers:
 app.logger.setLevel(logging.INFO)
         
 if __name__ == '__main__':
-    initialize_app()
-    app.run(host=config.SERVER_IP, port=config.SERVER_PORT, debug=True, use_reloader=True)
+    # No debugger (remote code execution on error pages) and no reloader (it
+    # restarts the agent - wiping and re-syncing L4 lists - whenever a module
+    # file changes on disk).
+    initialize_app(start_workers=True)
+    app.run(host=config.SERVER_IP, port=config.SERVER_PORT, debug=False,
+            use_reloader=False, threaded=True)
     print("\n[API_PARSER] Shutting down...")
     cleanup_on_exit()

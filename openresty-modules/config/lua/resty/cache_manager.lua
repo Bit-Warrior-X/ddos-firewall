@@ -110,13 +110,24 @@ local function normalize_rule(item)
 end
 
 local function load_from_redis(site_id)
+    if site_resolver.redis_down() then
+        return nil, "redis circuit open"
+    end
     local red, err = get_redis()
     if not red then
+        site_resolver.mark_redis_down(err)
         return nil, err
     end
 
     local key = "cache:" .. tostring(site_id)
-    local raw = red:get(key)
+    local raw, gerr = red:get(key)
+    -- A GET error is not "no rules": returning {} made the refresh overwrite
+    -- the site's good rules with an empty set.
+    if gerr then
+        red:close()
+        site_resolver.mark_redis_down(gerr)
+        return nil, gerr
+    end
     red:set_keepalive(10000, 100)
 
     if not raw or raw == ngx.null or raw == "" then
@@ -175,8 +186,22 @@ local function refresh_shm()
     dict:set("updated", now, 0)
 end
 
+-- Phases where cosockets (Redis) are allowed. get_active_rule() also runs from
+-- header_filter (set_cache_headers), where opening a socket fails the response.
+local YIELDABLE_PHASES = {
+    rewrite = true, access = true, content = true, timer = true,
+}
+
 local function get_rules(site_id)
-    site_id = site_id or site_resolver.lookup_site_id()
+    local can_yield = YIELDABLE_PHASES[ngx.get_phase()] == true
+    if not site_id then
+        -- $site_id survives ngx.exec (ngx.ctx does not).
+        site_id = tonumber(ngx.var.site_id)
+        if not site_id or site_id == 0 then
+            site_id = can_yield and site_resolver.lookup_site_id()
+                or site_resolver.lookup_site_id_cached()
+        end
+    end
     if not site_id then
         return {}
     end
@@ -199,6 +224,10 @@ local function get_rules(site_id)
                 return decoded
             end
         end
+    end
+
+    if not can_yield then
+        return (entry and entry.rules) or {}
     end
 
     local loaded, err = load_from_redis(site_id)

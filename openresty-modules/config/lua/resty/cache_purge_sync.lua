@@ -111,7 +111,10 @@ local function release_redis(red)
     end
 end
 
-local function get_max_cache_ttl()
+local MAX_TTL_CACHE_SECONDS = 10
+local max_ttl_cached, max_ttl_cached_at = nil, 0
+
+local function get_max_cache_ttl_uncached()
     -- cache:* rules live on DB 0 — use a separate connection, never flip DB on the DB2 pool.
     local red, err = get_redis_db0(1000)
     if not red then
@@ -160,6 +163,16 @@ local function get_max_cache_ttl()
 
     release_redis(red)
     return max_ttl > 0 and max_ttl or 600
+end
+
+-- Called once per indexed key; the rule scan is shared for a sweep interval.
+local function get_max_cache_ttl()
+    local now = ngx.now()
+    if not max_ttl_cached or now - max_ttl_cached_at >= MAX_TTL_CACHE_SECONDS then
+        max_ttl_cached = get_max_cache_ttl_uncached()
+        max_ttl_cached_at = now
+    end
+    return max_ttl_cached
 end
 
 local function normalize_redis_ttl(red, redis_key, ttl)
@@ -216,7 +229,7 @@ function _M.delete_cache_file(path)
         return true
     end
 
-    if err == "No such file or directory" then
+    if err and err:find("No such file or directory", 1, true) then
         return true, "missing"
     end
 
@@ -276,9 +289,21 @@ function _M.cleanup_entry(redis_key, path_hint)
     return true
 end
 
+-- Per-key timers are only a fallback (keyevents + the orphan sweep cover
+-- expiry); keep them well below lua_max_pending_timers (1024), which every
+-- module in this worker shares.
+local MAX_PENDING_TIMERS = 512
+
 local function schedule_cleanup(redis_key, path, ttl)
     ttl = tonumber(ttl) or 0
     if ttl <= 0 or not redis_key or redis_key == "" then
+        return
+    end
+    if ngx.timer.pending_count() >= MAX_PENDING_TIMERS then
+        local dict = shm()
+        if dict and path and path ~= "" then
+            dict:set(cache_shm_key(redis_key), path, 0)
+        end
         return
     end
 
@@ -381,11 +406,13 @@ local function sweep_once()
     end
 
     local referenced_paths = {}
+    local scan_complete = true
     local cursor = "0"
     repeat
         local res, scan_err = red:scan(cursor, "COUNT", 200)
         if not res or scan_err then
             log_err("sweep scan failed: ", tostring(scan_err))
+            scan_complete = false
             break
         end
 
@@ -419,21 +446,23 @@ local function sweep_once()
         end
     until cursor == "0"
 
+    if not scan_complete then
+        -- referenced_paths is partial: orphan deletion would remove live files.
+        red:close()
+        return
+    end
     release_redis(red)
 
     -- Remove orphan cache files not referenced by any current redis index key.
-    local handle = io.popen('find "' .. CACHE_ROOT .. '" -maxdepth 1 -type f -printf "%p\n" 2>/dev/null')
+    local handle = io.popen('find "' .. CACHE_ROOT .. '" -maxdepth 1 -type f -printf "%T@ %p\n" 2>/dev/null')
     if handle then
+        local now = ngx.time()
         for line in handle:lines() do
-            if line ~= "" and not referenced_paths[line] then
-                local stat_handle = io.popen('stat -c %Y "' .. line .. '" 2>/dev/null')
-                if stat_handle then
-                    local mtime = tonumber(stat_handle:read("*l"))
-                    stat_handle:close()
-                    if mtime and (ngx.time() - mtime) > SWEEP_INTERVAL then
-                        _M.delete_cache_file(line)
-                    end
-                end
+            local mtime, path = line:match("^(%d+)%.?%d* (.+)$")
+            mtime = tonumber(mtime)
+            if path and not referenced_paths[path] and mtime
+               and (now - mtime) > SWEEP_INTERVAL then
+                _M.delete_cache_file(path)
             end
         end
         handle:close()

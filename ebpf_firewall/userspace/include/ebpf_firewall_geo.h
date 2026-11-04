@@ -6,4 +6,9 @@ int init_geo(char * loc_path,
              char   isos[][3], int nisos, 
              int map_fd);
 
+int rebuild_geo_map(char * loc_path,
+                    char * ipv4_path,
+                    char   isos[][3], int nisos,
+                    int map_fd);
+
 #endif

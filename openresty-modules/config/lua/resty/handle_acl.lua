@@ -103,6 +103,9 @@ function _M.set_acl_rule(cfg)
         return true
     end
 
+    -- Skip (and report) rules the engine rejects instead of aborting: the id was
+    -- already removed above, so stopping here dropped every rule after a bad one.
+    local failed = 0
     for _, rule in ipairs(rules) do
         local charPtr = stringToCharPointer(rule.rule)
         if charPtr == nil then
@@ -112,8 +115,13 @@ function _M.set_acl_rule(cfg)
         rc = C.ngx_http_acl_handle_acl_rule(r, cfg.id, rule.action, rule.priority, charPtr)
 
         if rc == NGX_ERROR then
-            return nil, "failed to handle ACL rule"
+            failed = failed + 1
+            ngx.log(ngx.WARN, "handle_acl: ACL id ", cfg.id, " rejected rule priority=",
+                tostring(rule.priority), ": ", tostring(rule.rule):sub(1, 200))
         end
+    end
+    if failed > 0 then
+        return nil, failed .. " of " .. #rules .. " rule(s) rejected"
     end
     return true
 end

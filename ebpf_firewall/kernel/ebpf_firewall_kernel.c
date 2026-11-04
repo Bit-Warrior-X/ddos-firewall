@@ -34,6 +34,7 @@
  */
 
 #define MAP_SIZE_LARGE    524288   /* SYN, ACK, RST, UDP, PSH, blocked */
+#define OFFENSE_DECAY_NS  (86400ULL * 1000000000ULL)
 #define MAP_SIZE_MEDIUM   262144   /* ICMP, GRE, SOCKET, Handshake, geo cache */
 #define MAP_SIZE_CONNTRACK 1048576  /* tcp_established, tcp_connection, allowed */
 
@@ -59,10 +60,11 @@ struct {
     __type(value, __u32);
 } prog_array SEC(".maps");
 
-/* Common LRU on purpose: BPF_F_NO_COMMON_LRU splits capacity per CPU, so the
- * userspace loader (one CPU) could hold only max_entries / nr_cpus blocks. */
+/* Plain hash, not LRU: under a spoofed flood an LRU evicts the least recently
+ * seen entries, i.e. manual/permanent blocks of quiet sources. Expired entries
+ * are removed by the userspace sweeper and on lookup in xdp_main. */
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAP_SIZE_LARGE);
     __type(key, __u32);
     __type(value, __u64);
@@ -103,8 +105,9 @@ struct {
 } global_psh_ack_filtered SEC(".maps");
 
 struct {
-    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAP_SIZE_CONNTRACK);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
     __type(key, __u32);
     __type(value, __u8);
 } allowed_ips SEC(".maps");
@@ -513,7 +516,9 @@ static __always_inline int block_ip_with_event(
     __u64 ttl = initial;
     struct block_offense_val *off = bpf_map_lookup_elem(&block_offense, &src_ip);
     if (off) {
-        __u32 n = off->count + 1;
+        /* Offences older than a day are forgiven, otherwise every source that
+         * was ever blocked ~7 times stays at the maximum TTL for good. */
+        __u32 n = (now - off->last_block_ns > OFFENSE_DECAY_NS ? 0 : off->count) + 1;
         if (n > 16)
             n = 16;
         off->count = n;
@@ -532,9 +537,13 @@ static __always_inline int block_ip_with_event(
     __u64 block_exp = now + ttl;
     __u64 *blocked_time_p = bpf_map_lookup_elem(&blocked_ips, &src_ip);
     if (!blocked_time_p) {
-        bpf_map_update_elem(&blocked_ips, &src_ip, &block_exp, BPF_ANY);
+        /* blocked_ips is a plain hash so manual/permanent entries are never
+         * evicted; when it is full the packet is still dropped, but no event
+         * is sent for a block that was not stored. */
+        if (bpf_map_update_elem(&blocked_ips, &src_ip, &block_exp, BPF_NOEXIST) != 0)
+            goto drop;
         bpf_map_delete_elem(&blocked_drop_stats, &src_ip);
-    } else {
+    } else if (*blocked_time_p != (__u64)-1) {
         *blocked_time_p = block_exp;
     }
 
@@ -543,7 +552,10 @@ static __always_inline int block_ip_with_event(
     evt.srcip = src_ip;
     evt.reason = reason;
     evt.req_id = attack_req_id_for_reason(reason);
+    evt.ttl_ns = ttl;
     bpf_ringbuf_output(&ring_buf_events, &evt, sizeof(evt), 0);
+
+drop:
 
     traffic_stats->blocked_traffic += packet_size;
     return XDP_DROP;
@@ -695,6 +707,7 @@ static __always_inline struct iphdr *parse_ipv4(void *data, void *data_end)
 }
 
 #define TCP_MAXLEN 60
+#define SYNACK_OPT_LEN 4   /* MSS option in cookie SYN-ACKs */
 #define IPV4_MAXLEN 60
 
 /* Re-parse eth/vlan/ipv4/tcp after xdp_adjust_tail. */
@@ -766,6 +779,11 @@ static __always_inline int syn_cookie_tx_reply(struct xdp_md *ctx, struct ethhdr
     if (cookie_ret < 0)
         return XDP_DROP;
     __u32 cookie = (__u32)cookie_ret;
+    /* Bits 32..47: the MSS encoded in the cookie (<= the client's). Without an
+     * MSS option the client falls back to 536 for the whole connection. */
+    __u16 mss = (__u16)((__u64)cookie_ret >> 32);
+    if (!mss)
+        mss = 536;
 
     /* Swap L2 */
     __u8 tmp_mac[6];
@@ -779,20 +797,22 @@ static __always_inline int syn_cookie_tx_reply(struct xdp_md *ctx, struct ethhdr
     iph->ttl = 64;
     iph->tos = 0;
     iph->id = 0;
+    iph->frag_off = bpf_htons(0x4000);   /* DF; never echo the SYN's MF/offset */
     iph->ihl = sizeof(*iph) / 4;
-    iph->tot_len = bpf_htons((__u16)(sizeof(*iph) + sizeof(struct tcphdr)));
+    iph->tot_len = bpf_htons((__u16)(sizeof(*iph) + sizeof(struct tcphdr) + SYNACK_OPT_LEN));
     iph->check = 0;
 
     tcph = (void *)iph + sizeof(*iph);
     data_end = (void *)(long)ctx->data_end;
-    if ((void *)(tcph + 1) > data_end)
+    if ((void *)(tcph + 1) + SYNACK_OPT_LEN > data_end)
         return XDP_DROP;
 
     tcph->source = client_dport;
     tcph->dest = client_sport;
     tcph->ack_seq = bpf_htonl(bpf_ntohl(client_seq) + 1);
     tcph->seq = bpf_htonl(cookie);
-    tcph->doff = sizeof(struct tcphdr) / 4;
+    tcph->doff = (sizeof(struct tcphdr) + SYNACK_OPT_LEN) / 4;
+    tcph->res1 = 0;
     tcph->fin = 0;
     tcph->syn = 1;
     tcph->rst = 0;
@@ -804,9 +824,16 @@ static __always_inline int syn_cookie_tx_reply(struct xdp_md *ctx, struct ethhdr
     tcph->window = bpf_htons(65535);
     tcph->urg_ptr = 0;
     tcph->check = 0;
+    {
+        __u8 *opt = (__u8 *)(tcph + 1);
+        opt[0] = 2;               /* TCPOPT_MSS */
+        opt[1] = SYNACK_OPT_LEN;
+        opt[2] = mss >> 8;
+        opt[3] = mss & 0xff;
+    }
 
     {
-        __u32 tcp_len = sizeof(struct tcphdr);
+        __u32 tcp_len = sizeof(struct tcphdr) + SYNACK_OPT_LEN;
         __s64 sum = bpf_csum_diff((__be32 *)0, 0, (__be32 *)tcph, tcp_len, 0);
         if (sum < 0)
             return XDP_DROP;
@@ -822,7 +849,7 @@ static __always_inline int syn_cookie_tx_reply(struct xdp_md *ctx, struct ethhdr
     {
         data = (void *)(long)ctx->data;
         data_end = (void *)(long)ctx->data_end;
-        __u32 new_pkt_size = (__u32)((long)(void *)(tcph + 1) - (long)data);
+        __u32 new_pkt_size = (__u32)((long)((void *)(tcph + 1) + SYNACK_OPT_LEN) - (long)data);
         int delta = (int)new_pkt_size - (int)((long)data_end - (long)data);
         (void)old_pkt_size;
         if (delta != 0 && bpf_xdp_adjust_tail(ctx, delta))
@@ -918,6 +945,11 @@ static __always_inline int syn_cookie_tx_reply_v6(struct xdp_md *ctx, struct eth
     if (cookie_ret < 0)
         return XDP_DROP;
     __u32 cookie = (__u32)cookie_ret;
+    /* Bits 32..47: the MSS encoded in the cookie (<= the client's). Without an
+     * MSS option the client falls back to 536 for the whole connection. */
+    __u16 mss = (__u16)((__u64)cookie_ret >> 32);
+    if (!mss)
+        mss = 536;
 
     __u8 tmp_mac[6];
     __builtin_memcpy(tmp_mac, eth->h_source, 6);
@@ -927,19 +959,21 @@ static __always_inline int syn_cookie_tx_reply_v6(struct xdp_md *ctx, struct eth
     ip6->saddr = client_daddr;
     ip6->daddr = client_saddr;
     ip6->hop_limit = 64;
-    ip6->payload_len = bpf_htons(sizeof(struct tcphdr));
+    ip6->payload_len = bpf_htons(sizeof(struct tcphdr) + SYNACK_OPT_LEN);
+    ip6->nexthdr = IPPROTO_TCP;   /* extension headers of the SYN are dropped */
     *(__be32 *)ip6 = bpf_htonl(0x60000000); /* version=6, traffic=0, flow=0 */
 
     tcph = (void *)(ip6 + 1);
     data_end = (void *)(long)ctx->data_end;
-    if ((void *)(tcph + 1) > data_end)
+    if ((void *)(tcph + 1) + SYNACK_OPT_LEN > data_end)
         return XDP_DROP;
 
     tcph->source = client_dport;
     tcph->dest = client_sport;
     tcph->ack_seq = bpf_htonl(bpf_ntohl(client_seq) + 1);
     tcph->seq = bpf_htonl(cookie);
-    tcph->doff = sizeof(struct tcphdr) / 4;
+    tcph->doff = (sizeof(struct tcphdr) + SYNACK_OPT_LEN) / 4;
+    tcph->res1 = 0;
     tcph->fin = 0;
     tcph->syn = 1;
     tcph->rst = 0;
@@ -951,9 +985,16 @@ static __always_inline int syn_cookie_tx_reply_v6(struct xdp_md *ctx, struct eth
     tcph->window = bpf_htons(65535);
     tcph->urg_ptr = 0;
     tcph->check = 0;
+    {
+        __u8 *opt = (__u8 *)(tcph + 1);
+        opt[0] = 2;               /* TCPOPT_MSS */
+        opt[1] = SYNACK_OPT_LEN;
+        opt[2] = mss >> 8;
+        opt[3] = mss & 0xff;
+    }
 
     {
-        __u32 tcp_len = sizeof(struct tcphdr);
+        __u32 tcp_len = sizeof(struct tcphdr) + SYNACK_OPT_LEN;
         __s64 sum = bpf_csum_diff((__be32 *)0, 0, (__be32 *)tcph, tcp_len, 0);
         if (sum < 0)
             return XDP_DROP;
@@ -964,7 +1005,7 @@ static __always_inline int syn_cookie_tx_reply_v6(struct xdp_md *ctx, struct eth
     {
         data = (void *)(long)ctx->data;
         data_end = (void *)(long)ctx->data_end;
-        __u32 new_pkt_size = (__u32)((long)(void *)(tcph + 1) - (long)data);
+        __u32 new_pkt_size = (__u32)((long)((void *)(tcph + 1) + SYNACK_OPT_LEN) - (long)data);
         int delta = (int)new_pkt_size - (int)((long)data_end - (long)data);
         if (delta != 0 && bpf_xdp_adjust_tail(ctx, delta))
             return XDP_DROP;
@@ -1073,7 +1114,9 @@ static __always_inline int rate_win_over(struct rate_win *w, __u64 now, __u32 li
         w->last_ts = now;
         return 0;
     }
-    w->count += 1;
+    /* Shared across CPUs (dst_class_rate is per destination): a plain += loses
+     * updates on exactly the hottest keys. */
+    __sync_fetch_and_add(&w->count, 1);
     return w->count > limit;
 }
 
@@ -1135,7 +1178,7 @@ static __always_inline int conn_win_over(void *map, __u32 key, __u64 now,
         w->last_ts = now;
         return 0;
     }
-    w->count += 1;
+    __sync_fetch_and_add(&w->count, 1);
     return w->count > cap;
 }
 
@@ -1393,8 +1436,9 @@ static __always_inline __u8 det_classify_and_invalid(
         invalid_count(dst, INVALID_FLAG_NULL);
         return DET_CLASS_SOCKET;
     }
-    /* FIN+PSH (±URG) without a normal ACK data path. */
-    if (tcp_fin && tcp_psh && !tcp_syn && !tcp_rst) {
+    /* FIN+PSH (±URG) without ACK. FIN|PSH|ACK is how Linux closes right after
+     * its last data segment, so it must not land here (stage 0 drops SOCKET). */
+    if (tcp_fin && tcp_psh && !tcp_ack && !tcp_syn && !tcp_rst) {
         invalid_count(dst, INVALID_FLAG_XMAS);
         return DET_CLASS_SOCKET;
     }
@@ -1422,6 +1466,9 @@ static __always_inline __u8 det_classify_and_invalid(
     /* FIN(+ACK) — exclusive FIN class (not SOCKET), unless PSH/URG above. */
     if (tcp_fin && tcp_ack && !tcp_psh && !tcp_urg)
         return DET_CLASS_FIN;
+    /* FIN|PSH|ACK: last data segment + close (payload) or a bare close. */
+    if (tcp_fin && tcp_psh && tcp_ack && !tcp_urg)
+        return plen > 0 ? DET_CLASS_DATA : DET_CLASS_FIN;
     if (tcp_ack && !tcp_urg && !tcp_fin)
         return DET_CLASS_ACK;
     return DET_CLASS_SOCKET;
@@ -1562,12 +1609,12 @@ int xdp_main(struct xdp_md *ctx) {
                     if (!tcp_syn6 && (dclass6 == DET_CLASS_ACK ||
                                       dclass6 == DET_CLASS_DATA ||
                                       dclass6 == DET_CLASS_RST)) {
+                        /* No grace entry: syn_validated_ips is keyed by IPv4
+                         * address, and a folded v6 hash could equal (and grant
+                         * grace to) an arbitrary IPv4 source. */
                         if (tcp_ack6 && !tcp_rst6 && !tcp_fin6 &&
-                            bpf_tcp_raw_check_syncookie_ipv6(ip6, t6) == 0) {
-                            __u64 grace = now6 + SYN_GRACE_PERIOD_NS;
-                            bpf_map_update_elem(&syn_validated_ips, &src6, &grace, BPF_ANY);
+                            bpf_tcp_raw_check_syncookie_ipv6(ip6, t6) == 0)
                             return XDP_PASS;
-                        }
                     }
                 }
                 if (mode6 >= MODE_RATE_LIMIT) {
@@ -1704,6 +1751,23 @@ int xdp_main(struct xdp_md *ctx) {
     }
 
     volatile struct global_config *gcfg = &global_fw_config.g_config;
+
+    /* Cookie ACKs are otherwise only checked in should_drop_invalid (enforce on
+     * and ACK-class mode >= DROP_INVALID). Without that, e.g. in classic mode,
+     * grace is never recorded and every SYN of a real client keeps getting a
+     * cookie. The handshake ACK is a pure ACK without payload. */
+    if (global_fw_config.g_attack_stats.syn_attack && have_tcp && l4 &&
+        !tcp_syn && tcp_ack && !tcp_rst && !tcp_fin &&
+        (void *)((struct tcphdr *)l4 + 1) <= data_end) {
+        struct tcphdr *ctcp = l4;
+        if (bpf_ntohs(iph->tot_len) == (__u16)(iph->ihl * 4 + ctcp->doff * 4) &&
+            bpf_tcp_raw_check_syncookie_ipv4(iph, ctcp) == 0) {
+            __u64 grace = now + SYN_GRACE_PERIOD_NS;
+            __u32 sip = iph->saddr;
+            bpf_map_update_elem(&syn_validated_ips, &sip, &grace, BPF_ANY);
+            count_valid_pass(PASS_REASON_COOKIE);
+        }
+    }
 
     /* Phase 4–5: adaptive mitigation modes. */
     if (gcfg->enforce_drop_invalid) {
@@ -2076,7 +2140,13 @@ int xdp_parse_syn(struct xdp_md *ctx) {
         ns.last_pkt_time = now; ns.last_reset = now; ns.current_burst_count = 1;
         bpf_map_update_elem(&burst_syn_state, &src_ip, &ns, BPF_ANY);
     } else {
-        if (state->burst_count >= config->burst_count_threshold) {
+        /* Window reset first: a tripped burst state used to latch until LRU
+         * eviction and re-block the source on its first packet after every
+         * block expired (blocked sources never reach this code). */
+        if (now - state->last_reset >= ONE_SECOND_NS) {
+            state->last_reset = now; state->current_burst_count = 1;
+            state->burst_count = 0; state->last_pkt_time = now;
+        } else if (state->burst_count >= config->burst_count_threshold) {
             if (state->burst_count == config->burst_count_threshold) {
                 struct fixed_ip_event fe = {0};
                 fe.srcip = src_ip; fe.fixed_type = FIXED_IP_RING_BUF_SYN;
@@ -2096,10 +2166,6 @@ int xdp_parse_syn(struct xdp_md *ctx) {
                 return block_ip_with_event(src_ip, now, EVENT_TCP_SYN_ATTACK_BURST_BLOCK,
                                            traffic_stats, packet_size);
             }
-        }
-        if (now - state->last_reset >= ONE_SECOND_NS) {
-            state->last_reset = now; state->current_burst_count = 1;
-            state->burst_count = 0; state->last_pkt_time = now;
         } else {
             if (now - state->last_pkt_time > config->burst_gap_ns) {
                 if (state->current_burst_count >= config->burst_pkt_threshold)
@@ -2204,6 +2270,10 @@ int FUNC_NAME(struct xdp_md *ctx) {                                             
         struct burst_state ns = {0};                                                          \
         ns.last_pkt_time = now; ns.last_reset = now; ns.current_burst_count = 1;              \
         bpf_map_update_elem(&BURST_MAP, &src_ip, &ns, BPF_ANY);                              \
+    } else if (now - state->last_reset >= ONE_SECOND_NS) {                                    \
+        /* Window reset first, so a tripped state does not latch (see SYN path). */          \
+        state->last_reset = now; state->current_burst_count = 1;                              \
+        state->burst_count = 0; state->last_pkt_time = now;                                   \
     } else {                                                                                  \
         if (state->burst_count >= config->CONFIG_BURST_CNT) {                                 \
             /* Emit + blacklist once on first cross; later packets only drop. */              \
@@ -2232,17 +2302,12 @@ int FUNC_NAME(struct xdp_md *ctx) {                                             
             }                                                                                 \
             return drop_spoofable(traffic_stats, packet_size);                                \
         }                                                                                     \
-        if (now - state->last_reset >= ONE_SECOND_NS) {                                       \
-            state->last_reset = now; state->current_burst_count = 1;                          \
-            state->burst_count = 0; state->last_pkt_time = now;                               \
-        } else {                                                                              \
-            if (now - state->last_pkt_time > config->CONFIG_BURST_GAP) {                      \
-                if (state->current_burst_count >= config->CONFIG_BURST_PKT)                   \
-                    state->burst_count++;                                                     \
-                state->current_burst_count = 1;                                               \
-            } else { state->current_burst_count++; }                                          \
-            state->last_pkt_time = now;                                                       \
-        }                                                                                     \
+        if (now - state->last_pkt_time > config->CONFIG_BURST_GAP) {                          \
+            if (state->current_burst_count >= config->CONFIG_BURST_PKT)                       \
+                state->burst_count++;                                                         \
+            state->current_burst_count = 1;                                                   \
+        } else { state->current_burst_count++; }                                              \
+        state->last_pkt_time = now;                                                           \
     }                                                                                         \
     fixed_stats = bpf_map_lookup_elem(&FIXED_MAP, &src_ip);                                   \
     if (fixed_stats) {                                                                        \
@@ -2642,6 +2707,23 @@ int xdp_parse_tcp_socket(struct xdp_md *ctx) {
 
     /* NULL / XMAS — drop immediately; still count toward fixed window below. */
     __u8 null_xmas = (flags == 0x00 || flags == 0x29 || flags == 0x39);
+
+    /* Adaptive mode: what reaches this handler is mostly ordinary FIN+ACK
+     * teardown that missed the established fast path (outbound connections,
+     * conntrack mirror lag). Only enforce the per-source cap while the detector
+     * reports a SOCKET/FIN attack or the destination is in rate-limit mode, as
+     * the other flood handlers gate on their attack flag. */
+    if (global_fw_config.g_config.prefer_adaptive) {
+        volatile struct global_attack_stats *atk = &global_fw_config.g_attack_stats;
+        if (!atk->socket_attack && !atk->fin_attack &&
+            mitigation_mode_for(ip->daddr, DET_CLASS_FIN, now) < MODE_RATE_LIMIT) {
+            if (null_xmas) {
+                traffic_stats->blocked_traffic += packet_size;
+                return XDP_DROP;
+            }
+            return XDP_PASS;
+        }
+    }
 
     /* FIN without ACK from non-established = suspicious. */
     __u8 odd_fin = ((flags & 0x01) && !(flags & 0x10) &&

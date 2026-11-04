@@ -545,9 +545,7 @@ MMDB_data_code_result_t MMDB_get_iso_code_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -560,14 +558,11 @@ MMDB_data_code_result_t MMDB_get_iso_code_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_data_code_entry_list(entry_data_list, &data_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 
@@ -604,9 +599,7 @@ MMDB_data_code_result_t MMDB_get_country_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -619,14 +612,11 @@ MMDB_data_code_result_t MMDB_get_country_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_data_code_entry_list(entry_data_list, &data_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 
@@ -663,9 +653,7 @@ MMDB_data_code_result_t MMDB_get_city_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -678,14 +666,11 @@ MMDB_data_code_result_t MMDB_get_city_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_data_code_entry_list(entry_data_list, &data_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 
@@ -722,9 +707,7 @@ MMDB_data_code_result_t MMDB_get_continent_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -737,14 +720,11 @@ MMDB_data_code_result_t MMDB_get_continent_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_data_code_entry_list(entry_data_list, &data_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 
@@ -781,9 +761,7 @@ MMDB_data_code_result_t MMDB_get_continent_name_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -796,14 +774,11 @@ MMDB_data_code_result_t MMDB_get_continent_name_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_data_code_entry_list(entry_data_list, &data_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 
@@ -841,9 +816,7 @@ MMDB_data_asn_result_t MMDB_get_asn_code_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -856,14 +829,11 @@ MMDB_data_asn_result_t MMDB_get_asn_code_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_asn_code_entry_list(entry_data_list, &asn_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 
@@ -901,9 +871,7 @@ MMDB_data_code_result_t MMDB_get_isp_from_ip(MMDB_s *const mmdb,
                                       .offset = entry_data.offset};
                 status = MMDB_get_entry_data_list(&entry, &entry_data_list);
             } else {
-                fprintf(stdout,
-                        "\n  No data was found at the lookup path you "
-                        "provided\n\n");
+                /* no data at lookup path: nothing to report */;
             }
         }
 
@@ -916,14 +884,11 @@ MMDB_data_code_result_t MMDB_get_isp_from_ip(MMDB_s *const mmdb,
         }
 
         if (NULL != entry_data_list) {
-            fprintf(stdout, "\n");
             MMDB_get_data_code_entry_list(entry_data_list, &data_code_ret);
-            fprintf(stdout, "\n");
         }
     } else {
-        fprintf(stderr,
-                "\n  Could not find an entry for this IP address (%s)\n\n",
-                ip_address);
+        /* Unknown IP: normal for most attack sources; printing here wrote
+         * three lines to the nginx error log per lookup. */
         exit_code = 6;
     }
 

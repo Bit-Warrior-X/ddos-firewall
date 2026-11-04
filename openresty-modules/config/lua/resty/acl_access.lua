@@ -12,6 +12,8 @@ local _M = { _VERSION = "2.0.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
 local DEFAULT_TEMP_BLACKLIST_TTL = 180
+local PERSIST_MAX_PER_SEC = 500
+local PERSIST_MAX_PENDING_TIMERS = 512
 
 local ACL_RETURN_INTERNAL_ERROR = 0
 local ACL_RETURN_ALLOW_RULE     = 1
@@ -168,6 +170,28 @@ function _M.add_temporaryblacklist(rule_id, ip, url, trigger_rule, ttl, all_site
 
     temp_blacklist.on_entry_added(entry)
 
+    -- Each persist is one Redis key, one timer and one panel notification.
+    -- Repeats for the same ip/site/url within the TTL and bursts above
+    -- PERSIST_MAX_PER_SEC stay in the local shm block only.
+    local dict = ngx.shared.temp_blacklist
+    if dict then
+        local mark = "p:" .. ip .. ":" .. tostring(site_id or "*") .. ":" .. tostring(url)
+        local mark_ttl = tonumber(ttl) or DEFAULT_TEMP_BLACKLIST_TTL
+        if mark_ttl <= 0 or mark_ttl > 3600 then
+            mark_ttl = 3600
+        end
+        if not dict:add(mark, true, mark_ttl) then
+            return
+        end
+        local n = dict:incr("p_rate:" .. ngx.time(), 1, 0, 2)
+        if n and n > PERSIST_MAX_PER_SEC then
+            return
+        end
+    end
+    if ngx.timer.pending_count() >= PERSIST_MAX_PENDING_TIMERS then
+        return
+    end
+
     local item_key = "temporaryblacklist:" .. ip .. ":" .. blocked_at
     if site_id then
         item_key = item_key .. ":" .. tostring(site_id)
@@ -179,6 +203,18 @@ function _M.add_temporaryblacklist(rule_id, ip, url, trigger_rule, ttl, all_site
 end
 
 local add_temporaryblacklist = _M.add_temporaryblacklist
+
+--- temp_blacklist matches entry.url as a regex against $request_uri. Auto
+--- blocks store the request path (query string dropped, so cache-busting
+--- parameters do not evade it) as an escaped, anchored literal: the raw URI
+--- never matched itself when it contained ? ( [ + and let clients inject regex.
+local function literal_path_pattern(request_uri)
+    local path = request_uri:match("^[^?]*") or "/"
+    if #path > 512 then
+        path = path:sub(1, 512)
+    end
+    return "^" .. path:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?%{%}|\\]", "\\%0") .. "(\\?|$)"
+end
 
 function _M.run()
     local stats_cache = ngx.shared.stats_cache
@@ -219,7 +255,7 @@ function _M.run()
             add_temporaryblacklist(
                 rule_id,
                 ngx.var.remote_addr or "",
-                ngx.var.request_uri or ngx.var.uri or "",
+                literal_path_pattern(ngx.var.request_uri or ngx.var.uri or "/"),
                 RULE_NAMES[rule_id]
             )
         end
@@ -227,7 +263,7 @@ function _M.run()
 
     local function handle_result(rule_id, ret)
         if ret == ACL_RETURN_ALLOW_RULE then
-            return true
+            return "allow"
         elseif ret == ACL_RETURN_INTERNAL_ERROR then
             mark_block(rule_id, ret, "internal_error")
             return ngx.exit(501)
@@ -257,6 +293,11 @@ function _M.run()
     for rule_id = 1, 9 do
         local ret = handle_acl.process_acl_id(rule_id)
         local res = handle_result(rule_id, ret)
+        -- An allow (whitelist) match skips the remaining rules but must still
+        -- pick the origin below; returning here left $backend empty (500).
+        if res == "allow" then
+            break
+        end
         if res ~= "no_rule" then
             return
         end

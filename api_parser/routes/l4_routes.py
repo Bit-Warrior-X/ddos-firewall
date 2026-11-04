@@ -4,10 +4,12 @@ import csv
 import os
 import tempfile
 from flask import Blueprint, request, jsonify, current_app
-from core.firewall import firewall_control, set_protection, set_socket_protection, execute_cli_command
+from core.firewall import (firewall_control, set_protection, set_socket_protection,
+                           execute_cli_command, valid_interface, normalize_attach_mode)
 from core.database import DatabaseManager
 from core.api_client import APIClient
 from core.backend_whitelist import ensure_backend_ips_whitelisted
+from core.initializer import panel_list
 from utils.auth import token_required
 import config
 
@@ -112,6 +114,10 @@ def _update_firewall_config(updates, existing_keys=None):
     panel fields that the adaptive layout omits are skipped so we never
     invent black_ip_duration / *_threshold / *_protection_duration rows.
     """
+    for key, value in updates.items():
+        if value is not None and any(ch in str(value) for ch in "\r\n#"):
+            return False, f"Invalid value for '{key}' (newline or '#' not allowed)"
+
     try:
         with open(config.FIREWALL_CONFIG_PATH, "r", encoding="utf-8") as handle:
             lines = handle.readlines()
@@ -275,7 +281,7 @@ def firewall_main():
     """Control L4 firewall."""
     data = request.json
     
-    if 'status' not in data:
+    if not isinstance(data.get('status'), str):
         return jsonify({"status": "error", "message": "Missing 'status' parameter"}), 400
     
     action = data['status'].lower()
@@ -285,44 +291,29 @@ def firewall_main():
     
     attach_mode = data.get('attach_mode', 'native')
     
-    # Initialize database and fetch lists for start/restart
+    # Fetch both lists first; replace them only when both are usable, so a
+    # panel timeout no longer leaves the firewall with empty lists.
     if action in ['start', 'restart']:
-        DatabaseManager.init_database()  # Ensure tables exist first
-        DatabaseManager.clear_all_tables()  # Then clear them
-        
+        DatabaseManager.init_database()
         token = data['token']
-        
-        # Fetch and store blocklist
-        success, result = APIClient.fetch_blocklist(token)
+        lists = {}
+        for name, fetch in (("blocklist", APIClient.fetch_blocklist),
+                            ("whitelist", APIClient.fetch_whitelist)):
+            success, result = fetch(token)
+            items = panel_list(result) if success else None
+            if items is None:
+                return jsonify({
+                    "status": "error",
+                    "message": f"Firewall {action} failed during {name} processing",
+                    "details": str(result)[:300]
+                }), 500
+            lists[name] = items
+
+        success, msg = DatabaseManager.replace_lists(lists["blocklist"], lists["whitelist"])
         if not success:
             return jsonify({
                 "status": "error",
-                "message": f"Firewall {action} failed during blocklist processing",
-                "details": str(result)
-            }), 500
-        
-        success, msg = DatabaseManager.store_blocklist(result)
-        if not success:
-            return jsonify({
-                "status": "error",
-                "message": f"Firewall {action} failed during blocklist storage",
-                "details": msg
-            }), 500
-        
-        # Fetch and store whitelist
-        success, result = APIClient.fetch_whitelist(token)
-        if not success:
-            return jsonify({
-                "status": "error",
-                "message": f"Firewall {action} failed during whitelist processing",
-                "details": str(result)
-            }), 500
-        
-        success, msg = DatabaseManager.store_whitelist(result)
-        if not success:
-            return jsonify({
-                "status": "error",
-                "message": f"Firewall {action} failed during whitelist storage",
+                "message": f"Firewall {action} failed during list storage",
                 "details": msg
             }), 500
 
@@ -834,6 +825,11 @@ def l4_firewall_data():
             "message": f"Missing required fields: {', '.join(missing_fields)}"
         }), 400
 
+    if not valid_interface(data["dev"]):
+        return jsonify({"status": "error", "message": f"Unknown network interface: {data['dev']!r}"}), 400
+    if normalize_attach_mode(data["attachMode"]) is None:
+        return jsonify({"status": "error", "message": f"Invalid attachMode: {data['attachMode']!r}"}), 400
+
     try:
         geo_value, unknown_geo = _normalize_geo(
             data["geoAllowCountries"],
@@ -847,7 +843,7 @@ def l4_firewall_data():
 
         updates = {
             "dev": data["dev"],
-            "attach_mode": data["attachMode"],
+            "attach_mode": normalize_attach_mode(data["attachMode"]),
             "black_ip_duration": int(data["blackIpDuration"]),
             "syn_valid": _normalize_bool_int(data["synValid"]),
             "syn_threshold": int(data["synThreshold"]),

@@ -100,6 +100,7 @@ def init_db() -> None:
     with _db_lock:
         conn = _connect()
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(_SCHEMA)
             have = {row["name"] for row in conn.execute("PRAGMA table_info(l7_attacks)")}
             for name, sql_type in _MIGRATIONS:
@@ -525,12 +526,13 @@ def list_attacks(since: Optional[int] = None, until: Optional[int] = None,
         params.append(status)
     sql += " ORDER BY started_at DESC LIMIT ?"
     params.append(int(limit))
-    with _db_lock:
-        conn = _connect()
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        finally:
-            conn.close()
+    # Readers do not take _db_lock (the sync thread can hold it across panel
+    # POSTs); WAL lets them read while the sync thread writes.
+    conn = _connect()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+    finally:
+        conn.close()
     out = []
     for row in rows:
         item = dict(row)
@@ -544,12 +546,11 @@ def list_attacks(since: Optional[int] = None, until: Optional[int] = None,
 
 
 def get_attack(incident_id: str) -> Optional[Dict[str, Any]]:
-    with _db_lock:
-        conn = _connect()
-        try:
-            row = _get_row(conn, incident_id)
-        finally:
-            conn.close()
+    conn = _connect()
+    try:
+        row = _get_row(conn, incident_id)
+    finally:
+        conn.close()
     if row is None:
         return None
     if row["status"] == "active":

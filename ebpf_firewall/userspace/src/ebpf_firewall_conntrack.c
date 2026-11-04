@@ -33,13 +33,16 @@
  #define CT_TCP_FLAG_SEEN_SYN  0x10
  
  static struct nfct_handle *h = NULL;
- extern int exiting;
+ extern volatile sig_atomic_t exiting;
  extern struct global_firewall_config global_fw_config;
  
  static int ct_family = AF_INET;
  static size_t current_buf_size = BUFFER_SIZE;
  static int established_map_fd;
  static int connection_map_fd;
+/* tcp_connection_map is read-modify-written by the conntrack thread and
+ * deleted from by the control/nginx threads when an IP is blocked. */
+static pthread_mutex_t conn_count_lock = PTHREAD_MUTEX_INITIALIZER;
  static int block_ips_map_fd;
  
  /* Flag: set to 1 after the initial conntrack dump completes.
@@ -101,39 +104,6 @@
      return (now < expire) ? 1 : 0;
  }
  
- static int flush_conntrack_for_ip(__u32 ip_net_order)
-{
-    struct nfct_handle *fh = nfct_open(CONNTRACK, 0);
-    if (!fh) {
-        LOG_E("nfct_open for flush: %s\n", strerror(errno));
-        return -1;
-    }
-
-    struct nf_conntrack *ct = nfct_new();
-    if (!ct) {
-        LOG_E("nfct_new: %s\n", strerror(errno));
-        nfct_close(fh);
-        return -1;
-    }
-
-    /* Set filter: IPv4 TCP from this source IP */
-    nfct_set_attr_u8(ct, ATTR_L3PROTO, AF_INET);
-    nfct_set_attr_u8(ct, ATTR_L4PROTO, IPPROTO_TCP);
-    nfct_set_attr_u32(ct, ATTR_ORIG_IPV4_SRC, ip_net_order);
-
-    int ret = nfct_query(fh, NFCT_Q_DESTROY, ct);
-    /* ENOENT is fine — no matching entries */
-    if (ret < 0 && errno != ENOENT) {
-        /* Per-IP destroy might not be supported on all kernels.
-         * Fall through — the conntrack callback's is_ip_blocked()
-         * check will handle it. */
-        LOG_D("nfct_query(DESTROY) for IP: %s (non-fatal)\n", strerror(errno));
-    }
-
-    nfct_destroy(ct);
-    nfct_close(fh);
-    return 0;
-}
 
 /* tcp_established_map key: low 32 bits = IP, upper = port (see make_established_key). */
 static void established_map_remove_all_for_ip(int est_fd, __u32 ip_net_order)
@@ -141,25 +111,29 @@ static void established_map_remove_all_for_ip(int est_fd, __u32 ip_net_order)
     if (est_fd < 0)
         return;
 
-    for (;;) {
-        __u64 key, next_key;
-        int deleted = 0;
-
-        if (bpf_map_get_next_key(est_fd, NULL, &next_key) != 0)
-            break;
-
-        do {
-            key = next_key;
-            if ((__u32)key == ip_net_order) {
-                bpf_map_delete_elem(est_fd, &key);
-                deleted = 1;
-                break;
+    /* One pass, then delete: restarting the walk after every delete made this
+     * O(entries x connections of the IP). */
+    size_t cap = 64, cnt = 0;
+    __u64 *victims = malloc(cap * sizeof(*victims));
+    __u64 key, next_key;
+    int has = victims && bpf_map_get_next_key(est_fd, NULL, &next_key) == 0;
+    while (has) {
+        key = next_key;
+        if ((__u32)key == ip_net_order) {
+            if (cnt == cap) {
+                __u64 *grown = realloc(victims, cap * 2 * sizeof(*victims));
+                if (!grown)
+                    break;
+                victims = grown;
+                cap *= 2;
             }
-        } while (bpf_map_get_next_key(est_fd, &key, &next_key) == 0);
-
-        if (!deleted)
-            break;
+            victims[cnt++] = key;
+        }
+        has = bpf_map_get_next_key(est_fd, &key, &next_key) == 0;
     }
+    for (size_t i = 0; i < cnt; i++)
+        bpf_map_delete_elem(est_fd, &victims[i]);
+    free(victims);
 }
 
 void clear_tracked_tcp_state_for_blocked_ip(int tcp_established_fd,
@@ -168,10 +142,14 @@ void clear_tracked_tcp_state_for_blocked_ip(int tcp_established_fd,
 {
     established_map_remove_all_for_ip(tcp_established_fd, ip_net_order);
 
-    if (tcp_connection_map_fd >= 0)
+    if (tcp_connection_map_fd >= 0) {
+        pthread_mutex_lock(&conn_count_lock);
         bpf_map_delete_elem(tcp_connection_map_fd, &ip_net_order);
-
-    flush_conntrack_for_ip(ip_net_order);
+        pthread_mutex_unlock(&conn_count_lock);
+    }
+    /* Conntrack entries of a blocked source are left to time out: XDP drops
+     * its packets before the established fast path, and the kernel cannot
+     * delete by source address alone (NFCT_Q_DESTROY needs the full tuple). */
 }
 
 static int cmp_u32(const void *a, const void *b)
@@ -218,9 +196,11 @@ void clear_tracked_tcp_state_for_blocked_ips(int tcp_established_fd,
     }
 
     for (size_t i = 0; i < n; i++) {
-        if (tcp_connection_map_fd >= 0)
+        if (tcp_connection_map_fd >= 0) {
+            pthread_mutex_lock(&conn_count_lock);
             bpf_map_delete_elem(tcp_connection_map_fd, &ips_net_order[i]);
-        flush_conntrack_for_ip(ips_net_order[i]);
+            pthread_mutex_unlock(&conn_count_lock);
+        }
     }
 }
 
@@ -243,62 +223,30 @@ int reconcile_blocked_ips_tracked_state(struct bpf_object *obj)
         return -1;
     }
 
-    void *key  = calloc(1, info.key_size);
-    void *next = calloc(1, info.key_size);
-    if (!key || !next) {
-        free(key);
-        free(next);
-        return -1;
+    /* Gather every blocked IP, then clear their tracked state with a single
+     * walk of tcp_established_map (per-IP walks wedged RELOAD_FW for minutes). */
+    size_t cap = 1024, n = 0;
+    __u32 *ips = malloc(cap * sizeof(*ips));
+    __u32 key, next;
+    int has = ips && bpf_map_get_next_key(blocked_fd, NULL, &next) == 0;
+    while (has) {
+        if (n == cap) {
+            __u32 *grown = realloc(ips, cap * 2 * sizeof(*ips));
+            if (!grown)
+                break;
+            ips = grown;
+            cap *= 2;
+        }
+        ips[n++] = next;
+        key = next;
+        has = bpf_map_get_next_key(blocked_fd, &key, &next) == 0;
     }
-
-    if (bpf_map_get_next_key(blocked_fd, NULL, next) == 0) {
-        do {
-            __u32 ip = *(__u32 *)next;
-            clear_tracked_tcp_state_for_blocked_ip(est_fd, conn_fd, ip);
-            memcpy(key, next, info.key_size);
-        } while (bpf_map_get_next_key(blocked_fd, key, next) == 0);
-    }
-
-    free(key);
-    free(next);
+    (void)info;
+    clear_tracked_tcp_state_for_blocked_ips(est_fd, conn_fd, ips, n);
+    free(ips);
     return 0;
 }
 
-/*
- * Iterate blocked_ips BPF map and flush conntrack for each blocked IP.
- * Call this AFTER loading blocked IPs from SQLite but BEFORE init_conntrack().
- */
-int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
-{
-    struct bpf_map_info info = {};
-    __u32 len = sizeof(info);
-    if (bpf_obj_get_info_by_fd(blocked_ips_fd, &info, &len)) {
-        LOG_E("bpf_obj_get_info_by_fd: %s\n", strerror(errno));
-        return -1;
-    }
-
-    void *key  = calloc(1, info.key_size);
-    void *next = calloc(1, info.key_size);
-    if (!key || !next) {
-        free(key); free(next);
-        return -1;
-    }
-
-    int count = 0;
-    if (bpf_map_get_next_key(blocked_ips_fd, NULL, next) == 0) {
-        do {
-            __u32 ip = *(__u32 *)next;
-            flush_conntrack_for_ip(ip);
-            count++;
-            memcpy(key, next, info.key_size);
-        } while (bpf_map_get_next_key(blocked_ips_fd, key, next) == 0);
-    }
-
-    free(key);
-    free(next);
-    LOG_I("Purged conntrack entries for %d blocked IPs\n", count);
-    return 0;
-}
 
  /*
   * Adjust the per-IP connection count in tcp_connection_map.
@@ -311,6 +259,7 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
          return;
  
      __u32 con_count = 0;
+     pthread_mutex_lock(&conn_count_lock);
      bpf_map_lookup_elem(connection_map_fd, &sip, &con_count);
  
      __u32 old_count = con_count;
@@ -323,6 +272,7 @@ int purge_conntrack_for_blocked_ips(int blocked_ips_fd)
      }
  
      bpf_map_update_elem(connection_map_fd, &sip, &con_count, BPF_ANY);
+     pthread_mutex_unlock(&conn_count_lock);
  
      /* Only log and block when we CROSS the threshold (not on every increment above it) */
      __u32 limit = global_fw_config.g_tcp_connection_config.limit_cnt;
@@ -568,27 +518,49 @@ int flush_all_tcp_conntrack(void)
  * cannot set it if nf_conntrack loads after boot-time sysctl, so enforce it here,
  * after nfct_open has the module loaded.
  */
-static void enforce_tcp_loose_off(void)
+/* Returns the value found before enforcing (0/1), or -1 if it can't be read. */
+static int enforce_tcp_loose_off(void)
 {
     const char *path = "/proc/sys/net/netfilter/nf_conntrack_tcp_loose";
     int cur = -1;
     FILE *f = fopen(path, "r");
     if (!f) {
         LOG_W("%s: %s\n", path, strerror(errno));
-        return;
+        return -1;
     }
     if (fscanf(f, "%d", &cur) != 1)
         cur = -1;
     fclose(f);
     if (cur == 0)
-        return;
+        return 0;
 
     f = fopen(path, "w");
     if (!f || fputs("0\n", f) < 0 || fclose(f) != 0) {
         LOG_W("set %s=0 failed: %s\n", path, strerror(errno));
-        return;
+        return cur;
     }
     LOG_I("nf_conntrack_tcp_loose %d -> 0\n", cur);
+    return cur;
+}
+
+/*
+ * Before XDP attach. While tcp_loose was on, conntrack adopted mid-stream
+ * packets (possibly spoofed) as ESTABLISHED; mirrored, those would get the
+ * established fast path, so flush them. With tcp_loose already off every entry
+ * came from a real handshake, and blocked sources are skipped by event_cb, so
+ * a flush would only kill live NAT/forwarded sessions on every (re)start.
+ */
+void conntrack_prepare_start(void)
+{
+    /* nfct_open loads nf_conntrack, so the sysctl exists before it is read. */
+    struct nfct_handle *fh = nfct_open(CONNTRACK, 0);
+    int was = enforce_tcp_loose_off();
+    if (fh)
+        nfct_close(fh);
+    if (was != 0)
+        flush_all_tcp_conntrack();
+    else
+        LOG_I("nf_conntrack_tcp_loose already 0, keeping existing conntrack entries\n");
 }
 
  int init_conntrack(int tcp_established_fd, int tcp_connection_fd, int block_ips_fd) {

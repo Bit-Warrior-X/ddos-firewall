@@ -15,7 +15,7 @@
 #include <pthread.h>
 #include <stdint.h>
 
-extern int exiting;
+extern volatile sig_atomic_t exiting;
 extern int n_cpus;
 extern char ifname[];
 extern struct capacity_profile global_capacity_profile;
@@ -115,11 +115,14 @@ static double det_km_scale(void)
     return pow(2.0, (5.0 - (double)det_level()) * 0.15);
 }
 
-/* Confirm windows by proficiency (overrides catalog confirm at non-5). */
+/* Confirm windows: firewall.config confirm_windows is the level-5 value; other
+ * detection levels shift it (stricter levels confirm faster). */
 static __u32 det_confirm_windows(void)
 {
-    static const __u32 tbl[11] = { 0, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1 };
-    return tbl[det_level()];
+    static const int adj[11] = { 0, 2, 2, 1, 1, 0, 0, -1, -1, -2, -2 };
+    int w = (int)(shadow_cfg.confirm_windows ? shadow_cfg.confirm_windows
+                                             : SHADOW_CONFIRM_WINDOWS) + adj[det_level()];
+    return w < 1 ? 1 : (__u32)w;
 }
 
 static __u64 host_invalid_prev = 0;
@@ -314,8 +317,7 @@ static void shadow_fire_alert_start(__u8 class, const struct shadow_cell *cell,
     int ev;
     struct alert_extra ex = {0};
 
-    if (global_fw_config.g_attack_stats.global_req_id == 0)
-        global_fw_config.g_attack_stats.global_req_id = generate_attack_req_id();
+    attack_req_id_get_or_assign();
     /* Open archive only when the episode is real enough to alert. */
     if (attack_log_open(global_fw_config.g_attack_stats.global_req_id,
                         det_class_name(class), "adaptive") > 0)
@@ -628,7 +630,9 @@ static void shadow_update_ewma(struct shadow_cell *cell, __u64 rate, __u8 class)
                 double n = (double)cell->learning_samples;
                 double delta = (double)rate - cell->mean;
                 cell->mean += delta / n;
-                cell->var += delta * ((double)rate - cell->mean);
+                /* Welford, kept as the population variance (not the raw sum of
+                 * squares): thresholds use sqrt(var) as sigma. */
+                cell->var += (delta * ((double)rate - cell->mean) - cell->var) / n;
             }
             shadow_recompute_thresholds(cell, class);
         }
@@ -1364,6 +1368,7 @@ static void *shadow_worker(void *arg)
 
         /* prefer_adaptive: shadow owns Attack flags so flood handlers stay in sync. */
         if (global_fw_config.g_config.prefer_adaptive && bss_fd >= 0) {
+            pthread_mutex_lock(&fw_cfg_lock);
             struct global_attack_stats *atk = &global_fw_config.g_attack_stats;
             /* Episode / flood handlers: only after alert_hold passes.
              * Soft mitigation still follows cell.state via publish_mode. */
@@ -1388,6 +1393,7 @@ static void *shadow_worker(void *arg)
 #undef SHADOW_ATK
             __u32 bkey = 0;
             bpf_map_update_elem(bss_fd, &bkey, &global_fw_config, BPF_ANY);
+            pthread_mutex_unlock(&fw_cfg_lock);
         }
 
         /* Host aggregate vs capacity ceiling, or Layer-1 NIC/softirq pressure. */
@@ -1529,14 +1535,15 @@ void stop_shadow_control_loop(void)
 
 int set_enforce_drop_invalid(struct bpf_object *obj, int enable)
 {
+    pthread_mutex_lock(&fw_cfg_lock);
     global_fw_config.g_config.enforce_drop_invalid = enable ? 1 : 0;
+    int bss_fd = obj ? bpf_object__find_map_fd_by_name(obj, ".bss") : -1;
+    __u32 key = 0;
+    int rc = obj && (bss_fd < 0 || bpf_map_update_elem(bss_fd, &key, &global_fw_config, BPF_ANY)) ? -1 : 0;
+    pthread_mutex_unlock(&fw_cfg_lock);
     if (!obj)
         return 0;
-    int bss_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
-    if (bss_fd < 0)
-        return -1;
-    __u32 key = 0;
-    if (bpf_map_update_elem(bss_fd, &key, &global_fw_config, BPF_ANY))
+    if (rc)
         return -1;
     LOG_I("Phase 4 enforce_drop_invalid = %d\n", enable ? 1 : 0);
     return 0;
@@ -1544,14 +1551,15 @@ int set_enforce_drop_invalid(struct bpf_object *obj, int enable)
 
 int set_prefer_adaptive(struct bpf_object *obj, int enable)
 {
+    pthread_mutex_lock(&fw_cfg_lock);
     global_fw_config.g_config.prefer_adaptive = enable ? 1 : 0;
+    int bss_fd = obj ? bpf_object__find_map_fd_by_name(obj, ".bss") : -1;
+    __u32 key = 0;
+    int rc = obj && (bss_fd < 0 || bpf_map_update_elem(bss_fd, &key, &global_fw_config, BPF_ANY)) ? -1 : 0;
+    pthread_mutex_unlock(&fw_cfg_lock);
     if (!obj)
         return 0;
-    int bss_fd = bpf_object__find_map_fd_by_name(obj, ".bss");
-    if (bss_fd < 0)
-        return -1;
-    __u32 key = 0;
-    if (bpf_map_update_elem(bss_fd, &key, &global_fw_config, BPF_ANY))
+    if (rc)
         return -1;
     LOG_I("Phase 5 prefer_adaptive = %d\n", enable ? 1 : 0);
     return 0;

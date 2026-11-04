@@ -1,7 +1,7 @@
 # core/app_factory.py
 """Flask application factory - creates and configures the Flask app."""
 import os
-from flask import Flask
+from flask import Flask, jsonify, request
 from routes.l4_routes import l4_bp
 from routes.l7_routes import l7_bp
 from routes.common_routes import common_bp
@@ -15,10 +15,26 @@ from core.cache_hit_sync import start_cache_hit_sync
 from core.l7_attack_sync import start_l7_attack_sync
 import config
 
+def _allowed_peers() -> frozenset:
+    return frozenset(
+        tuple(getattr(config, "API_ALLOWED_IPS", ("127.0.0.1", "::1")))
+        + tuple(getattr(config, "PANEL_BACKEND_IPS", ()))
+    )
+
+
 def create_app() -> Flask:
     """Create and configure the Flask application."""
     app = Flask(__name__)
-    
+    allowed = _allowed_peers()
+
+    # Port 5000 is reachable from the internet and most routes have no token:
+    # only the panel backend and localhost may call the API.
+    @app.before_request
+    def _restrict_peers():
+        if request.remote_addr not in allowed:
+            return jsonify({"status": "error", "message": "Forbidden"}), 403
+        return None
+
     # Register blueprints
     app.register_blueprint(l4_bp)
     app.register_blueprint(l7_bp)
@@ -26,7 +42,7 @@ def create_app() -> Flask:
     
     return app
 
-def initialize_app():
+def initialize_app(start_workers: bool = None):
     """Initialize the application (start FIFO listener, start temp blacklist monitor).
 
     Important: When running with the Flask reloader (python app.py with debug=True),
@@ -39,8 +55,9 @@ def initialize_app():
     process, otherwise each reload would duplicate them.
     """
     # Only start background workers in the real Flask worker process
-    should_start = os.environ.get("WERKZEUG_RUN_MAIN") == "true" or \
-        "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower()
+    should_start = start_workers if start_workers is not None else (
+        os.environ.get("WERKZEUG_RUN_MAIN") == "true" or
+        "gunicorn" in os.environ.get("SERVER_SOFTWARE", "").lower())
 
     if not should_start:
         print("[INIT] Skipping FIFO listener and temp blacklist monitor in reloader/parent process")

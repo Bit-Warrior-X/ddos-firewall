@@ -33,6 +33,7 @@ ngx_int_t parse_request_frequency_value(char * str, request_freq_t * req_freq_p)
 ngx_int_t parse_response_code(char * str, int * code);
 
 ngx_int_t ngx_http_acl_get_max_request_freq_time(server_acl_rule_t * server_acl_rule_p);
+char * ngx_http_acl_clone_c_str_len(ngx_http_request_t* r, char * src, int length);
 
 ngx_int_t ngx_http_acl_get_max_response_freq_time(server_acl_rule_t * server_acl_rule_p);
 

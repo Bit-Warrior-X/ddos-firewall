@@ -56,12 +56,17 @@ local function parse_description(desc)
 end
 
 local function get_redis(timeout)
+    -- Request-path lazy loads honour the shared circuit breaker.
+    if site_resolver.redis_down() then
+        return nil, "redis circuit open"
+    end
     local red = redis:new()
     red:set_timeout(timeout or 2000)
     -- Dedicated pool so DB-2 cache_purge connections never poison site upstream reads.
     local ok, err = red:connect(REDIS_SOCK, { pool = "athens_redis_db0" })
     if not ok then
         log(ERR, "upstream_redis: redis connect failed: ", tostring(err))
+        site_resolver.mark_redis_down(err)
         return nil, err
     end
     local ok_sel, sel_err = red:select(0)
@@ -94,10 +99,12 @@ local function load_from_redis(site_id)
     if not red then return nil, err end
     local key = "upstreamservers:" .. tostring(site_id)
     local raw, rerr = red:get(key)
-    red:set_keepalive(10000, 100)
     if rerr then
+        red:close()
+        site_resolver.mark_redis_down(rerr)
         return nil, rerr
     end
+    red:set_keepalive(10000, 100)
     if not raw or raw == ngx.null or raw == "" then
         -- Distinguish "no config" from Redis errors; empty is a real miss.
         return {}, nil
@@ -155,10 +162,12 @@ local function load_routes_from_redis(site_id)
     local red, err = get_redis()
     if not red then return nil, err end
     local raw, rerr = red:get("originroutes:" .. tostring(site_id))
-    red:set_keepalive(10000, 100)
     if rerr then
+        red:close()
+        site_resolver.mark_redis_down(rerr)
         return nil, rerr
     end
+    red:set_keepalive(10000, 100)
     if not raw or raw == ngx.null or raw == "" then
         return nil, nil
     end
@@ -260,6 +269,9 @@ local function route_backend(dict, site_id, sid)
     local version = dict:get("routes_updated:" .. sid)
     if not version then
         -- Refresh has not seen this site yet: load once and remember "none" too.
+        if not dict:add("routes_miss:" .. sid, true, 5) then
+            return nil
+        end
         local routes, err = load_routes_from_redis(site_id)
         if err then
             return nil
@@ -313,7 +325,12 @@ function _M.get_backend(site_id)
     if not list or not entry or entry.version ~= version then
         local raw = dict:get("list:" .. sid)
         if not raw or raw == "" or raw == "[]" then
-            -- Lazy load once if refresh has not populated this site yet.
+            -- Lazy load once if refresh has not populated this site yet; an
+            -- empty or failed load is remembered for 5s so a site without
+            -- upstreams does not cost a Redis round trip (and log) per request.
+            if not dict:add("lazy_miss:" .. sid, true, 5) then
+                return DEFAULT_BACKEND
+            end
             local loaded, lerr = load_from_redis(site_id)
             if lerr then
                 log(WARN, "upstream_redis: lazy load failed for site ", sid, ": ", tostring(lerr))
@@ -321,6 +338,7 @@ function _M.get_backend(site_id)
             end
             list = expand_by_weight(loaded or {})
             if #list > 0 then
+                dict:delete("lazy_miss:" .. sid)
                 publish_list(dict, site_id, list, ngx.time())
             else
                 return DEFAULT_BACKEND

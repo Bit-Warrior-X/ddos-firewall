@@ -95,4 +95,8 @@ int send_message_to_api_parser(const char *message);
 int append_block_ip_to_sqlite(const char *ip_str, int block_duration, const char *reason);
 int append_allow_ip_to_sqlite(const char *ip_str, const char *reason);
 
+/* Held while mutating global_fw_config and pushing it to .bss, so a
+ * half-applied config is never published. Recursive: setters may nest. */
+extern pthread_mutex_t fw_cfg_lock;
+
 #endif

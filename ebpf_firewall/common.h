@@ -235,6 +235,7 @@ struct event {
     __u16 reason;
     __u32 srcip;
     __u64 req_id;
+    __u64 ttl_ns;   /* block events: TTL the kernel applied; 0 otherwise */
 };
 
 struct fixed_ip_event {

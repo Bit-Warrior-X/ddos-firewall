@@ -1,6 +1,7 @@
 # core/api_client.py
 """External API client for blocklist/whitelist operations."""
 import socket
+import threading
 from typing import Any, Dict, Optional
 
 import requests
@@ -10,8 +11,8 @@ import urllib3.util.connection as urllib3_connection
 import config
 from utils.auth import get_token
 
-# Disable SSL warnings when verify=False is used
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+if getattr(config, "PANEL_TLS_VERIFY", True) is False:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # This edge often has IPv6 addresses (RA) but no default IPv6 route. DNS AAAA
 # then makes requests fail with Errno 101 (Network is unreachable). Prefer A.
@@ -19,14 +20,17 @@ if getattr(config, "FORCE_IPV4", True):
     urllib3_connection.allowed_gai_family = lambda: socket.AF_INET  # type: ignore[assignment]
 
 
-_panel_session: Optional[requests.Session] = None
+# One Session per thread: the FIFO, notify and sync workers post concurrently
+# and requests.Session is not thread-safe.
+_tls = threading.local()
 
 
 def _session() -> requests.Session:
-    global _panel_session
-    if _panel_session is None:
-        _panel_session = requests.Session()
-    return _panel_session
+    session = getattr(_tls, "session", None)
+    if session is None:
+        session = _tls.session = requests.Session()
+        session.verify = getattr(config, "PANEL_TLS_VERIFY", True)
+    return session
 
 
 class APIClient:
@@ -44,7 +48,6 @@ class APIClient:
                 headers=headers,
                 json=data,
                 timeout=10,
-                verify=False,
             )
             response.raise_for_status()
             return True, response.json()
@@ -66,7 +69,6 @@ class APIClient:
                 headers=headers,
                 json=data,
                 timeout=10,
-                verify=False,
             )
             response.raise_for_status()
             return True, response.json()
@@ -89,7 +91,6 @@ class APIClient:
                 headers=headers,
                 json=payload,
                 timeout=5,
-                verify=False,
             )
             response.raise_for_status()
             return True, False
@@ -134,7 +135,6 @@ class APIClient:
                 headers={"Content-Type": "application/json"},
                 json=payload,
                 timeout=5,
-                verify=False,
             )
             response.raise_for_status()
             return True
@@ -165,7 +165,6 @@ class APIClient:
                 headers=headers,
                 json=payload,
                 timeout=30,
-                verify=False,
             )
             response.raise_for_status()
             return True
@@ -197,7 +196,6 @@ class APIClient:
                 headers=headers,
                 json=payload,
                 timeout=30,
-                verify=False,
             )
             response.raise_for_status()
             return True
@@ -230,7 +228,6 @@ class APIClient:
                 headers=headers,
                 json=payload,
                 timeout=30,
-                verify=False,
             )
             response.raise_for_status()
             return True

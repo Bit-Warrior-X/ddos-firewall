@@ -164,6 +164,32 @@ function _M.upstream_bytes_received()
     return (sum_tokens(ngx.var.upstream_bytes_received))
 end
 
+-- URI, User-Agent, Referer, Host and client IP are client-controlled: without a
+-- cap one interval can create unlimited stats_cache keys, evicting real counters
+-- and making the collectors' get_keys(0) scans stall the worker. Past the cap,
+-- new values of a dimension are counted under OTHER_VALUE for that interval.
+local MAX_DISTINCT_PER_INTERVAL = 2000
+local OTHER_VALUE = "(other)"
+
+local function stats_interval(stats_cache)
+    return (stats_cache and stats_cache:get("STATS_INTERVAL")) or 60
+end
+
+-- Returns the value the count was recorded under (value or the overflow value).
+local function bounded_incr(stats_cache, prefix, sid, value, n, interval, other)
+    local base = prefix .. sid .. ":"
+    if stats_cache:incr(base .. value, n) then
+        return value
+    end
+    local bucket = math.floor(ngx.now() / interval) * interval
+    local card = stats_cache:incr("card:" .. base .. bucket, 1, 0, interval * 2)
+    if card and card > MAX_DISTINCT_PER_INTERVAL then
+        value = other or OTHER_VALUE
+    end
+    stats_cache:incr(base .. value, n, 0)
+    return value
+end
+
 local function request_domain()
     local host = ngx.var.host
     if not host or host == "" then
@@ -240,9 +266,11 @@ function _M.log_response()
     local sid = _M.current_site_id()
     local domain = request_domain()
 
+    local interval = stats_interval(stats_cache)
+
     local response_size = tonumber(ngx.var.bytes_sent) or 0
     incr(stats_cache, sid, "traffic_l7_tx", response_size)
-    stats_cache:incr("domain_tx:" .. sid .. ":" .. domain, response_size, 0)
+    bounded_incr(stats_cache, "domain_tx:", sid, domain, response_size, interval)
 
     local status = ngx.status
     if status >= 200 and status < 600 and not EXCLUDED_RESPONSE_STATUSES[status] then
@@ -305,16 +333,19 @@ function _M.log_response()
     if uri == "" then
         uri = "/"
     end
-    local url_suffix = sid .. ":" .. domain .. " " .. uri
-    stats_cache:incr("cmu_req:" .. url_suffix, 1, 0)
+    if #uri > 512 then
+        uri = uri:sub(1, 512)
+    end
+    local url_value = bounded_incr(stats_cache, "cmu_req:", sid, domain .. " " .. uri, 1, interval,
+                                 OTHER_VALUE .. " " .. OTHER_VALUE)
     if CACHE_MISS_STATUS[cache_status] then
-        stats_cache:incr("cmu_miss:" .. url_suffix, 1, 0)
+        stats_cache:incr("cmu_miss:" .. sid .. ":" .. url_value, 1, 0)
     end
 end
 
 function _M.track_request()
     local stats_cache = ngx.shared.stats_cache
-    local interval = (stats_cache and stats_cache:get("STATS_INTERVAL")) or 60
+    local interval = stats_interval(stats_cache)
     local sid = _M.current_site_id()
     local domain = request_domain()
 
@@ -323,7 +354,7 @@ function _M.track_request()
     local request_size = tonumber(ngx.var.request_length) or 0
     incr(stats_cache, sid, "traffic_l7_rx", request_size)
 
-    stats_cache:incr("domain_req_count:" .. sid .. ":" .. domain, 1, 0)
+    domain = bounded_incr(stats_cache, "domain_req_count:", sid, domain, 1, interval)
     stats_cache:incr("domain_rx:" .. sid .. ":" .. domain, request_size, 0)
 
     -- Seen markers carry the bucket start so "unique in the interval" follows bucket edges.
@@ -336,19 +367,22 @@ function _M.track_request()
         stats_cache:incr("s:" .. sid .. ":ip_count", 1, 0)
     end
 
-    stats_cache:incr("ip_req_count:" .. sid .. ":" .. ip, 1, 0)
+    bounded_incr(stats_cache, "ip_req_count:", sid, ip, 1, interval)
 
     local uri = ngx.var.uri or "/"
     if uri == "" then
         uri = "/"
     end
-    stats_cache:incr("url_req_count:" .. sid .. ":" .. uri, 1, 0)
+    if #uri > 512 then
+        uri = uri:sub(1, 512)
+    end
+    bounded_incr(stats_cache, "url_req_count:", sid, uri, 1, interval)
 
     local ua = ngx.var.http_user_agent or "-"
     if #ua > 256 then
         ua = ua:sub(1, 256)
     end
-    stats_cache:incr("ua_req_count:" .. sid .. ":" .. ua, 1, 0)
+    bounded_incr(stats_cache, "ua_req_count:", sid, ua, 1, interval)
 
     local country, isp = "-", "-"
     local ok_geo, geo_lookup = pcall(require, "resty.geo_lookup")
@@ -369,7 +403,7 @@ function _M.track_request()
     if #referer > 512 then
         referer = referer:sub(1, 512)
     end
-    stats_cache:incr("referer_req_count:" .. sid .. ":" .. referer, 1, 0)
+    bounded_incr(stats_cache, "referer_req_count:", sid, referer, 1, interval)
 end
 
 return _M

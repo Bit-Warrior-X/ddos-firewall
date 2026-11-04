@@ -89,6 +89,11 @@ ngx_int_t parse_comparative_expression(mem_pool_t *pool, char * exp_str, compara
         goto fail_parse_comparative_expression;
     } else {
         int length = temp_pointer - token;
+        if (length < 1) {
+            /* name[length - 1] below would write before the buffer. */
+            ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Empty name in exp string.");
+            goto fail_parse_comparative_expression;
+        }
         name = mem_pool_calloc(pool, length);
         if (name == NULL) {
             ngx_log_error(NGX_LOG_ERR, log, 0, "Failed to alloc name.");
@@ -111,6 +116,10 @@ ngx_int_t parse_comparative_expression(mem_pool_t *pool, char * exp_str, compara
     } else {
         char temp[1024];
         int length = temp_pointer - token;
+        if (length < 0 || length >= (int) sizeof(temp)) {
+            ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Operator field too long in exp string.");
+            goto fail_parse_comparative_expression;
+        }
         ngx_cpystrn((u_char*)temp, (u_char*)token, length + 1);
 
         ngx_log_debug(NGX_LOG_DEBUG_CORE, log, 0, "ngx_http_acl : Operator is '%s'", temp);
@@ -133,6 +142,10 @@ ngx_int_t parse_comparative_expression(mem_pool_t *pool, char * exp_str, compara
         goto fail_parse_comparative_expression;
     } else {
         int length = ngx_strlen(token) - 2;
+        if (length < 0) {
+            ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Truncated value in exp string.");
+            goto fail_parse_comparative_expression;
+        }
         value = mem_pool_calloc(pool, length + 1);
         if (value == NULL) {
             ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Failed to alloc value.");
@@ -148,6 +161,8 @@ ngx_int_t parse_comparative_expression(mem_pool_t *pool, char * exp_str, compara
     exp_node->field = filed_type;
     exp_node->exp_value = NGX_HTTP_ACL_FALSE;
 
+    /* The field-name scratch copy was leaked (shared-memory pool) per parse. */
+    mem_pool_free(pool, temp);
     return NGX_HTTP_ACL_SUCCESS;
     
 fail_parse_comparative_expression:
@@ -303,6 +318,19 @@ ngx_int_t parse_rule_priority(char * str, acl_rule_t * acl_rule, ngx_log_t * log
 }
 
 
+/* Free a partially built node list (and its expression nodes) on a parse
+ * failure. free_acl_rule() walks acl_rule->acl_rule_node_list, which is not
+ * set until the list is complete: calling it with the count set but the list
+ * still NULL crashed the worker on any malformed panel rule. */
+static void abort_intermediate_list(acl_rule_t *acl_rule, acl_rule_node_t *list, int count)
+{
+    acl_rule->acl_rule_node_list = list;
+    acl_rule->acl_rule_node_list_count = count;
+    free_acl_rule(acl_rule);
+    acl_rule->acl_rule_node_list = NULL;
+    acl_rule->acl_rule_node_list_count = 0;
+}
+
 ngx_int_t make_intermediate_list(char * str, acl_rule_t * acl_rule, ngx_log_t * log)
 {
     char delim[] = "\n"; 
@@ -352,16 +380,20 @@ ngx_int_t make_intermediate_list(char * str, acl_rule_t * acl_rule, ngx_log_t * 
                 exp_node = mem_pool_calloc(&acl_rule->pool, sizeof (comparative_expression_t));
                 if (exp_node == NULL) {
                     ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Failed to mem calloc for exp node");
-                    acl_rule->acl_rule_node_list_count = intermediate_node_list_index;
-                    free_acl_rule(acl_rule);
+                    abort_intermediate_list(acl_rule, intermediate_node_list, intermediate_node_list_index);
+                    intermediate_node_list = NULL;
                     goto fail_make_intermediate_list;
                 }
                 
                 ngx_int_t ret = parse_comparative_expression(&acl_rule->pool, token, exp_node, log);
                 if (ret != NGX_HTTP_ACL_SUCCESS) {
                     ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Invalid expression is received.");
-                    acl_rule->acl_rule_node_list_count = intermediate_node_list_index;
-                    free_acl_rule(acl_rule);
+                    /* Hand exp_node (and anything parse allocated in it) to the
+                     * list so the abort path frees it too. */
+                    intermediate_node_list[intermediate_node_list_index].type = ACL_RULE_TOKEN_NODE;
+                    intermediate_node_list[intermediate_node_list_index].exp_node = exp_node;
+                    abort_intermediate_list(acl_rule, intermediate_node_list, intermediate_node_list_index + 1);
+                    intermediate_node_list = NULL;
                     goto fail_make_intermediate_list;
                 }
                 
@@ -391,8 +423,8 @@ ngx_int_t make_intermediate_list(char * str, acl_rule_t * acl_rule, ngx_log_t * 
             acl_rule_node_t * new_intermediate_node_list = mem_pool_calloc(&acl_rule->pool, sizeof (acl_rule_node_t) * capacity);
             if (new_intermediate_node_list == NULL) {
                 ngx_log_error(NGX_LOG_ERR, log, 0, "ngx_http_acl : Failed to realloc new memory heap.");
-                acl_rule->acl_rule_node_list_count = intermediate_node_list_index - 1;
-                free_acl_rule(acl_rule);
+                abort_intermediate_list(acl_rule, intermediate_node_list, intermediate_node_list_index);
+                intermediate_node_list = NULL;
                 goto fail_make_intermediate_list;
             }
 
@@ -1059,7 +1091,9 @@ ngx_int_t compare_cookie_in_cookie_list(ngx_http_request_t* r, char * str_cookie
         if (ngx_strcmp(str_cookie, token) == 0) {
             return NGX_HTTP_ACL_SUCCESS;
         }
-        token = strtok_r(NULL, ";", &save_ptr);
+        /* Same delimiter as the first call: ";" made every cookie after the
+         * first one in the rule's list unmatchable. */
+        token = strtok_r(NULL, ",", &save_ptr);
     }
     return NGX_HTTP_ACL_FAIL;
 }
@@ -1093,12 +1127,12 @@ ngx_int_t compare_ip_in_ip_list(ngx_http_request_t* r, char * ip_addr, char *ip_
         return NGX_HTTP_ACL_FAIL;
     }
 
-    /* parse client IP once */
-    struct in_addr client_in;
-    if (inet_pton(AF_INET, ip_addr, &client_in) != 1) {
+    /* Parse the client once; ngx_ptocidr/ngx_cidr_match handle IPv4 and IPv6
+     * entries (plain address = full-length prefix, family must match). */
+    ngx_addr_t client;
+    if (ngx_parse_addr(r->pool, &client, (u_char *) ip_addr, ngx_strlen(ip_addr)) != NGX_OK) {
         return NGX_HTTP_ACL_FAIL;
     }
-    uint32_t client_ip = ntohl(client_in.s_addr);
 
     char * str_temp = ngx_http_acl_clone_c_str(r, ip_addr_list);
 
@@ -1117,29 +1151,18 @@ ngx_int_t compare_ip_in_ip_list(ngx_http_request_t* r, char * ip_addr, char *ip_
             if (token[0] == '*' && token[1] == '\0') {
                 return NGX_HTTP_ACL_SUCCESS;
             }
-            /* check for CIDR suffix */
-            char *slash = strchr(token, '/');
-            if (slash == NULL) {
-                /* plain IP: exact string match */
-                if (ngx_strcmp(ip_addr, token) == 0) {
+            ngx_str_t   text = { ngx_strlen(token), (u_char *) token };
+            ngx_cidr_t  cidr;
+            ngx_int_t   rc = ngx_ptocidr(&text, &cidr);
+            if (rc == NGX_OK || rc == NGX_DONE) {
+                ngx_array_t one;
+                one.elts = &cidr;
+                one.nelts = 1;
+                one.size = sizeof(ngx_cidr_t);
+                one.nalloc = 1;
+                one.pool = r->pool;
+                if (ngx_cidr_match(client.sockaddr, &one) == NGX_OK) {
                     return NGX_HTTP_ACL_SUCCESS;
-                }
-            } else {
-                /* CIDR: base_ip/prefix */
-                *slash = '\0';
-                char *prefix_str = slash + 1;
-
-                ngx_int_t prefix = ngx_atoi((u_char*)prefix_str, ngx_strlen(prefix_str));
-                if (prefix >= 0 && prefix <= 32) {
-                    struct in_addr net_in;
-                    if (inet_pton(AF_INET, token, &net_in) == 1) {
-                        uint32_t net_ip = ntohl(net_in.s_addr);
-                        uint32_t mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
-
-                        if ((client_ip & mask) == (net_ip & mask)) {
-                            return NGX_HTTP_ACL_SUCCESS;
-                        }
-                    }
                 }
             }
         }
@@ -1414,11 +1437,14 @@ ngx_int_t ngx_http_acl_update_response_codes(server_acl_rule_t * server_acl_rule
     int i = 0;
     for (i = 0 ; i < (int)server_acl_rule_p->header_out_code_count ; i ++) {
         if (server_acl_rule_p->header_out_codes[i] == code) {
-            break;
+            return NGX_HTTP_ACL_SUCCESS;  /* already registered */
         }
     }
-
-    server_acl_rule_p->header_out_code_count = server_acl_rule_p->header_out_code_count % MAX_HEADER_CODE_COUNT;
+    /* The old "% MAX" wrap overwrote codes and shrank the count, so the log
+     * phase stopped recording some registered codes. */
+    if (server_acl_rule_p->header_out_code_count >= MAX_HEADER_CODE_COUNT) {
+        return NGX_HTTP_ACL_FAIL;
+    }
     server_acl_rule_p->header_out_codes[server_acl_rule_p->header_out_code_count] = code;
     server_acl_rule_p->header_out_code_count ++;
 
@@ -1431,6 +1457,9 @@ ngx_int_t ngx_http_acl_get_response_codes(server_acl_rule_t * server_acl_rule_p)
     if (server_acl_rule_p == NULL) {
         return NGX_HTTP_ACL_FAIL;
     }
+
+    /* Rebuild from the current rules (was appended to on every rule add). */
+    server_acl_rule_p->header_out_code_count = 0;
     
     acl_rule_list_t * acl_rule_list_p = server_acl_rule_p->head;
 

@@ -358,6 +358,39 @@ static int delete_expired_blocked_rows(sqlite3 *db, struct load_block_white_ctx 
     return any_err ? -1 : 0;
 }
 
+static sqlite3_int64 sqlite_pragma_int(sqlite3 *db, const char *sql)
+{
+    sqlite3_stmt *stmt = NULL;
+    sqlite3_int64 v = -1;
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW)
+        v = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return v;
+}
+
+/* Deleted rows leave free pages that SQLite never returns to the filesystem.
+ * Switch to incremental auto-vacuum once (needs a full VACUUM); afterwards the
+ * sqlite worker's periodic prune releases pages with PRAGMA incremental_vacuum. */
+static void compact_sqlite_db(sqlite3 *db)
+{
+    sqlite3_busy_timeout(db, 5000);
+    if (sqlite_pragma_int(db, "PRAGMA auto_vacuum;") != 2) {
+        char *err = NULL;
+        if (sqlite3_exec(db, "PRAGMA auto_vacuum=INCREMENTAL; VACUUM;", NULL, NULL, &err) != SQLITE_OK) {
+            LOG_W("sqlite VACUUM failed: %s\n", err ? err : sqlite3_errmsg(db));
+            sqlite3_free(err);
+        } else {
+            LOG_I("sqlite: enabled incremental auto_vacuum (%lld pages)\n",
+                  (long long)sqlite_pragma_int(db, "PRAGMA page_count;"));
+        }
+        return;
+    }
+    if (sqlite_pragma_int(db, "PRAGMA freelist_count;") > 0)
+        sqlite3_exec(db, "PRAGMA incremental_vacuum;", NULL, NULL, NULL);
+}
+
 // Callback function for blocked_ips
 int blocked_ips_callback(void *param_obj, int argc, char **argv, char **azColName) {
     struct load_block_white_ctx *ctx = (struct load_block_white_ctx *)param_obj;
@@ -577,8 +610,8 @@ static int load_block_white_list(struct bpf_object *obj) {
     }
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
 
-    if (delete_expired_blocked_rows(db, &ctx) < 0)
-        rc = -1;
+    int prune_rc = delete_expired_blocked_rows(db, &ctx);
+    compact_sqlite_db(db);
 
     // Read from white_ips table
     char *sql_white = "SELECT * FROM white_ips;";
@@ -593,6 +626,8 @@ static int load_block_white_list(struct bpf_object *obj) {
         goto cleanup;
     }
     if (err_msg) { sqlite3_free(err_msg); err_msg = NULL; }
+    if (prune_rc < 0)
+        rc = -1;
     
 cleanup:
     free(ctx.expired_blocked_ids);
@@ -785,7 +820,7 @@ static int populate_validity_maps(struct bpf_object *obj)
 }
 
 
-int load_config(struct bpf_object *obj) {
+static int load_config_locked(struct bpf_object *obj) {
     char* env_path = getenv(CONFIG_FILE);
     if (!env_path) {
         LOG_E("Failed to open env : %s", CONFIG_FILE);
@@ -1294,12 +1329,7 @@ int load_config(struct bpf_object *obj) {
             return -1;
         }
 
-        if (clear_geoip_trie_map(geo_map_fd) < 0) {
-            LOG_E("Failed to clear geoip_trie_map\n");    
-        } else 
-            LOG_D("geoip_trie_map is cleared\n");
-
-        if (init_geo(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_map_fd) < 0) {
+        if (rebuild_geo_map(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_map_fd) < 0) {
             LOG_E("Failed to update geoip_trie_map");
             return -1;
         }
@@ -1310,12 +1340,7 @@ int load_config(struct bpf_object *obj) {
             return -1;
         }
 
-        if (clear_geoip_trie_map(geo_block_map_fd) < 0) {
-            LOG_E("Failed to clear geoip_trie_map\n");    
-        } else 
-            LOG_D("geoip_trie_block_map is cleared\n");
-
-        if (init_geo(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_block_map_fd) < 0) {
+        if (rebuild_geo_map(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_block_map_fd) < 0) {
             LOG_E("Failed to update geoip_trie_block_map");
             return -1;
         }
@@ -1347,4 +1372,14 @@ int load_config(struct bpf_object *obj) {
     LOG_I("Setup config success\n");
 
     return 0;
+}
+
+/* Parsing writes global_fw_config field by field; other threads push the whole
+ * struct to the kernel at any time, so hold fw_cfg_lock until it is complete. */
+int load_config(struct bpf_object *obj)
+{
+    pthread_mutex_lock(&fw_cfg_lock);
+    int rc = load_config_locked(obj);
+    pthread_mutex_unlock(&fw_cfg_lock);
+    return rc;
 }

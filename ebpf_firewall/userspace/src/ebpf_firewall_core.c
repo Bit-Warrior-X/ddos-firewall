@@ -158,7 +158,18 @@ struct det_snapshot global_det_stats = {0};
 
 struct traffic_stats_config global_traffic_stats[TRAFFIC_STATS_SLOTS] = {0};
 
-int exiting = 0;
+volatile sig_atomic_t exiting = 0;
+
+pthread_mutex_t fw_cfg_lock;
+
+__attribute__((constructor)) static void init_fw_cfg_lock(void)
+{
+    pthread_mutexattr_t a;
+    pthread_mutexattr_init(&a);
+    pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&fw_cfg_lock, &a);
+    pthread_mutexattr_destroy(&a);
+}
 char **process_argv = NULL;
 struct bpf_object *obj;
 
@@ -232,12 +243,38 @@ static pthread_cond_t sqlite_block_q_cv = PTHREAD_COND_INITIALIZER;
 static pthread_once_t sqlite_worker_once = PTHREAD_ONCE_INIT;
 static pthread_t sqlite_worker_thr;
 static int sqlite_worker_thr_valid;
+static int sqlite_worker_busy;   /* batch dequeued but not committed; under sqlite_block_q_mutex */
+
+#define SQLITE_PRUNE_INTERVAL_SEC 600
+
+/* Same rule as the startup prune in load_block_white_list(): rows with a
+ * positive duration whose created + duration is in the past. */
+static void sqlite_prune_expired_blocks(sqlite3 *db)
+{
+    char *err = NULL;
+
+    if (sqlite3_exec(db,
+            "DELETE FROM blocked_ips WHERE CAST(duration AS INTEGER) > 0 "
+            "AND strftime('%s', created) IS NOT NULL "
+            "AND CAST(strftime('%s', created) AS INTEGER) + CAST(duration AS INTEGER) "
+            "<= CAST(strftime('%s', 'now') AS INTEGER);",
+            NULL, NULL, &err) != SQLITE_OK) {
+        LOG_E("sqlite worker: prune expired blocks: %s\n", err ? err : sqlite3_errmsg(db));
+        sqlite3_free(err);
+        return;
+    }
+    int n = sqlite3_changes(db);
+    if (n > 0)
+        LOG_I("sqlite worker: pruned %d expired blocked_ips rows\n", n);
+    sqlite3_exec(db, "PRAGMA incremental_vacuum;", NULL, NULL, NULL);
+}
 
 static void *sqlite_block_worker_main(void *arg)
 {
     (void)arg;
     sqlite3 *db = NULL;
     sqlite3_stmt *stmt = NULL;
+    time_t next_prune = time(NULL) + SQLITE_PRUNE_INTERVAL_SEC;
     const char *sql =
         "INSERT INTO blocked_ips (ip, type, duration, reason, created) "
         "VALUES (?, 'Auto', ?, ?, ?);";
@@ -264,12 +301,20 @@ static void *sqlite_block_worker_main(void *arg)
 
     for (;;) {
         pthread_mutex_lock(&sqlite_block_q_mutex);
-        while (sqlite_block_q_size == 0 && !exiting)
-            pthread_cond_wait(&sqlite_block_q_cv, &sqlite_block_q_mutex);
+        while (sqlite_block_q_size == 0 && !exiting && time(NULL) < next_prune) {
+            struct timespec until = { .tv_sec = next_prune, .tv_nsec = 0 };
+            pthread_cond_timedwait(&sqlite_block_q_cv, &sqlite_block_q_mutex, &until);
+        }
 
         if (sqlite_block_q_size == 0 && exiting) {
             pthread_mutex_unlock(&sqlite_block_q_mutex);
             break;
+        }
+        if (time(NULL) >= next_prune) {
+            pthread_mutex_unlock(&sqlite_block_q_mutex);
+            sqlite_prune_expired_blocks(db);
+            next_prune = time(NULL) + SQLITE_PRUNE_INTERVAL_SEC;
+            continue;
         }
 
         sqlite_block_job_t batch[512];
@@ -279,13 +324,25 @@ static void *sqlite_block_worker_main(void *arg)
             sqlite_block_q_head = (sqlite_block_q_head + 1) % SQLITE_BLOCK_Q_CAP;
             sqlite_block_q_size--;
         }
+        sqlite_worker_busy = n > 0;
         pthread_mutex_unlock(&sqlite_block_q_mutex);
 
         if (n == 0)
             continue;
 
-        if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK) {
-            LOG_E("sqlite worker: BEGIN failed: %s\n", sqlite3_errmsg(db));
+        /* angelos writes the same DB; busy_timeout covers short locks, retry
+         * longer ones instead of dropping the batch. */
+        int began = 0;
+        for (int attempt = 0; attempt < 5 && !began; attempt++) {
+            began = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) == SQLITE_OK;
+            if (!began && attempt < 4)
+                sleep(1);
+        }
+        if (!began) {
+            LOG_E("sqlite worker: BEGIN failed, dropping %d rows: %s\n", n, sqlite3_errmsg(db));
+            pthread_mutex_lock(&sqlite_block_q_mutex);
+            sqlite_worker_busy = 0;
+            pthread_mutex_unlock(&sqlite_block_q_mutex);
             continue;
         }
 
@@ -318,6 +375,9 @@ static void *sqlite_block_worker_main(void *arg)
             LOG_E("sqlite worker: COMMIT failed: %s\n", sqlite3_errmsg(db));
             sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
         }
+        pthread_mutex_lock(&sqlite_block_q_mutex);
+        sqlite_worker_busy = 0;
+        pthread_mutex_unlock(&sqlite_block_q_mutex);
     }
 
     sqlite3_finalize(stmt);
@@ -725,10 +785,12 @@ static void * global_attack_check_worker(void * arg) {
         aggregate.gre = traffic_counter_delta(cur_income.gre, &prev_income.gre);
 
         time_t rawtime;
+        struct tm tm_buf;
         struct tm *tm_info;
         time(&rawtime);
-        tm_info = localtime(&rawtime);
+        tm_info = localtime_r(&rawtime, &tm_buf);
 
+        pthread_mutex_lock(&fw_cfg_lock);
         __u8 need_to_update = false;
         __u8 syn_attack = false, ack_attack = false, rst_attack = false, icmp_attack = false, udp_attack = false, gre_attack = false, stomp_attack = false, handshake_attack = false;
 
@@ -747,8 +809,7 @@ static void * global_attack_check_worker(void * arg) {
                     global_attack_stats_val->syn_protect_expire = now + global_fw_config.g_syn_config.syn_protect_duration;
                     //LOG_D("Send backend to now is %lld, syn_protect_expire %lld\n", now, global_attack_stats_val->syn_protect_expire);
 
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_TCP_SYN_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->syn_attack = syn_attack;
                     need_to_update = true;
@@ -770,8 +831,7 @@ static void * global_attack_check_worker(void * arg) {
                 if (now >= global_attack_stats_val->ack_protect_expire) {
                     global_attack_stats_val->ack_protect_expire = now + global_fw_config.g_ack_config.ack_protect_duration;
                     //LOG_D("Send backend to now is %lld, ack_protect_expire %lld\n", now, global_attack_stats_val->ack_protect_expire);
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_TCP_ACK_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->ack_attack = ack_attack;
                     need_to_update = true;
@@ -792,8 +852,7 @@ static void * global_attack_check_worker(void * arg) {
             if (rst_attack == true) {
                 if (now >= global_attack_stats_val->rst_protect_expire) {
                     global_attack_stats_val->rst_protect_expire = now + global_fw_config.g_rst_config.rst_protect_duration;
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_TCP_RST_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->rst_attack = rst_attack;
                     need_to_update = true;
@@ -813,8 +872,7 @@ static void * global_attack_check_worker(void * arg) {
             if (icmp_attack == true) {
                 if (now >= global_attack_stats_val->icmp_protect_expire) {
                     global_attack_stats_val->icmp_protect_expire = now + global_fw_config.g_icmp_config.icmp_protect_duration;
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_ICMP_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->icmp_attack = icmp_attack;
                     need_to_update = true;
@@ -834,8 +892,7 @@ static void * global_attack_check_worker(void * arg) {
             if (udp_attack == true) {
                 if (now >= global_attack_stats_val->udp_protect_expire) {
                     global_attack_stats_val->udp_protect_expire = now + global_fw_config.g_udp_config.udp_protect_duration;
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_UDP_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->udp_attack = udp_attack;
                     need_to_update = true;
@@ -855,8 +912,7 @@ static void * global_attack_check_worker(void * arg) {
             if (gre_attack == true) {
                 if (now >= global_attack_stats_val->gre_protect_expire) {
                     global_attack_stats_val->gre_protect_expire = now + global_fw_config.g_gre_config.gre_protect_duration;
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_GRE_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->gre_attack = gre_attack;
                     need_to_update = true;
@@ -885,8 +941,7 @@ static void * global_attack_check_worker(void * arg) {
             if (stomp_attack == true) {
                 if (now >= global_attack_stats_val->stomp_protect_expire) {
                     global_attack_stats_val->stomp_protect_expire = now + global_fw_config.g_stomp_config.stomp_protect_duration;
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_TCP_STOMP_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->stomp_attack = stomp_attack;
                     need_to_update = true;
@@ -904,8 +959,7 @@ static void * global_attack_check_worker(void * arg) {
             if (handshake_attack == true) {
                 if (now >= global_attack_stats_val->handshake_protect_expire) {
                     global_attack_stats_val->handshake_protect_expire = now + global_fw_config.g_handshake_config.handshake_protect_duration;
-                    if (global_attack_stats_val->global_req_id == 0)
-                        global_attack_stats_val->global_req_id = generate_attack_req_id();
+                    attack_req_id_get_or_assign();
                     print_firewall_status(tm_info, EVENT_TCP_HANDSHAKE_ATTACK_PROTECION_MODE_START, 0, global_attack_stats_val->global_req_id);
                     global_attack_stats_val->handshake_attack = handshake_attack;
                     need_to_update = true;
@@ -923,6 +977,7 @@ skip_classic_protection:
         if (need_to_update == true) {
             bpf_map_update_elem(bss_map_fd, &key, &global_fw_config, BPF_ANY);
         }
+        pthread_mutex_unlock(&fw_cfg_lock);
 
         LOG_T(
             "SYN:%5llu/%-5llu "
@@ -1078,10 +1133,13 @@ static void *blocked_ips_duration_check_worker(void *arg) {
         void *val  = malloc(info.value_size);
         if (!key || !next || !val) {
             LOG_E( "Failed to allocate memory\n");
-            goto cleanup;
+            free(key); free(next); free(val);
+            sleep(1);
+            continue;
         }
 
         const __u64 t_now = now_ns();
+        __u64 budget = (__u64)info.max_entries * 2;
         char ip_str[INET_ADDRSTRLEN];
 
         // Dynamic array for expired keys
@@ -1090,9 +1148,10 @@ static void *blocked_ips_duration_check_worker(void *arg) {
         size_t delete_count = 0;
 
         // First pass: Identify expired keys
-        while (!bpf_map_get_next_key(blocked_ips_fd, key, next)) {
+        while (budget-- > 0 && !bpf_map_get_next_key(blocked_ips_fd, key, next)) {
             if (bpf_map_lookup_elem(blocked_ips_fd, next, val)) {
-                break;
+                memcpy(key, next, info.key_size);   /* deleted meanwhile */
+                continue;
             }
 
             __u64 exp_ns = *(__u64 *)val;
@@ -1121,9 +1180,10 @@ static void *blocked_ips_duration_check_worker(void *arg) {
         }
 
         time_t rawtime;
+        struct tm tm_buf;
         struct tm *tm_info;
         time(&rawtime);
-        tm_info = localtime(&rawtime);
+        tm_info = localtime_r(&rawtime, &tm_buf);
 
         // Second pass: Delete expired keys
         for (size_t i = 0; i < delete_count; i++) {
@@ -1161,7 +1221,9 @@ static int ringbuf_handle_event(void *ctx, void *data, size_t size)
         return -1;
     }
 
+    fw_event_ttl_sec = e->ttl_ns / ONE_SECOND_NS;
     print_firewall_status(&tm_info, e->reason, e->srcip, e->req_id);
+    fw_event_ttl_sec = 0;
     return 0;
 }
 
@@ -1550,8 +1612,11 @@ static void flush_attack_episode_stop(const char *why)
                     ex.source, classes[0] ? classes : "-", ex.why);
     build_attack_episode_message(0, req_id, message, sizeof(message), &ex);
     send_message_to_api_parser(message);
-    if (g_attack_stats->global_req_id == req_id)
-        g_attack_stats->global_req_id = 0;
+    {
+        __u64 expect = req_id;
+        __atomic_compare_exchange_n(&g_attack_stats->global_req_id, &expect, 0, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
     LOG_I("ALERT episode STOP req_id=%llu source=%s why=%s\n",
           (unsigned long long)req_id, ex.source, ex.why);
     attack_log_close(classes[0] ? classes : "-");
@@ -1570,9 +1635,7 @@ static void * report_attack_status_worker(void * arg)
             char classes[128];
             struct alert_extra ex = {0};
 
-            if (g_attack_stats->global_req_id == 0)
-                g_attack_stats->global_req_id = generate_attack_req_id();
-            req_id = g_attack_stats->global_req_id;
+            req_id = attack_req_id_get_or_assign();
 
             format_active_attack_classes(g_attack_stats, classes, sizeof(classes));
             ex.classes = classes;
@@ -1855,6 +1918,9 @@ int main(int argc, char **argv) {
 
     signal(SIGINT, sig_handler);
     signal(SIGTERM, sig_handler);
+    /* A control client that disconnects before reading its reply must not
+     * kill the daemon (write() on a closed socket raises SIGPIPE). */
+    signal(SIGPIPE, SIG_IGN);
 
     // Get the map file descriptor
     tcp_established_map_fd = bpf_object__find_map_fd_by_name(obj, "tcp_established_map");
@@ -1875,14 +1941,7 @@ int main(int argc, char **argv) {
         goto cleanup;
     }
     
-#if 0
-    if (purge_conntrack_for_blocked_ips(blocked_ips_map_fd) < 0) {
-        LOG_E( "Failed to purge conntrack for blocked IPs\n");
-        goto cleanup;
-    }
-#endif
-
-    flush_all_tcp_conntrack();
+    conntrack_prepare_start();
 
     // Attach the main XDP program to the interface.
     attach_id = bpf_xdp_attach(ifindex, prog_main_fd, attach_mode, NULL);
@@ -1900,9 +1959,13 @@ int main(int argc, char **argv) {
             LIBBPF_OPTS(bpf_tc_hook, tc_hook,
                         .ifindex = ifindex,
                         .attach_point = BPF_TC_EGRESS);
+            /* REPLACE: the filter outlives the process; without it every
+             * restart fails with -EEXIST and the previous run's program keeps
+             * writing into its own, no longer read, outbound_syn map. */
             LIBBPF_OPTS(bpf_tc_opts, tc_opts,
                         .handle = 1,
                         .priority = 50,
+                        .flags = BPF_TC_F_REPLACE,
                         .prog_fd = tc_fd);
             int tc_err = bpf_tc_hook_create(&tc_hook);
             if (tc_err && tc_err != -EEXIST)
@@ -1996,20 +2059,39 @@ cleanup:
     }
     flush_attack_episode_stop("shutdown");
 
-    if (ringbuf) ring_buffer__free(ringbuf);
-    if (fixed_ip_ringbuf) ring_buffer__free(fixed_ip_ringbuf);
-    if (obj) bpf_object__close(obj);
+    /* Detach first. The ring buffers and BPF object are deliberately not
+     * freed: the poll, sweeper, stats and conntrack threads are not joined
+     * and would use them after free; process exit releases everything. */
     if (attach_id >= 0) bpf_xdp_detach(ifindex, attach_mode, NULL);
-    
+
     close_unix_socket();
     close_nginx_socket();
-    close_conntrack();
 
     LOG_I("Program is ended\n");
 
     return err < 0 ? -err : 0;
 }
 
+
+/* exec replaces the process: queued SQLite rows and API messages would be
+ * lost, and the open episode would never get its STOP. */
+static void drain_queues_before_exec(void)
+{
+    flush_attack_episode_stop("restart");
+    for (int i = 0; i < 300; i++) {
+        pthread_mutex_lock(&sqlite_block_q_mutex);
+        int pending = sqlite_block_q_size + sqlite_worker_busy;
+        pthread_mutex_unlock(&sqlite_block_q_mutex);
+        pthread_mutex_lock(&fifo_q_mutex);
+        pending += fifo_q_size;
+        pthread_mutex_unlock(&fifo_q_mutex);
+        if (pending == 0)
+            break;
+        pthread_cond_signal(&sqlite_block_q_cv);
+        usleep(10000);
+    }
+    usleep(20000);   /* last datagram popped by the sender is still in flight */
+}
 
 int restart_fw() {
     int ret = -1;
@@ -2018,6 +2100,8 @@ int restart_fw() {
         LOG_E( "Process argument is NULL\n");
         return -1;
     }
+
+    drain_queues_before_exec();
 
     ret = execvp(process_argv[0], process_argv);
     if (ret == -1) {
@@ -2606,6 +2690,7 @@ int list_block_ip(char **out) {
     *out = NULL;
     size_t off = 0, cap = 1024;          /* start with 1 kB, grow as needed */
     char *buf = malloc(cap);
+    void *key = NULL, *next = NULL, *val = NULL;
     if (!buf)
         return -1;
 
@@ -2627,9 +2712,9 @@ int list_block_ip(char **out) {
     LOG_D("‑‑ Map fd=%d  type=%u  max_entries=%u  key=%uB  value=%uB\n",
             blocked_ips_fd, info.type, info.max_entries, info.key_size, info.value_size);
             
-    void *key  = calloc(1, info.key_size);
-    void *next = calloc(1, info.key_size);
-    void *val  = malloc(info.value_size);
+    key  = calloc(1, info.key_size);
+    next = calloc(1, info.key_size);
+    val  = malloc(info.value_size);
 
     if (!key || !next || !val) {
         LOG_E( "Failed to malloc\n");
@@ -2645,10 +2730,16 @@ int list_block_ip(char **out) {
     const __u64 t_now = now_ns();
     char ip_str[INET_ADDRSTRLEN];
     char ts_str[80];
+    /* Entries expire and are deleted concurrently; a deleted cursor key makes
+     * get_next_key restart from the first bucket, so bound the walk. */
+    __u64 budget = (__u64)info.max_entries * 2;
 
     do {
+        if (budget-- == 0)
+            break;
         if (bpf_map_lookup_elem(blocked_ips_fd, next, val)) {
-            goto error;
+            memcpy(key, next, info.key_size);
+            continue;
         }
 
         /* key → dotted‑quad -------------------------------------------------- */
@@ -2658,7 +2749,6 @@ int list_block_ip(char **out) {
         /* value is absolute expiration time in ns ---------------------------- */
         __u64 exp_ns = *(__u64 *)val;
         if (exp_ns == -1) {
-            LOG_D("IP %-15s  Permanent block\n", ip_str);
             if (sb_append(&buf, &off, &cap,"IP %-15s  Permanent block\n",ip_str) < 0)
                 goto error;
         }
@@ -2684,15 +2774,12 @@ int list_block_ip(char **out) {
             time(&rawtime); // Get current time in seconds since epoch
             rawtime += remain;
 
-            struct tm *utc_time = gmtime(&rawtime);
-            if (utc_time == NULL) {
+            struct tm utc_tm;
+            if (gmtime_r(&rawtime, &utc_tm) == NULL) {
                 LOG_E( "gmtime error\n");
                 goto error;
             }
-            strftime(ts_str, sizeof(ts_str), "%Y-%m-%d %H:%M:%S UTC", utc_time);
-
-            LOG_D("IP %-15s  expires_at=%s  (~%.3f s left)\n",
-            ip_str, ts_str, remain);
+            strftime(ts_str, sizeof(ts_str), "%Y-%m-%d %H:%M:%S UTC", &utc_tm);
 
             if (sb_append(&buf, &off, &cap,"IP %-15s  expires_at=%s  (~%.3f s left)\n",ip_str, ts_str, remain) < 0)
                 goto error;
@@ -2708,6 +2795,7 @@ done:
 
 error:
     free(key); free(next); free(val);
+    free(buf);
     return -1;
 }
 
@@ -2866,6 +2954,31 @@ int get_block_list_ips(char **out, char *filter_type, char *filter_ip, char * fi
     return 0;
 }
 
+/* Delete persisted rows too: load_block_white_list() reloads every row on
+ * RELOAD_FW / restart, so a map-only clear came back. ip may be NULL. */
+static void sqlite_delete_rows(const char *sql, const char *ip)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_open(ebpf_sqlite_db_path(), &db) != SQLITE_OK) {
+        LOG_E("sqlite_delete_rows: cannot open db: %s\n", db ? sqlite3_errmsg(db) : "?");
+        if (db)
+            sqlite3_close(db);
+        return;
+    }
+    sqlite3_busy_timeout(db, 5000);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (ip)
+            sqlite3_bind_text(stmt, 1, ip, -1, SQLITE_STATIC);
+        if (sqlite3_step(stmt) != SQLITE_DONE)
+            LOG_E("sqlite_delete_rows: %s\n", sqlite3_errmsg(db));
+    } else {
+        LOG_E("sqlite_delete_rows: prepare failed: %s\n", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+}
+
 int clear_deny_ip(char * ip) {
     int blocked_ips_fd;
     blocked_ips_fd = bpf_object__find_map_fd_by_name(obj, "blocked_ips");
@@ -2879,6 +2992,7 @@ int clear_deny_ip(char * ip) {
         return -1;
     }
 
+    sqlite_delete_rows("DELETE FROM blocked_ips WHERE ip = ?;", ip);
     int err = bpf_map_delete_elem(blocked_ips_fd, &key);
     if (err) {
         LOG_E("Failed to delete element from map %s\n", strerror(errno));
@@ -2896,6 +3010,7 @@ int clear_deny_ip_all() {
     }
     if (clear_batch_map(blocked_ips_fd) < 0)
         return -1;
+    sqlite_delete_rows("DELETE FROM blocked_ips;", NULL);
     LOG_D("blocked_ips_fd is cleared\n");
     return 0;
 }
@@ -3106,6 +3221,7 @@ int clear_allow_ip(char *ip) {
         LOG_E( "Invalid IP address: %s\n", ip);
         return -1;
     }
+    sqlite_delete_rows("DELETE FROM white_ips WHERE ip = ?;", ip);
     return bpf_map_delete_elem(allow_fd, &key);
 }
 
@@ -3115,7 +3231,10 @@ int clear_allow_ip_all() {
         LOG_E( "Failed to find allowed_ips\n");
         return -1;
     }
-    return clear_batch_map(allow_fd);
+    int ret = clear_batch_map(allow_fd);
+    if (ret >= 0)
+        sqlite_delete_rows("DELETE FROM white_ips;", NULL);
+    return ret;
 }
 
 int list_allow_ip(char **out) {
@@ -3141,8 +3260,10 @@ int list_allow_ip(char **out) {
     do {
         struct in_addr addr = { .s_addr = *(__u32 *)next };
         inet_ntop(AF_INET, &addr, ip_str, sizeof(ip_str));
-        off += snprintf(buf + off, cap - off, "IP %s\n", ip_str);
-        if (off >= cap - 16) { cap *= 2; buf = realloc(buf, cap); }
+        if (sb_append(&buf, &off, &cap, "IP %s\n", ip_str) < 0) {
+            free(buf); free(key); free(next);
+            return -1;
+        }
         memcpy(key, next, info.key_size);
     } while (!bpf_map_get_next_key(allow_fd, key, next));
 
@@ -3504,50 +3625,36 @@ int geo_set(int valid,
         return -1;
     }
 
-    global_fw_config.g_geo_config.check = valid;
-
-    if (global_fw_config.g_geo_config.check) {
-        int geo_map_fd = -1;
-        if (global_fw_config.g_geo_config.check == 1) {
-            LOG_D("Clearing geoip_trie_map\n");
-            geo_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_map");
-            if (geo_map_fd < 0) {
-                LOG_E( "ERROR: finding geo_map_fd: %d\n", geo_map_fd);
-                return -1;
-            }
-        } else {
-            LOG_D("Clearing geoip_trie_block_map\n");
-            geo_map_fd = bpf_object__find_map_fd_by_name(obj, "geoip_trie_block_map");
-            if (geo_map_fd < 0) {
-                LOG_E( "ERROR: finding geo_block_map_fd: %d\n", geo_map_fd);
-                return -1;
-            }
+    /* Publish the new mode only after its trie is loaded: other threads push
+     * the whole global_fw_config to the kernel at any time. */
+    if (valid) {
+        int geo_map_fd = bpf_object__find_map_fd_by_name(obj,
+                            valid == 1 ? "geoip_trie_map" : "geoip_trie_block_map");
+        if (geo_map_fd < 0) {
+            LOG_E( "ERROR: finding geo map fd: %d\n", geo_map_fd);
+            return -1;
         }
-        
 
-        if (clear_geoip_trie_map(geo_map_fd) < 0) {
-            LOG_E("Failed to clear geoip_trie_map\n");    
-        } else 
-            LOG_D("geoip_trie_map is cleared\n");
-        
         char isos[256][3];
         int nisos = 0;
 
-        char * str_token = strtok(countries, ",");
+        char *save = NULL;
+        char * str_token = strtok_r(countries, ",", &save);
         while (str_token != NULL) {
             if (nisos >= 255) break;
             strncpy(isos[nisos], str_token, 2);
             isos[nisos][2] = '\0';
             LOG_D("Parsed country iso is %s\n", isos[nisos]);
             nisos ++;
-            str_token = strtok(NULL, ",");
+            str_token = strtok_r(NULL, ",", &save);
         }
 
-        if (init_geo(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_map_fd) < 0) {
-            LOG_E("Failed to update geoip_trie_map");
+        if (rebuild_geo_map(geo_db_location_path, geo_db_ipv4_path, isos, nisos, geo_map_fd) < 0) {
+            LOG_E("Failed to update geo map, keeping previous geo setting\n");
             return -1;
         }
     }
+    global_fw_config.g_geo_config.check = valid;
 
     {
         __u32 g = global_fw_config.g_geo_config.cache_generation + 1;
@@ -3759,9 +3866,11 @@ int append_allow_ip_to_sqlite(const char *ip_str, const char *reason) {
     gmtime_r(&now, &gmt);
     strftime(created, sizeof(created), "%Y-%m-%d %H:%M:%S", &gmt);
 
+    /* Idempotent: ADD_ALLOW_IP is re-sent for the same backend IPs on every
+     * agent start / site update (white_ips has a unique index on ip). */
     const char *sql =
         "INSERT INTO white_ips (ip, reason, created) "
-        "VALUES (?, ?, ?);";
+        "SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM white_ips WHERE ip = ?1);";
 
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         LOG_E("Failed to prepare whitelist insert: %s\n", sqlite3_errmsg(db));

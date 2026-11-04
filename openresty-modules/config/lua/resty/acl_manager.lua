@@ -20,6 +20,8 @@ local _M = { _VERSION = "2.0.0" }
 
 local REDIS_SOCK = "unix:/tmp/redis.sock"
 local VERSION_KEY = "acl_config_version"
+local APPLIED_KEY = "acl_applied_version"
+local APPLYING_PREFIX = "acl_applying:"
 
 -- Names match Angelos waf:{site_id}:{name} keys.
 local acl_rules = {
@@ -262,7 +264,10 @@ function _M.load_all_rules()
 end
 
 --- Apply merged site ACLs into ngx_acl. Must run in request context.
-function _M.apply_to_engine()
+--- ver: the config version being applied (read before the Redis yields, so a
+--- bump during the rebuild is not lost).
+function _M.apply_to_engine(ver)
+    ver = ver or current_version()
     if not cache then
         local ok, err = _M.init()
         if not ok then
@@ -270,25 +275,60 @@ function _M.apply_to_engine()
         end
     end
 
+    local all_ok = true
     for _, rule in ipairs(acl_rules) do
         local cfg = build_merged_cfg(rule)
-        local ok_set, set_err = pcall(handle_acl.set_acl_rule, cfg)
-        if not ok_set then
-            log(ERR, "failed to apply ACL '", rule.name, "': ", tostring(set_err))
+        local ok_set, res, set_err = pcall(handle_acl.set_acl_rule, cfg)
+        if not ok_set or not res then
+            all_ok = false
+            log(ERR, "failed to apply ACL '", rule.name, "': ",
+                tostring(ok_set and set_err or res))
         end
     end
 
-    applied_version = current_version()
-    return true
+    applied_version = ver
+    return all_ok
 end
 
+local applying = false
+
 --- Ensure ngx_acl matches latest Redis site configs (request context).
+--- The rules live in shared memory, so one worker rebuilds per version; every
+--- request used to start its own rebuild (yielding on Redis), interleaving
+--- remove/add of the same rule ids across workers.
 function _M.ensure_applied()
     local ver = current_version()
     if applied_version == ver and ver > 0 then
         return true
     end
-    return _M.apply_to_engine()
+    if applying then
+        return true
+    end
+
+    local state = shared.acl_init_state
+    if state and ver > 0 then
+        if state:get(APPLIED_KEY) == ver then
+            applied_version = ver
+            return true
+        end
+        if not state:add(APPLYING_PREFIX .. ver, ngx.worker.pid(), 30) then
+            return true
+        end
+    end
+
+    applying = true
+    local ok, res = pcall(_M.apply_to_engine, ver)
+    applying = false
+    if state and ver > 0 and ok and res then
+        state:set(APPLIED_KEY, ver)
+        state:delete(APPLYING_PREFIX .. ver)
+    end
+    -- On failure the lock is left to expire: retry after ~30s, not per request.
+    if not ok then
+        log(ERR, "ensure_applied: ", tostring(res))
+        return nil, res
+    end
+    return res
 end
 
 local function parse_waf_payload(payload)

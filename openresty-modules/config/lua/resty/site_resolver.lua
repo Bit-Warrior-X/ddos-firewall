@@ -268,7 +268,14 @@ function _M.list_site_domains()
             for _, key in ipairs(keys) do
                 local host = tostring(key):match("^domain:(.+)$")
                 if host and host ~= "" then
-                    local val = red:get(key)
+                    local val, gerr = red:get(key)
+                    if gerr then
+                        -- A partial map would rebuild ACLs without these sites.
+                        red:close()
+                        ngx.log(ngx.WARN, "site_resolver: list_site_domains get failed: ", tostring(gerr))
+                        _M.mark_redis_down(gerr)
+                        return stale_map()
+                    end
                     if val and val ~= ngx.null and val ~= "" then
                         local site_id = tostring(val):match("^%s*(.-)%s*$")
                         if site_id and site_id ~= "" then

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* accept4 */
 
 #include <stdarg.h>
 #include <strings.h>
@@ -15,7 +16,7 @@
 #include <ebpf_firewall_utils.h>
 
 static int srv_fd = -1;
-extern int exiting;
+extern volatile sig_atomic_t exiting;
 extern struct stats_config global_receive_stats;
 extern struct stats_config global_passed_stats;
 extern struct fixed_ip_pkt_stats global_max_ip_pkt_stats;
@@ -306,7 +307,7 @@ static void handle_clear_deny_ip_all(int cfd, char **argv, int argc) {
     if (ret == 0) {        
         reply(cfd, "ok\nsuccess\n");
     } else {
-        reply(cfd, "failed\nError occured while removing all ips in blacklist\n", argv[1]);
+        reply(cfd, "failed\nError occured while removing all ips in blacklist\n");
     }
 }
 
@@ -658,6 +659,8 @@ static void handle_set_geo(int cfd, char **argv, int argc) {
     if (strncmp(argv[1], "allow", 5) == 0) valid = 1;
     else if (strncmp(argv[1], "block", 5) == 0) valid = 2;
     else valid = 0;
+    /* allow / block need the country list; argv[2] is unset when argc == 2. */
+    if (valid && argc != 3) { reply(cfd, "failed\nUsage: SET_GEO allow|block <countries>\n"); return; }
 
     int ret = geo_set(valid, argv[2]);
     if (ret == 0)
@@ -812,54 +815,60 @@ static void handle_traffic_stats(int cfd, char **argv, int argc) {
 
 
 /* Table‐driven dispatch */
-struct cmd_entry { const char *name; void (*fn)(int,char**,int); };
+/* cfg: changes global_fw_config, so runs under fw_cfg_lock. */
+struct cmd_entry { const char *name; void (*fn)(int,char**,int); int cfg; };
 static const struct cmd_entry cmds[] = {
-    {"RESTART_FW",  handle_restart_fw},
-    {"RELOAD_FW",   handle_reload_fw},
-    {"CLEAR_FW",    handle_clear_fw},
-    {"STATS_FW",    handle_stats_fw},
-    {"STATS_DET",   handle_stats_det},
-    {"STATS_CAP",   handle_stats_cap},
-    {"STATS_SHADOW", handle_stats_shadow},
-    {"SET_ENFORCE", handle_set_enforce},
-    {"SET_ADAPTIVE", handle_set_adaptive},
-    {"LIST_BLOCK_IP",      handle_list_block_ip},
-    {"LIST_ALLOW_IP",      handle_list_allow_ip},
-    {"CLEAR_BLOCK_IP",     handle_clear_deny_ip},
-    {"CLEAR_ALLOW_IP",     handle_clear_allow_ip},
-    {"CLEAR_BLOCK_IP_ALL", handle_clear_deny_ip_all},
-    {"CLEAR_ALLOW_IP_ALL", handle_clear_allow_ip_all},
-    {"ADD_BLOCK_IP",       handle_add_block_ip},
-    {"ADD_ALLOW_IP",       handle_add_allow_ip},
-    {"TCP_SYN",    handle_tcp_syn_set},
-    {"TCP_ACK",    handle_tcp_ack_set},
-    {"TCP_RST",    handle_tcp_rst_set},
-    {"TCP_STOMP", handle_tcp_stomp_set},
-    {"TCP_SOCKET", handle_tcp_socket_set},
-    {"ICMP",    handle_icmp_set},
-    {"UDP",    handle_udp_set},
-    {"GRE",    handle_gre_set},
-    {"SET_TCP_SEG", handle_tcp_set_seg},
-    {"SET_GEO", handle_set_geo},
-    {"SET_CONN_LIMIT", handle_set_conn_limit},
-    {"HEALTH_CHECK", handle_health_check},
-    {"GET_BLOCKLIST", handle_getblocklist},
-    {"GET_MACHINE_ID", handle_getmachineid},
-    {"TRAFFIC_TIMESTAMPS", handle_traffic_timestamps},
-    {"TRAFFIC_STATS", handle_traffic_stats},
+    {"RESTART_FW",  handle_restart_fw, 0},
+    {"RELOAD_FW",   handle_reload_fw, 1},
+    {"CLEAR_FW",    handle_clear_fw, 1},
+    {"STATS_FW",    handle_stats_fw, 0},
+    {"STATS_DET",   handle_stats_det, 0},
+    {"STATS_CAP",   handle_stats_cap, 0},
+    {"STATS_SHADOW", handle_stats_shadow, 0},
+    {"SET_ENFORCE", handle_set_enforce, 1},
+    {"SET_ADAPTIVE", handle_set_adaptive, 1},
+    {"LIST_BLOCK_IP",      handle_list_block_ip, 0},
+    {"LIST_ALLOW_IP",      handle_list_allow_ip, 0},
+    {"CLEAR_BLOCK_IP",     handle_clear_deny_ip, 0},
+    {"CLEAR_ALLOW_IP",     handle_clear_allow_ip, 0},
+    {"CLEAR_BLOCK_IP_ALL", handle_clear_deny_ip_all, 0},
+    {"CLEAR_ALLOW_IP_ALL", handle_clear_allow_ip_all, 0},
+    {"ADD_BLOCK_IP",       handle_add_block_ip, 0},
+    {"ADD_ALLOW_IP",       handle_add_allow_ip, 0},
+    {"TCP_SYN",    handle_tcp_syn_set, 1},
+    {"TCP_ACK",    handle_tcp_ack_set, 1},
+    {"TCP_RST",    handle_tcp_rst_set, 1},
+    {"TCP_STOMP", handle_tcp_stomp_set, 1},
+    {"TCP_SOCKET", handle_tcp_socket_set, 1},
+    {"ICMP",    handle_icmp_set, 1},
+    {"UDP",    handle_udp_set, 1},
+    {"GRE",    handle_gre_set, 1},
+    {"SET_TCP_SEG", handle_tcp_set_seg, 1},
+    {"SET_GEO", handle_set_geo, 1},
+    {"SET_CONN_LIMIT", handle_set_conn_limit, 1},
+    {"HEALTH_CHECK", handle_health_check, 0},
+    {"GET_BLOCKLIST", handle_getblocklist, 0},
+    {"GET_MACHINE_ID", handle_getmachineid, 0},
+    {"TRAFFIC_TIMESTAMPS", handle_traffic_timestamps, 0},
+    {"TRAFFIC_STATS", handle_traffic_stats, 0},
 };
 
 static void dispatch(int cfd, char *line) {
     /* Tokenize in‑place */
-    char *argv[10];
+    char *argv[10] = {0};
     int argc = 0;
-    for (char *tok = strtok(line, " \t\r\n"); tok && argc < 10; tok = strtok(NULL, " \t\r\n"))
+    char *save = NULL;
+    for (char *tok = strtok_r(line, " \t\r\n", &save); tok && argc < 10; tok = strtok_r(NULL, " \t\r\n", &save))
         argv[argc++] = tok;
     if (argc == 0) return;
 
     for (size_t i = 0; i < sizeof cmds / sizeof *cmds; ++i) {
         if (strcasecmp(argv[0], cmds[i].name) == 0) {
+            if (cmds[i].cfg)
+                pthread_mutex_lock(&fw_cfg_lock);
             cmds[i].fn(cfd, argv, argc);
+            if (cmds[i].cfg)
+                pthread_mutex_unlock(&fw_cfg_lock);
             return;
         }
     }
@@ -902,8 +911,16 @@ static void * unix_socket_worker(void * arg)
 {
     while (!exiting) 
     {
-        int cfd = accept(srv_fd, NULL, NULL);
-        if (cfd == -1) { if (errno == EINTR) continue; LOG_E("accept"); break; }
+        int cfd = accept4(srv_fd, NULL, NULL, SOCK_CLOEXEC);
+        if (cfd == -1) {
+            if (errno == EINTR)
+                continue;
+            /* EMFILE / ECONNABORTED etc. are transient: exiting the loop left the
+             * control socket dead for the rest of the daemon's life. */
+            LOG_E("accept: %s\n", strerror(errno));
+            usleep(100 * 1000);
+            continue;
+        }
 
         /* A client that never sends must not stall this single-threaded server. */
         struct timeval tv = { .tv_sec = CLIENT_RCV_TIMEOUT_S, .tv_usec = 0 };
@@ -941,7 +958,7 @@ int init_unix_socket() {
 
     /* Clean start */
     unlink(SOCK_PATH);
-    if ((srv_fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+    if ((srv_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) == -1) {
         LOG_E("socket");
         return -1;
     }

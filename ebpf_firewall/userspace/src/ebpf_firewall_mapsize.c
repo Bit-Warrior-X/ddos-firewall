@@ -39,7 +39,7 @@ static const struct size_profile profiles[] = {
 #define HTAB_ELEM_OVERHEAD      64ULL   /* matches kernel memlock per prealloc elem */
 
 /* Capacity = how many sources / connections are tracked before LRU eviction
- * resets their counters (or, for blocked_ips, silently unblocks them). */
+ * resets their counters (blocked_ips is a plain hash: new blocks fail when full). */
 static const char *const scaled_maps[] = {
     "blocked_ips", "block_offense",
     "syn_counter_fixed", "burst_syn_state", "syn_challenge", "syn_validated_ips",

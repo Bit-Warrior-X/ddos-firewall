@@ -1,3 +1,4 @@
+#define _GNU_SOURCE /* accept4 */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -15,7 +16,7 @@
 #include <ebpf_firewall_core.h>
 #include <ebpf_firewall_log.h>
 
-extern int exiting;
+extern volatile sig_atomic_t exiting;
 
 #define BUFFER_SIZE 1024
 
@@ -28,64 +29,75 @@ extern int exiting;
 #define NGINX_BIND_ADDR "127.0.0.1"
 #endif
 
-int sockfd; /* listener socket fd */
+int sockfd = -1; /* listener socket fd */
 
-/* per-client handler: reads until client closes or exiting */
+/* One "block:<ip> [seconds]" message. */
+static void handle_nginx_line(const char *line)
+{
+    if (strncmp(line, "block:", 6) != 0)
+        return;
+    char ip[64];
+    int block_duration = 0;
+    if (sscanf(line, "block:%63s %d", ip, &block_duration) < 1)
+        return;
+    LOG_N("NGINX send %s to add block list (duration parsed %d)\n", ip, block_duration);
+    if (add_block_ip(ip, block_duration) >= 0)
+        append_block_ip_to_sqlite(ip, block_duration,
+            "Attacking in unregistered http request method");
+}
+
+/* per-client handler: newline-framed messages until the client closes.
+ * A message split across reads (or several in one read) used to be
+ * mis-parsed, blocking the wrong IP or dropping messages. */
+#define NGINX_MAX_CLIENTS 64
+static int active_clients;
+
 static void *tcp_client_handler(void *arg)
 {
     int client_fd = (int)(intptr_t)arg;
     char buffer[BUFFER_SIZE];
+    size_t used = 0;
+
+    struct timeval tv = { .tv_sec = 30, .tv_usec = 0 };
+    setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
 
     while (!exiting) {
-        ssize_t num_bytes = recv(client_fd, buffer, BUFFER_SIZE - 1, 0);
+        ssize_t num_bytes = recv(client_fd, buffer + used, BUFFER_SIZE - 1 - used, 0);
         if (num_bytes < 0) {
             if (errno == EINTR)
                 continue;
             LOG_E("recv on client_fd %d: %s\n", client_fd, strerror(errno));
             break;
         } else if (num_bytes == 0) {
-            /* client closed connection */
             LOG_D("Client fd %d closed connection\n", client_fd);
             break;
         }
+        used += (size_t)num_bytes;
+        buffer[used] = '\0';
 
-        buffer[num_bytes] = '\0';
-        LOG_D("Received %zd bytes from client fd %d: \"%s\"\n",
-               num_bytes, client_fd, buffer);
-#if 0
-        if (num_bytes >= 4 && strncmp(buffer, "ping", 4) == 0) {
-            ssize_t sent = send(client_fd, "pong", 4, 0);
-            if (sent < 0) {
-                LOG_E("Failed to send pong response to fd %d: %s\n",
-                      client_fd, strerror(errno));
-            } else {
-                LOG_D("Sent pong response to health check (fd %d)\n", client_fd);
-            }
-            /* continue reading further messages from same connection */
-            continue;
+        char *line = buffer, *nl;
+        while ((nl = strchr(line, '\n')) != NULL) {
+            *nl = '\0';
+            if (nl > line && nl[-1] == '\r')
+                nl[-1] = '\0';
+            handle_nginx_line(line);
+            line = nl + 1;
         }
-#endif
-
-        if (num_bytes >= 6 && strncmp(buffer, "block:", 6) == 0) {
-            char ip[64];
-            int block_duration = 0;
-            /* try to parse "block:<ip> <duration>" */
-            if (sscanf(buffer, "block:%63s %d", ip, &block_duration) >= 1) {
-                LOG_N("NGINX send %s to add block list (duration parsed %d)\n",
-                      ip, block_duration);
-                // ip + duration is received. ex : 192.12.45.23 300
-
-                add_block_ip(ip, block_duration);
-                append_block_ip_to_sqlite(ip, block_duration, 
-                    "Attacking in unregistered http request method");
-            }
-            continue;
+        used = strlen(line);
+        memmove(buffer, line, used + 1);
+        if (used >= BUFFER_SIZE - 1) {
+            LOG_W("nginx client fd %d: message too long, dropped\n", client_fd);
+            used = 0;
         }
-
-        /* If you want to echo or otherwise respond, add here */
+    }
+    /* Last message without a trailing newline (sender closed after writing). */
+    if (used > 0) {
+        buffer[used] = '\0';
+        handle_nginx_line(buffer);
     }
 
     close(client_fd);
+    __sync_fetch_and_sub(&active_clients, 1);
     return NULL;
 }
 
@@ -94,14 +106,21 @@ static void *tcp_acceptor(void *arg)
 {
     (void)arg;
     while (!exiting) {
+        /* Backpressure instead of one thread per connection without bound:
+         * further connections wait in the listen backlog. */
+        if (__atomic_load_n(&active_clients, __ATOMIC_ACQUIRE) >= NGINX_MAX_CLIENTS) {
+            usleep(10 * 1000);
+            continue;
+        }
         struct sockaddr_in cli_addr;
         socklen_t cli_len = sizeof(cli_addr);
-        int client_fd = accept(sockfd, (struct sockaddr *)&cli_addr, &cli_len);
+        int client_fd = accept4(sockfd, (struct sockaddr *)&cli_addr, &cli_len, SOCK_CLOEXEC);
         if (client_fd < 0) {
             if (errno == EINTR)
                 continue;
             LOG_E("accept failed: %s\n", strerror(errno));
-            break;
+            usleep(100 * 1000);
+            continue;
         }
 
         char peer_addr[INET_ADDRSTRLEN] = {0};
@@ -116,8 +135,10 @@ static void *tcp_acceptor(void *arg)
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        __sync_fetch_and_add(&active_clients, 1);
         if (pthread_create(&th, &attr, tcp_client_handler, (void *)(intptr_t)client_fd) != 0) {
             LOG_E("pthread_create for client handler failed\n");
+            __sync_fetch_and_sub(&active_clients, 1);
             close(client_fd);
         }
         pthread_attr_destroy(&attr);
@@ -130,7 +151,7 @@ int init_nginx_socket(void) {
     struct sockaddr_in srv_addr;
     int opt = 1;
 
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    sockfd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (sockfd < 0) {
         LOG_E("socket: %s\n", strerror(errno));
         return -1;
@@ -153,18 +174,21 @@ int init_nginx_socket(void) {
     if (inet_pton(AF_INET, NGINX_BIND_ADDR, &srv_addr.sin_addr) != 1) {
         LOG_E("inet_pton failed for address %s\n", NGINX_BIND_ADDR);
         close(sockfd);
+        sockfd = -1;
         return -1;
     }
 
     if (bind(sockfd, (struct sockaddr *)&srv_addr, sizeof(srv_addr)) < 0) {
         LOG_E("bind %s:%d failed: %s\n", NGINX_BIND_ADDR, NGINX_TCP_PORT, strerror(errno));
         close(sockfd);
+        sockfd = -1;
         return -1;
     }
 
     if (listen(sockfd, SOMAXCONN) < 0) {
         LOG_E("listen failed: %s\n", strerror(errno));
         close(sockfd);
+        sockfd = -1;
         return -1;
     }
 
@@ -174,6 +198,7 @@ int init_nginx_socket(void) {
     if (pthread_create(&acceptor_thr, NULL, tcp_acceptor, NULL) != 0) {
         LOG_E("pthread_create for tcp_acceptor failed\n");
         close(sockfd);
+        sockfd = -1;
         return -1;
     }
 

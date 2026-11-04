@@ -178,18 +178,19 @@ ngx_int_t ngx_http_acl_handle_str_acl_rule(ngx_http_request_t *r, char * str_acl
 
     ngx_slab_pool_t *shpool = (ngx_slab_pool_t *)main_conf->shm_zone_server_acl_rule->shm.addr;
     ngx_shmtx_lock(&shpool->mutex);
+    main_conf->server_acl_rule->version++;
 
     if (parse_acl_rule(r, str_acl_rule, main_conf->server_acl_rule) != NGX_HTTP_ACL_TRUE) {
         ngx_shmtx_unlock(&shpool->mutex);
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Failed to parse received ACL rule\n");
         return NGX_HTTP_ACL_FAIL;
     }
-    ngx_shmtx_unlock(&shpool->mutex);
-    
+    /* Recompute under the lock: other workers read these concurrently. */
     main_conf->server_acl_rule->max_req_freq_time = ngx_http_acl_get_max_request_freq_time(main_conf->server_acl_rule);
     main_conf->server_acl_rule->max_rsp_freq_time = ngx_http_acl_get_max_response_freq_time(main_conf->server_acl_rule);
     
     ngx_http_acl_get_response_codes(main_conf->server_acl_rule);
+    ngx_shmtx_unlock(&shpool->mutex);
     
     ngx_http_acl_dp_func_end(r);
     
@@ -241,6 +242,7 @@ ngx_int_t ngx_http_acl_remove_acl_rule(ngx_http_request_t *r, int acl_rule_id)
 
     ngx_slab_pool_t *shpool = (ngx_slab_pool_t *)main_conf->shm_zone_server_acl_rule->shm.addr;
     ngx_shmtx_lock(&shpool->mutex);
+    server_acl_rule_p->version++;
     
     acl_rule_list_t * acl_rule_list_p = server_acl_rule_p->head;
     while (acl_rule_list_p != NULL) {
@@ -262,10 +264,10 @@ ngx_int_t ngx_http_acl_remove_acl_rule(ngx_http_request_t *r, int acl_rule_id)
             return NGX_HTTP_ACL_FAIL;
         }
 
-        // Update registered return header codes
-        server_acl_rule_p->header_out_code_count = 0;
-        memset(&server_acl_rule_p->header_out_codes, 0, sizeof (*server_acl_rule_p->header_out_codes));
+        // Update registered return header codes and frequency windows
         ngx_http_acl_get_response_codes(server_acl_rule_p);
+        server_acl_rule_p->max_req_freq_time = ngx_http_acl_get_max_request_freq_time(server_acl_rule_p);
+        server_acl_rule_p->max_rsp_freq_time = ngx_http_acl_get_max_response_freq_time(server_acl_rule_p);
         
     }
     ngx_shmtx_unlock(&shpool->mutex);
@@ -324,6 +326,7 @@ ngx_int_t ngx_http_acl_handle_acl_rule(ngx_http_request_t *r, int acl_rule_id, i
 
     ngx_slab_pool_t *shpool = (ngx_slab_pool_t *)main_conf->shm_zone_server_acl_rule->shm.addr;
     ngx_shmtx_lock(&shpool->mutex);
+    main_conf->server_acl_rule->version++;
     
     if (add_acl_rule(main_conf->server_acl_rule, r->connection->log, acl_rule_id, action, priority, str_rule) != NGX_HTTP_ACL_SUCCESS) {
         ngx_shmtx_unlock(&shpool->mutex);
@@ -478,7 +481,8 @@ static ngx_int_t ngx_http_acl_handler_check_geo(ngx_http_request_t* r, comparati
         return ret_value;
     }
     
-    if (main_conf->geo_db_ctx == NULL) {
+    /* Unset (no acl_geo_database_path) is NGX_CONF_UNSET_PTR, not NULL. */
+    if (main_conf->geo_db_ctx == NULL || main_conf->geo_db_ctx == NGX_CONF_UNSET_PTR) {
         if (exp_node->op == Operator_is_in) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Failed to get location geo database context");
             return ret_value;
@@ -856,8 +860,13 @@ static ngx_int_t ngx_http_acl_handler_check_uri_query_string(ngx_http_request_t*
     if (ngx_is_null_str(p_args)) {
         return ret_value;
     }
-    
-    ngx_http_acl_dpf(r, "uri query string is '%s'", (char*)p_args->data);
+    /* r->args is not NUL-terminated (points into the request line). */
+    char *args_str = ngx_http_acl_clone_c_str_len(r, (char*)p_args->data, p_args->len);
+    if (args_str == NULL) {
+        return ret_value;
+    }
+
+    ngx_http_acl_dpf(r, "uri query string is '%s'", args_str);
     switch (exp_node->op) {
         case Operator_equals: {
             UT_array* args = NULL;
@@ -888,12 +897,12 @@ static ngx_int_t ngx_http_acl_handler_check_uri_query_string(ngx_http_request_t*
             break;
         }
         case Operator_contains: {
-            if (check_contains_in_str(r, exp_node->exp_str, (char*)p_args->data, NGX_HTTP_ACL_FALSE) == NGX_HTTP_ACL_SUCCESS)
+            if (check_contains_in_str(r, exp_node->exp_str, args_str, NGX_HTTP_ACL_FALSE) == NGX_HTTP_ACL_SUCCESS)
                 ret_value = NGX_HTTP_ACL_TRUE;
             break;
         }
         case Operator_not_contains: {
-            if (check_contains_in_str(r, exp_node->exp_str, (char*)p_args->data, NGX_HTTP_ACL_FALSE) != NGX_HTTP_ACL_SUCCESS)
+            if (check_contains_in_str(r, exp_node->exp_str, args_str, NGX_HTTP_ACL_FALSE) != NGX_HTTP_ACL_SUCCESS)
                 ret_value = NGX_HTTP_ACL_TRUE;
             break;
         }
@@ -1161,7 +1170,7 @@ static ngx_int_t ngx_http_acl_handler_check_asn(ngx_http_request_t* r, comparati
     ngx_http_acl_main_conf_t* main_conf = NULL;
     ngx_http_acl_get_ctx_and_conf(r, &main_conf, &ctx);
 
-    if (main_conf == NULL || main_conf->geo_db_ctx == NULL) {
+    if (main_conf == NULL || main_conf->geo_db_ctx == NULL || main_conf->geo_db_ctx == NGX_CONF_UNSET_PTR) {
         if (exp_node->op == Operator_is_in) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "ngx_acl_error: Failed to get location isp database context");
             return ret_value;
@@ -1187,8 +1196,10 @@ static ngx_int_t ngx_http_acl_handler_check_asn(ngx_http_request_t* r, comparati
 
         asn_result = MMDB_get_asn_code_from_ip(main_conf->geo_db_ctx, str);
         if (asn_result.status != MMDB_SUCCESS) {
-          ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to get ASN code from IP");
-          return ret_value;
+          /* IPs missing from the ASN DB are normal (one ERR line per request
+           * before); such an IP is in no list, so "not is in" matches. */
+          ngx_log_debug(NGX_LOG_DEBUG_CORE, r->connection->log, 0, "ngx_acl: no ASN for client IP");
+          return exp_node->op == Operator_not_is_in ? NGX_HTTP_ACL_TRUE : ret_value;
         }
     }
     
@@ -1203,8 +1214,10 @@ static ngx_int_t ngx_http_acl_handler_check_asn(ngx_http_request_t* r, comparati
         }
             asn_result = MMDB_get_asn_code_from_ip(main_conf->geo_db_ctx, str);
         if (asn_result.status != MMDB_SUCCESS) {
-          ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "Failed to get ASN code from IP");
-          return ret_value;
+          /* IPs missing from the ASN DB are normal (one ERR line per request
+           * before); such an IP is in no list, so "not is in" matches. */
+          ngx_log_debug(NGX_LOG_DEBUG_CORE, r->connection->log, 0, "ngx_acl: no ASN for client IP");
+          return exp_node->op == Operator_not_is_in ? NGX_HTTP_ACL_TRUE : ret_value;
         }
     }
 #endif
@@ -1635,6 +1648,117 @@ static ngx_int_t ngx_http_acl_calc_comparative_expression(ngx_http_request_t* r,
     return result;
 }
 
+/*
+ * Per-worker copy of the rule lists. Evaluation (regex compile, GeoIP/ASN
+ * lookups, frequency-table locks) used to run under the rule zone mutex, so
+ * all workers serialized on it, up to 9 times per request. The copy is
+ * refreshed under the mutex only when the zone's version changes.
+ */
+typedef struct {
+    ngx_int_t           valid;
+    ngx_atomic_uint_t   version;
+    ngx_pool_t         *pool;
+    acl_rule_list_t    *head;
+    ngx_int_t           max_req_freq_time;
+} acl_worker_rules_t;
+
+static acl_worker_rules_t  acl_worker_rules;
+
+static char *acl_copy_cstr(ngx_pool_t *pool, const char *s, ngx_int_t *ok)
+{
+    if (s == NULL)
+        return NULL;
+    size_t n = ngx_strlen(s);
+    char *d = ngx_pnalloc(pool, n + 1);
+    if (d == NULL) {
+        *ok = 0;
+        return NULL;
+    }
+    ngx_memcpy(d, s, n + 1);
+    return d;
+}
+
+static acl_rule_list_t *acl_copy_rule_lists(ngx_pool_t *pool, acl_rule_list_t *src, ngx_int_t *ok)
+{
+    acl_rule_list_t *head = NULL, *tail = NULL;
+
+    for (; src != NULL && *ok; src = src->next) {
+        acl_rule_list_t *l = ngx_pcalloc(pool, sizeof(*l));
+        if (l == NULL) {
+            *ok = 0;
+            break;
+        }
+        l->acl_rule_list_id = src->acl_rule_list_id;
+        l->acl_rule_count = 0;
+        if (src->acl_rule_count > 0 && src->acl_rule_list != NULL) {
+            l->acl_rule_list = ngx_pcalloc(pool, sizeof(acl_rule_t) * src->acl_rule_count);
+            if (l->acl_rule_list == NULL) {
+                *ok = 0;
+                break;
+            }
+            l->acl_rule_count = src->acl_rule_count;
+            for (int i = 0; i < src->acl_rule_count && *ok; i++) {
+                acl_rule_t *d = &l->acl_rule_list[i], *s = &src->acl_rule_list[i];
+                d->action = s->action;
+                d->priority = s->priority;
+                if (s->acl_rule_node_list == NULL || s->acl_rule_node_list_count <= 0)
+                    continue;
+                d->acl_rule_node_list = ngx_pcalloc(pool, sizeof(acl_rule_node_t) * s->acl_rule_node_list_count);
+                if (d->acl_rule_node_list == NULL) {
+                    *ok = 0;
+                    break;
+                }
+                d->acl_rule_node_list_count = s->acl_rule_node_list_count;
+                for (int j = 0; j < s->acl_rule_node_list_count; j++) {
+                    acl_rule_node_t *dn = &d->acl_rule_node_list[j], *sn = &s->acl_rule_node_list[j];
+                    dn->type = sn->type;
+                    if (sn->exp_node == NULL)
+                        continue;
+                    dn->exp_node = ngx_palloc(pool, sizeof(comparative_expression_t));
+                    if (dn->exp_node == NULL) {
+                        *ok = 0;
+                        break;
+                    }
+                    *dn->exp_node = *sn->exp_node;
+                    dn->exp_node->name_str = acl_copy_cstr(pool, sn->exp_node->name_str, ok);
+                    dn->exp_node->exp_str = acl_copy_cstr(pool, sn->exp_node->exp_str, ok);
+                }
+            }
+        }
+        l->prev = tail;
+        if (tail)
+            tail->next = l;
+        else
+            head = l;
+        tail = l;
+    }
+    return head;
+}
+
+/* Caller holds the rule zone mutex. On failure the worker falls back to
+ * evaluating the shared rules under the mutex. */
+static void acl_refresh_worker_rules(server_acl_rule_t *srv, ngx_log_t *log)
+{
+    ngx_pool_t *pool = ngx_create_pool(16384, log);
+    ngx_int_t ok = pool != NULL;
+    acl_rule_list_t *head = ok ? acl_copy_rule_lists(pool, srv->head, &ok) : NULL;
+
+    if (!ok) {
+        if (pool)
+            ngx_destroy_pool(pool);
+        ngx_log_error(NGX_LOG_WARN, log, 0, "ngx_http_acl : rule copy failed, evaluating under the zone lock");
+        acl_worker_rules.valid = 0;
+        return;
+    }
+    if (acl_worker_rules.pool)
+        ngx_destroy_pool(acl_worker_rules.pool);
+    acl_worker_rules.pool = pool;
+    acl_worker_rules.head = head;
+    acl_worker_rules.version = srv->version;
+    acl_worker_rules.max_req_freq_time = srv->max_req_freq_time;
+    acl_worker_rules.valid = 1;
+}
+
 static ngx_int_t evaluate_acl_rule(ngx_http_request_t* r, acl_rule_t * acl_rule)
 {       
     if (r == NULL || acl_rule == NULL) {
@@ -1874,6 +1998,7 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
             
             ctx->matched = NGX_HTTP_ACL_FALSE;
             ctx->matched_priority = -1;
+            ctx->req_freq_recorded = NGX_HTTP_ACL_FALSE;
             ctx->checked = NGX_HTTP_ACL_FALSE;
             ctx->register_content_handler = 0;
 
@@ -1913,9 +2038,22 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
     //}
 
     ngx_slab_pool_t  *shpool = (ngx_slab_pool_t *) main_conf->shm_zone_server_acl_rule->shm.addr;
-    ngx_shmtx_lock(&shpool->mutex);
-
-    acl_rule_list_t * acl_rule_list_p = server_acl_rule_p->head;
+    if (!acl_worker_rules.valid || acl_worker_rules.version != server_acl_rule_p->version) {
+        ngx_shmtx_lock(&shpool->mutex);
+        acl_refresh_worker_rules(server_acl_rule_p, r->connection->log);
+        ngx_shmtx_unlock(&shpool->mutex);
+    }
+    ngx_int_t zone_locked = !acl_worker_rules.valid;
+    acl_rule_list_t * acl_rule_list_p;
+    ngx_int_t max_req_freq_time;
+    if (zone_locked) {
+        ngx_shmtx_lock(&shpool->mutex);
+        acl_rule_list_p = server_acl_rule_p->head;
+        max_req_freq_time = server_acl_rule_p->max_req_freq_time;
+    } else {
+        acl_rule_list_p = acl_worker_rules.head;
+        max_req_freq_time = acl_worker_rules.max_req_freq_time;
+    }
 
     while (acl_rule_list_p != NULL) {
         if (acl_rule_list_p->acl_rule_list_id == acl_id) {
@@ -1959,12 +2097,15 @@ ngx_int_t ngx_http_acl_process_acl_id(ngx_http_request_t* r, int acl_id) {
     }
 
 
-    ngx_int_t max_req_freq_time = server_acl_rule_p->max_req_freq_time;
-    //robust_mutex_unlock(&main_conf->robust_server_acl_mutex, r->connection->log);
-    ngx_shmtx_unlock(&shpool->mutex);
+    if (zone_locked)
+        ngx_shmtx_unlock(&shpool->mutex);
     
-    if (max_req_freq_time != NGX_HTTP_ACL_FAIL && (ret == ACL_RETURN_ALLOW_RULE || ret == ACL_RETURN_ALLOW_NO_RULE || ret == ACL_RETURN_CAPTCHA_START))
+    /* Count each request once: acl_access.lua calls process_acl_id for ids 1..9,
+     * and recording on every allowed id made "N times/1s" fire at about N/9. */
+    if (max_req_freq_time != NGX_HTTP_ACL_FAIL && !ctx->req_freq_recorded &&
+        (ret == ACL_RETURN_ALLOW_RULE || ret == ACL_RETURN_ALLOW_NO_RULE || ret == ACL_RETURN_CAPTCHA_START))
     {
+        ctx->req_freq_recorded = NGX_HTTP_ACL_TRUE;
         ngx_http_acl_record_statistics(r);
     }
 
@@ -2275,8 +2416,12 @@ static void
 ngx_http_acl_monitor_period(ngx_event_t * ev) {
 
     if (ngx_quit || ngx_terminate || ngx_exiting) {
+        /* The optimize timer may already have fired and not re-armed itself
+         * (it returns early while exiting): deleting an unarmed event
+         * corrupted the timer tree and crashed workers on reload. */
         if (optimize_timer_event) {
-            ngx_del_timer(optimize_timer_event);
+            if (optimize_timer_event->timer_set)
+                ngx_del_timer(optimize_timer_event);
             optimize_timer_event = NULL;
         }
         return;
@@ -2311,6 +2456,7 @@ ngx_int_t ngx_http_acl_init_process(ngx_cycle_t *cycle) {
         optimize_timer_event->handler = ngx_http_acl_optimze_period;
         optimize_timer_event->log = cycle->log;
         optimize_timer_event->data = cycle;
+        optimize_timer_event->cancelable = 1;
 
         ngx_add_timer(optimize_timer_event, main_conf->acl_optimize_period * 1000);
     }
@@ -2325,6 +2471,7 @@ ngx_int_t ngx_http_acl_init_process(ngx_cycle_t *cycle) {
         monitor_timer_event->handler = ngx_http_acl_monitor_period;
         monitor_timer_event->log = cycle->log;
         monitor_timer_event->data = NULL;
+        monitor_timer_event->cancelable = 1;
 
         ngx_add_timer(monitor_timer_event, 500);
     }

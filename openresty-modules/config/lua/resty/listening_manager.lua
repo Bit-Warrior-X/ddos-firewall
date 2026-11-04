@@ -64,7 +64,12 @@ local function load_from_redis(site_id)
         return nil, err
     end
     local key = "listening:" .. tostring(site_id)
-    local raw = red:get(key)
+    local raw, gerr = red:get(key)
+    if gerr then
+        -- Not "unset": keep the last-known-good settings on read errors.
+        red:close()
+        return nil, gerr
+    end
     red:set_keepalive(10000, 100)
     if not raw or raw == ngx.null or raw == "" then
         return normalize(nil)

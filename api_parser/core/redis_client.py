@@ -846,6 +846,12 @@ class RedisClient:
             return False, str(e)
 
     @staticmethod
+    def get_edge_listeningports_deduped() -> List[Dict]:
+        """Edge listening ports with one row per (port, protocol)."""
+        from core.listening_ports import normalize_api_ports
+        return normalize_api_ports(RedisClient.get_edge_listeningports())[0]
+
+    @staticmethod
     def get_edge_listeningports() -> List[Dict]:
         """Load server-scoped listening ports from Redis key 'listeningports'."""
         try:
@@ -1332,7 +1338,7 @@ class RedisClient:
                 bucket["domain"] = str(bucket.get("domain") or "")
 
         edge = {
-            "listeningports": RedisClient.get_edge_listeningports(),
+            "listeningports": RedisClient.get_edge_listeningports_deduped(),
             "temporaryblacklist": RedisClient.get_all_temporaryblacklist(),
             "acl_rules": RedisClient.get_acl_rules(),
             "acl_apply_rules": RedisClient.get_acl_apply_rules(),

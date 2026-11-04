@@ -15,7 +15,7 @@ from flask import Blueprint, request, jsonify
 import config
 from core.backend_whitelist import ensure_backend_ips_whitelisted
 from core.redis_client import RedisClient
-from utils.auth import token_required, extract_token, get_token
+from utils.auth import token_required, extract_token, get_token, token_matches
 from utils.validators import validate_url
 
 l7_bp = Blueprint('l7', __name__, url_prefix='/API/L7')
@@ -1774,7 +1774,7 @@ def l7guard_get():
 
 def _request_token_ok() -> bool:
     token = extract_token(request)
-    return bool(token) and token == get_token()
+    return token_matches(token)
 
 
 def _optional_int_arg(name):

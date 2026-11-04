@@ -1,5 +1,7 @@
 # core/firewall.py
 """L4 firewall service operations."""
+import os
+import re
 import subprocess
 from typing import Dict, Optional
 
@@ -42,6 +44,22 @@ def execute_cli_command(command_args: list) -> Dict[str, str]:
     except Exception as e:
         return {'status': 'error', 'message': f'Unexpected error: {str(e)}'}
 
+ATTACH_MODES = ('native', 'generic', 'skb', 'drv', 'hw', 'offload', 'auto')
+
+
+def valid_interface(name) -> bool:
+    """Existing network interface only (the name reaches a root shell in sparta_cli)."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,15}", name):
+        return False
+    return os.path.isdir(os.path.join("/sys/class/net", name))
+
+
+def normalize_attach_mode(mode) -> Optional[str]:
+    """Strip inline '# comment' from config values; None if not a known mode."""
+    mode = str(mode or "native").split("#", 1)[0].strip().lower()
+    return mode if mode in ATTACH_MODES else None
+
+
 def firewall_control(action: str, interface: str, attach_mode: str = 'native') -> Dict[str, str]:
     """Control firewall (start/stop/restart/reload)."""
     actions = {
@@ -56,6 +74,15 @@ def firewall_control(action: str, interface: str, attach_mode: str = 'native') -
             'status': 'error',
             'message': f"Invalid action. Valid actions: {', '.join(actions.keys())}"
         }
+    if not valid_interface(interface):
+        return {'status': 'error', 'message': f"Unknown network interface: {interface!r}"}
+    mode = normalize_attach_mode(attach_mode)
+    if mode is None:
+        return {
+            'status': 'error',
+            'message': f"Invalid attach_mode. Valid modes: {', '.join(ATTACH_MODES)}"
+        }
+    attach_mode = mode
     
     command_args = ['sparta_cli', actions[action], interface, attach_mode]
     return execute_cli_command(command_args)
