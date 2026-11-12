@@ -33,11 +33,13 @@ class LicenseInfo:
 
 
 def _ensure_license_env() -> None:
-    """Set LICENSE_PATH/PUBKEY_PATH when not already in the environment."""
+    """Point native validation at the license file.
+
+    The verifying public key is compiled into core._license_native.
+    PUBKEY_PATH and the on-disk PEM are not consulted.
+    """
     if not os.environ.get("LICENSE_PATH"):
         os.environ["LICENSE_PATH"] = config.LICENSE_FILE
-    if not os.environ.get("PUBKEY_PATH"):
-        os.environ["PUBKEY_PATH"] = config.PUBKEY_FILE
 
 
 def get_license_info() -> LicenseInfo:

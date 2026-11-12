@@ -176,8 +176,10 @@ if [[ -f "${STAGE}/redis-socket.conf" ]] && command -v redis-server >/dev/null 2
 fi
 
 systemctl daemon-reload
+# Enable all three units; angelos license_monitor starts only licensed layer(s).
 systemctl enable angelos.service athens.service sparta.service
-systemctl restart sparta.service athens.service angelos.service
+systemctl restart angelos.service
 
 echo "Installed from ${ARCHIVE}"
-systemctl is-active sparta.service athens.service angelos.service
+echo "angelos=$(systemctl is-active angelos.service 2>/dev/null || true) sparta=$(systemctl is-active sparta.service 2>/dev/null || true) athens=$(systemctl is-active athens.service 2>/dev/null || true)"
+echo "Note: angelos starts/stops sparta and athens from the license type."

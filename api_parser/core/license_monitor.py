@@ -90,6 +90,7 @@ def _enforce_service_access(info: LicenseInfo) -> None:
 
     l4_allowed = info.allows_l4
     l7_allowed = info.allows_l7
+    changed = (l4_allowed != _last_l4_allowed) or (l7_allowed != _last_l7_allowed)
 
     if l4_allowed != _last_l4_allowed:
         if l4_allowed:
@@ -110,19 +111,28 @@ def _enforce_service_access(info: LicenseInfo) -> None:
         if l7_allowed:
             print(
                 "[LICENSE_MONITOR] L7 license type allowed; "
-                "whitelisting origin IPs then starting athens"
+                "starting athens"
             )
-            try:
-                # Origins must be on L4 whitelist whenever L7 proxies to them,
-                # even if Sparta was already running before L7 was enabled.
-                ensure_backend_ips_whitelisted(apply_live=True)
-            except Exception as exc:
-                print(f"[LICENSE_MONITOR] Origin whitelist inject failed: {exc}")
+            if l4_allowed:
+                try:
+                    # Origins on L4 whitelist only when Sparta is licensed.
+                    ensure_backend_ips_whitelisted(apply_live=True)
+                except Exception as exc:
+                    print(f"[LICENSE_MONITOR] Origin whitelist inject failed: {exc}")
             _systemctl("start", config.L7_SERVICE)
         else:
             print("[LICENSE_MONITOR] L7 license type not allowed; stopping athens")
             _systemctl("stop", config.L7_SERVICE)
         _last_l7_allowed = l7_allowed
+
+    if changed:
+        try:
+            from core.l7_escalate import sync_escalate_backend
+
+            backend = sync_escalate_backend()
+            print(f"[LICENSE_MONITOR] L7 escalate backend={backend}")
+        except Exception as exc:
+            print(f"[LICENSE_MONITOR] L7 escalate backend sync failed: {exc}")
 
 
 def _run_monitor() -> None:

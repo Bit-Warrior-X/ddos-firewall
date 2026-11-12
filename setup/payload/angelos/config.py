@@ -14,6 +14,7 @@ FIREWALL_CONFIG_PATH = str(BASE_EBPF_FIREWALL_DIR / "firewall.config")
 FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
 TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
 LICENSE_FILE = str(BASE_LICENSE_DIR / "license.lic")
+# Not used for verification. The public key is compiled into the binaries.
 PUBKEY_FILE = str(BASE_LICENSE_DIR / "server_public_key.pem")
 LICENSE_CHECK_INTERVAL = 10
 SPARTA_SERVICE = "sparta.service"
@@ -22,18 +23,34 @@ L7_NGINX_CONF_DIR = Path("/usr/local/share/dorian/athens/nginx/conf")
 L7_DEFAULT_PORTS_CONF = str(L7_NGINX_CONF_DIR / "server_default_ports.conf")
 L7_GZIP_CONF = str(L7_NGINX_CONF_DIR / "http_gzip.conf")
 L7_CACHE_PURGE_BASE = os.environ.get("L7_CACHE_PURGE_BASE", "http://127.0.0.1:9000").rstrip("/")
+SPARTA_CONTROL_SOCK = "/tmp/ebpf_fw.sock"
+L7_NFT_TABLE = "dorian"
+L7_NFT_SET = "l7_block"
 
 # Server configuration
 SERVER_IP = "0.0.0.0"
 SERVER_PORT = 5000
+# Only these peers may call the agent API (panel backend + local tools); every
+# other source gets 403 before any route runs. PANEL_BACKEND_IPS is added below.
+API_ALLOWED_IPS = ("127.0.0.1", "::1")
 
 # API URLs (base with no trailing slash to avoid double slashes)
 #API_BASE_URL = "https://fw.dnscrxyz.com/api/e36i5n8t9rgnhov8fe9b1f70oklt"
 #API_BASE_URL = "http://93.95.116.174:8080/api".rstrip("/")
 API_BASE_URL = "https://panel.dorian.center/api".rstrip("/")
 
-# Prefer IPv4 to panel (no working default IPv6 route on many edges)
+# This edge often has IPv6 addresses but no default IPv6 route. DNS AAAA then
+# yields Errno 101 (Network is unreachable) in requests. Force IPv4 to panel.
 FORCE_IPV4 = True
+
+# TLS verification for panel calls: True (system CAs), a CA bundle path, or
+# False for a panel with a self-signed certificate.
+_tls_verify = os.environ.get("PANEL_TLS_VERIFY", "1").strip()
+PANEL_TLS_VERIFY = (
+    False if _tls_verify.lower() in ("0", "false", "no", "off")
+    else True if _tls_verify.lower() in ("", "1", "true", "yes", "on")
+    else _tls_verify
+)
 
 # L4-related APIs
 REPORT_XDP_API_URL = f"{API_BASE_URL}/report_xdp"
@@ -54,6 +71,29 @@ EDGE_L4_LISTS_REPORT_URL = EDGE_CONFIG_REPORT_URL
 EDGE_LIST_SYNC_INTERVAL = 60
 # Include full SSL PEM material in reports (large); default redacts to presence/length only
 EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS = False
+
+# L7 cache-hit UI: content-type hit ratios + top miss URLs (from Athens :9000)
+CACHE_HIT_REPORT_URL = f"{API_BASE_URL}/report_cache_hit"
+CACHE_HIT_SYNC_INTERVAL = 60
+CACHE_HIT_BUCKET_SECONDS = 60
+CACHE_HIT_TOP_MISS_URLS = 50
+ATHENS_STATS_TIMEOUT = 5
+
+# Edge → panel metrics push (angelos pulls athens/sparta, panel does not scrape :9000)
+EDGE_METRICS_REPORT_URL = f"{API_BASE_URL}/report_edge_metrics"
+METRICS_SYNC_INTERVAL = 60
+METRICS_BUCKET_SECONDS = 60
+METRICS_SYNC_MAX_BUCKETS = 5
+METRICS_SYNC_MAX_ITEMS_PER_POST = 40
+
+# L7 attack incidents (Athens resty.l7_attack -> SQLite/JSON archive -> panel)
+L7_ATTACK_REPORT_URL = f"{API_BASE_URL}/report_l7_attack"
+L7_ATTACK_POLL_INTERVAL = 5
+L7_ATTACK_UPDATE_INTERVAL = 30
+L7_ATTACK_RETENTION_DAYS = 180
+L7_ATTACK_DATA_DIR = "/usr/local/share/dorian/athens/attacks"
+L7_ATTACK_DB = f"{L7_ATTACK_DATA_DIR}/l7_attacks.db"
+L7_ATTACK_ARCHIVE_DIR = f"{L7_ATTACK_DATA_DIR}/archive"
 
 # Redis configuration
 REDIS_SOCK = "/tmp/redis.sock"

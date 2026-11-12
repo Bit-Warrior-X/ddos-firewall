@@ -20,7 +20,6 @@ RestartSec=1
 Environment="LD_LIBRARY_PATH=/usr/local/lib"
 Environment="EBPF_FIREWALL_XDP_KO=/usr/local/share/dorian/sparta/sparta_kernel.o"
 Environment="EBPF_FIREWALL_XDP_CONFIG=/usr/local/share/dorian/sparta/firewall.config"
-Environment="PUBKEY_PATH=/usr/local/share/dorian/license/server_public_key.pem"
 Environment="LICENSE_PATH=/usr/local/share/dorian/license/license.lic"
 Environment="SQLITE_DB_NAME=/usr/local/share/dorian/sparta/firewall_control.db"
 

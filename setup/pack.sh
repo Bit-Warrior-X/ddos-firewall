@@ -192,6 +192,39 @@ pack_tarball() {
     OUTPUT="${DIST_DIR}/dorian-ddos-firewall-${version}-${os}-payload.tar.gz"
   fi
 
+  if find "${ROOT_DIR}/setup/payload" \( -name 'server_private_key.pem' -o -name 'mklicense' -o -name 'mklicense.c' \) | grep -q .; then
+    echo "error: refusing to pack the license signing key or license minting tool" >&2
+    exit 1
+  fi
+  # Match the signing key by its body, not by filename, without writing the key into this script.
+  # TLS fallback keys under athens are a different key and do not match.
+  local signing_key="${ROOT_DIR}/license/server_private_key.pem"
+  if [[ -f "${signing_key}" ]]; then
+    local signing_line=""
+    signing_line="$(awk 'NR==2 { print; exit }' "${signing_key}")"
+    if [[ -n "${signing_line}" ]] && grep -R -F -l -q -- "${signing_line}" "${ROOT_DIR}/setup/payload"; then
+      echo "error: refusing to pack: license signing key material is under setup/payload" >&2
+      exit 1
+    fi
+  fi
+
+  strip_if_present() {
+    local bin
+    for bin in "$@"; do
+      if [[ -f "${bin}" ]]; then
+        strip --strip-unneeded "${bin}"
+      fi
+    done
+  }
+  strip_if_present \
+    "${ROOT_DIR}/setup/payload/sparta/bin/sparta_user" \
+    "${ROOT_DIR}/setup/payload/sparta/bin/sparta_cli" \
+    "${ROOT_DIR}/setup/payload/sparta/bin/sparta_prom" \
+    "${ROOT_DIR}/setup/payload/athens/nginx/sbin/nginx"
+  if command -v strip >/dev/null 2>&1; then
+    find "${ROOT_DIR}/setup/payload/angelos" -name '*.so' -type f -exec strip --strip-unneeded {} +
+  fi
+
   echo "${version}" > "${ROOT_DIR}/setup/payload/VERSION"
   # Cython .so ABI (e.g. 3.10). install.sh must create the venv with this exact Python.
   local py_abi=""

@@ -14,6 +14,7 @@ FIREWALL_CONFIG_PATH = str(BASE_EBPF_FIREWALL_DIR / "firewall.config")
 FIREWALL_DB_NAME = str(BASE_EBPF_FIREWALL_DIR / "firewall_control.db")
 TOKEN_FILE = str(BASE_LICENSE_DIR / "token")
 LICENSE_FILE = str(BASE_LICENSE_DIR / "license.lic")
+# Not used for verification. The public key is compiled into the binaries.
 PUBKEY_FILE = str(BASE_LICENSE_DIR / "server_public_key.pem")
 LICENSE_CHECK_INTERVAL = 10
 SPARTA_SERVICE = "sparta.service"
@@ -22,6 +23,9 @@ L7_NGINX_CONF_DIR = Path("/usr/local/share/dorian/athens/nginx/conf")
 L7_DEFAULT_PORTS_CONF = str(L7_NGINX_CONF_DIR / "server_default_ports.conf")
 L7_GZIP_CONF = str(L7_NGINX_CONF_DIR / "http_gzip.conf")
 L7_CACHE_PURGE_BASE = os.environ.get("L7_CACHE_PURGE_BASE", "http://127.0.0.1:9000").rstrip("/")
+SPARTA_CONTROL_SOCK = "/tmp/ebpf_fw.sock"
+L7_NFT_TABLE = "dorian"
+L7_NFT_SET = "l7_block"
 
 # Server configuration
 SERVER_IP = "0.0.0.0"
@@ -74,6 +78,18 @@ CACHE_HIT_SYNC_INTERVAL = 60
 CACHE_HIT_BUCKET_SECONDS = 60
 CACHE_HIT_TOP_MISS_URLS = 50
 ATHENS_STATS_TIMEOUT = 5
+
+# Edge → panel metrics push (angelos pulls athens/sparta, panel does not scrape :9000)
+EDGE_METRICS_REPORT_URL = f"{API_BASE_URL}/report_edge_metrics"
+METRICS_SYNC_INTERVAL = 60
+METRICS_BUCKET_SECONDS = 60
+METRICS_SYNC_MAX_BUCKETS = 5
+METRICS_SYNC_MAX_ITEMS_PER_POST = 40
+# On angelos start, re-push this much Athens/Sparta history (oldest-first).
+METRICS_SYNC_BACKFILL_SEC = 6 * 3600
+METRICS_SYNC_CATCHUP_BUCKETS = 30
+# Sparta is 1 sample/sec; we aggregate closed minutes and push this many per tick.
+METRICS_SYNC_L4_MINUTES_PER_TICK = 30
 
 # L7 attack incidents (Athens resty.l7_attack -> SQLite/JSON archive -> panel)
 L7_ATTACK_REPORT_URL = f"{API_BASE_URL}/report_l7_attack"

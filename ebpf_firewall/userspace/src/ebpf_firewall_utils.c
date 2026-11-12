@@ -24,6 +24,7 @@
 #include <ebpf_firewall_core.h>
 #include <ebpf_firewall_log.h>
 #include <ebpf_firewall_utils.h>
+#include "../../../license/embedded_pubkey.h"
 
 const char *ebpf_sqlite_db_path(void)
 {
@@ -371,15 +372,6 @@ static unsigned char* b64_decode(const char* in, size_t inlen, size_t* outlen) {
     return out;
 }
 
-/* ---- Load server public key (PEM) ---- */
-static EVP_PKEY* load_public_key(const char* path) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return NULL;
-    EVP_PKEY* pk = PEM_read_PUBKEY(f, NULL, NULL, NULL);
-    fclose(f);
-    return pk;
-}
-
 /* ---- Naive JSON helpers (no external lib) ---- */
 static char* find_key(char* json, const char* key) {
     size_t klen = strlen(key);
@@ -645,16 +637,10 @@ static int validate_license_common(const char *real_machine_id,
         goto cleanup;
     }
 
-    char* pubkey_path = getenv(PUBKEY_PATH);
-    if (!pubkey_path) {
-        LOG_E("ERROR: Failed to read env : %s\n", PUBKEY_PATH);
-        ret = -1;
-        goto cleanup;
-    }
-
-    pub = load_public_key(pubkey_path);
+    /* Key is compiled in. PUBKEY_PATH and server_public_key.pem are not trusted. */
+    pub = dorian_load_embedded_pubkey();
     if (!pub) {
-        LOG_E("Failed to load public key: %s\n", pubkey_path);
+        LOG_E("Failed to load embedded license public key\n");
         ret = -1;
         goto cleanup;
     }

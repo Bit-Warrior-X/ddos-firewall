@@ -24,6 +24,8 @@ extensions = [
     Extension("core.athens_cache_stats", ["core/athens_cache_stats.py"]),
     Extension("core.cache_hit_sync", ["core/cache_hit_sync.py"]),
     Extension("core.l7_attack_sync", ["core/l7_attack_sync.py"]),
+    Extension("core.l7_escalate", ["core/l7_escalate.py"]),
+    Extension("core.metrics_sync", ["core/metrics_sync.py"]),
     Extension("core.backend_whitelist", ["core/backend_whitelist.py"]),
     Extension("core.initializer", ["core/initializer.py"]),
     Extension("core.app_factory", ["core/app_factory.py"]),
@@ -32,6 +34,7 @@ extensions = [
     Extension("routes.l4_routes", ["routes/l4_routes.py"]),
     Extension("routes.l7_routes", ["routes/l7_routes.py"]),
     Extension("routes.common_routes", ["routes/common_routes.py"]),
+    Extension("routes.internal_routes", ["routes/internal_routes.py"]),
     Extension(
         "core._license_native",
         sources=[
@@ -47,7 +50,11 @@ extensions = [
         extra_compile_args=[
             "-include",
             os.path.join(EBPF_DIR, "common.h"),
+            "-O2",
+            "-fstack-protector-strong",
+            "-D_FORTIFY_SOURCE=2",
         ],
+        extra_link_args=["-Wl,-z,relro,-z,now"],
     ),
 ]
 
@@ -57,7 +64,7 @@ setup(
         extensions,
         compiler_directives={
             'language_level': "3",
-            'embedsignature': True,
+            'embedsignature': False,
         },
         build_dir="build"
     ),

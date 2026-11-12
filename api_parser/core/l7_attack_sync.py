@@ -251,7 +251,25 @@ def _enrich_xdp(snap: Dict[str, Any]) -> None:
     """Add what XDP dropped from IPs this incident blocked at L7.
 
     estimated_requests = XDP-dropped connection attempts x the requests per
-    connection the IP made at L7 before it was blocked (malformed: 1)."""
+    connection the IP made at L7 before it was blocked (malformed: 1).
+    Only when both L4 and L7 are licensed (escalate uses Sparta).
+    """
+    try:
+        from core import license_check as license_check_mod
+        from core.license_check import get_license_info
+
+        info = license_check_mod.license_info
+        if info is None:
+            info = get_license_info()
+            license_check_mod.license_info = info
+        if not (info.allows_l4 and info.allows_l7):
+            snap.setdefault("escalations", {})
+            if isinstance(snap.get("escalations"), dict):
+                snap["escalations"]["xdp"] = False
+            return
+    except Exception:
+        return
+
     incident_id = str(snap.get("id") or "")
     if not incident_id:
         return

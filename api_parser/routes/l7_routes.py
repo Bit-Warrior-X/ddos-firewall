@@ -13,17 +13,40 @@ import requests
 from flask import Blueprint, request, jsonify
 
 import config
+from core import license_check as license_check_mod
 from core.backend_whitelist import ensure_backend_ips_whitelisted
+from core.license_check import get_license_info
 from core.redis_client import RedisClient
 from utils.auth import token_required, extract_token, get_token, token_matches
 from utils.validators import validate_url
 
 l7_bp = Blueprint('l7', __name__, url_prefix='/API/L7')
 
+
+def _l7_licensed():
+    info = license_check_mod.license_info
+    if info is None:
+        try:
+            info = get_license_info()
+            license_check_mod.license_info = info
+        except Exception:
+            return False
+    return bool(info.allows_l7)
+
+
+def _l7_license_error():
+    return jsonify({
+        "status": "error",
+        "message": "L7 not allowed for current license type",
+    }), 403
+
+
 @l7_bp.route('/firewall_main', methods=['POST'])
 @token_required
 def firewall_main_l7():
     """Control L7 firewall service."""
+    if not _l7_licensed():
+        return _l7_license_error()
     if not request.is_json:
         return jsonify({"status": "error", "message": "Request must be application/json"}), 400
     
@@ -39,7 +62,7 @@ def firewall_main_l7():
     if action not in allowed_actions:
         return jsonify({"status": "error", "message": "Invalid action. Valid actions: start, stop, restart"}), 400
     
-    cmd = ['systemctl', action, 'l7_firewall']
+    cmd = ['systemctl', action, getattr(config, "L7_SERVICE", "athens.service")]
     
     try:
         result = subprocess.run(
@@ -1718,7 +1741,10 @@ def l7_update_l7guard():
     The l7guard object replaces the stored settings; omitted fields use the
     defaults. "reset": true (or an empty object) restores all defaults.
     OpenResty picks the change up within ~10s; no reload needed.
+    Network escalate backend (Sparta vs nft) is chosen by license, not by `xdp`.
     """
+    if not _l7_licensed():
+        return _l7_license_error()
     data, err = _json_object_or_error()
     if err:
         return err
@@ -1763,12 +1789,23 @@ def l7guard_get():
     """
     if not _request_token_ok():
         return jsonify({"status": "error", "message": "Invalid token"}), 403
+    if not _l7_licensed():
+        return _l7_license_error()
+
+    backend = "none"
+    try:
+        from core.l7_escalate import current_backend
+
+        backend = current_backend()
+    except Exception:
+        pass
 
     return jsonify({
         "status": "success",
         "l7guard": RedisClient.get_l7guard_config(),
         "overrides": RedisClient.get_l7guard_overrides(),
         "defaults": RedisClient.L7GUARD_DEFAULTS,
+        "escalate_backend": backend,
     }), 200
 
 

@@ -30,13 +30,15 @@ info:
 
     **Edge → panel sync (outbound)**
 
-    Angelos also **POSTs** configure snapshots to the Dorian panel (not served by
-    the edge). See tag **Edge → Panel** and path `/report_edge_configure`.
-    Interval defaults to 60s (`EDGE_LIST_SYNC_INTERVAL`).
+    Angelos also **POSTs** to the Dorian panel (not served by the edge):
+
+    - `/report_edge_configure` — L4+L7 configure snapshot (`EDGE_LIST_SYNC_INTERVAL`, ~60s)
+    - `/report_edge_metrics` — closed Sparta + Athens metrics buckets (batched)
+    - `/report_cache_hit`, `/report_l7_attack`, `/report_xdp` — specialized reports
 
     This spec is derived from Dorian back-end callers in `internal/api/l7_site_push.go`,
     `internal/api/handlers.go`, and `internal/api/agent_client.go`.
-  version: 1.1.0
+  version: 1.2.0
 
 servers:
   - url: http://{edgeServerIp}:5000
@@ -59,6 +61,226 @@ tags:
       by the **panel**, not by the edge agent.
 
 paths:
+  /report_edge_metrics:
+    post:
+      servers:
+        - url: https://panel.dorian.center/api
+          description: Dorian panel API (angelos → panel)
+      tags: [Edge → Panel]
+      summary: Closed Sparta + Athens metrics (batched)
+      description: |
+        Angelos worker `metrics_sync` (~60s) pulls **closed** local buckets and
+        POSTs them here. The panel should store by `(edge_id, source, endpoint,
+        timestamp)` and **stop scraping** edge Athens `:9000` / Sparta for history.
+
+        **License gating**
+
+        - `allows_l4` — includes Sparta `l4_traffic_stats` (alias `l4_attack_stats`)
+        - `allows_l7` — includes all Athens endpoints below
+        - Envelope carries `license_type`, `allows_l4`, `allows_l7`
+
+        **Sparta (`source=sparta`)** — from `sparta_cli TRAFFIC_TIMESTAMPS` +
+        `TRAFFIC_STATS <ts>` (not Athens `:9000`). Sparta stores **per-second
+        rates**; angelos aggregates each **closed wall-clock minute** (sum of
+        samples) into one item so the panel gets ~1 L4 point/minute:
+
+        | endpoint | payload |
+        |---|---|
+        | `l4_attack_stats` (alias `l4_traffic_stats`) | `{ timestamp: minute_start, interval_seconds: 60, samples, stats:{total,allow,block,…}, aggregation: avg_per_second_rate_x60 }` — per-second rates averaged then ×60 ≈ minute totals |
+
+        **Athens (`source=athens`)** — from localhost `:9000` closed buckets
+        (same JSON as [Athens Metrics API](athens-metrics-api.yml)):
+
+        | endpoint | payload root key / shape |
+        |---|---|
+        | `server_traffic_stats` | edge-wide object: NIC + XDP packet counters + full L7 counters |
+        | `site_traffic_stats` | `{ timestamp, site_traffic_stats: [ {site_id, …L7 counters} ] }` |
+        | `ip_request_stats` | `{ timestamp, ip_request_stats: [ {site_id, ip, request_count} ] }` |
+        | `url_request_stats` | `{ timestamp, url_request_stats: [ {site_id, url, request_count} ] }` |
+        | `useragent_request_stats` | `{ timestamp, useragent_request_stats: [ {site_id, user_agent, request_count} ] }` |
+        | `country_request_stats` | `{ timestamp, country_request_stats: [ {site_id, country_iso, request_count, block_count} ] }` |
+        | `isp_request_stats` | `{ timestamp, isp_request_stats: [ {site_id, isp, request_count} ] }` |
+        | `referer_request_stats` | `{ timestamp, referer_request_stats: [ {site_id, referer, request_count} ] }` |
+        | `domain_request_stats` | `{ timestamp, domain_request_stats: [ {site_id, domain, request_count, traffic_*, bandwidth_*} ] }` |
+        | `content_type_request_stats` | `{ timestamp, content_type_request_stats: [ {site_id, content_type, request_count, cached_*, traffic_*, cache_hit_ratio} ] }` |
+        | `cache_miss_url_stats` | `{ timestamp, cache_miss_url_stats: [ {site_id, domain, url, miss_count, request_count} ] }` |
+        | `block_reason_stats` | `{ timestamp, block_reason_stats: [ {site_id, rule_type, rule_id?, request_count, ip_count} ] }` |
+
+        **Not in v1 of this feed:** `/access_logs` (NDJSON), live `/req-status`.
+        Cache-hit specialized UI may still use `/report_cache_hit`; the same
+        Athens arrays are also present here under their native endpoint names.
+
+        Prefer reading **`items[]`** (batch). Top-level `source` / `endpoint` /
+        `timestamp` / `payload` mirror `items[0]` for simple single-bucket parsers.
+      operationId: reportEdgeMetrics
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EdgeMetricsReport"
+            examples:
+              batchMixed:
+                summary: One tick with Sparta L4 + Athens server/site buckets
+                value:
+                  token: edge-auth-token
+                  command: report_edge_metrics
+                  reported_at: 1742800060
+                  interval_seconds: 60
+                  license_type: unified
+                  allows_l4: true
+                  allows_l7: true
+                  item_count: 3
+                  source: sparta
+                  endpoint: l4_traffic_stats
+                  timestamp: 1742800000
+                  payload:
+                    timestamp: 1742800000
+                    stats:
+                      total: 1500000
+                      allow: 1420000
+                      block: 80000
+                      syn: 420000
+                      ack: 900000
+                      rst: 12000
+                      tcp: 1400000
+                      udp: 90000
+                      icmp: 5000
+                      gre: 2000
+                      other: 3000
+                    total: 1500000
+                    allow: 1420000
+                    block: 80000
+                    syn: 420000
+                    ack: 900000
+                    rst: 12000
+                    tcp: 1400000
+                    udp: 90000
+                    icmp: 5000
+                    gre: 2000
+                    other: 3000
+                    source_cli: TRAFFIC_STATS
+                    endpoint_aliases: [l4_traffic_stats, l4_attack_stats]
+                  items:
+                    - source: sparta
+                      endpoint: l4_traffic_stats
+                      endpoint_aliases: [l4_attack_stats]
+                      timestamp: 1742800000
+                      interval_seconds: 60
+                      payload:
+                        timestamp: 1742800000
+                        stats:
+                          total: 1500000
+                          allow: 1420000
+                          block: 80000
+                          syn: 420000
+                          ack: 900000
+                          rst: 12000
+                          tcp: 1400000
+                          udp: 90000
+                          icmp: 5000
+                          gre: 2000
+                          other: 3000
+                        total: 1500000
+                        allow: 1420000
+                        block: 80000
+                        syn: 420000
+                        ack: 900000
+                        rst: 12000
+                        tcp: 1400000
+                        udp: 90000
+                        icmp: 5000
+                        gre: 2000
+                        other: 3000
+                        source_cli: TRAFFIC_STATS
+                        endpoint_aliases: [l4_traffic_stats, l4_attack_stats]
+                    - source: athens
+                      endpoint: server_traffic_stats
+                      timestamp: 1742800000
+                      interval_seconds: 60
+                      payload:
+                        timestamp: 1742800000
+                        traffic_nic_rx: 524288000
+                        traffic_nic_tx: 1048576000
+                        bandwidth_nic_rx: 69905066
+                        bandwidth_nic_tx: 139810133
+                        packets_nic_rx: 1200000
+                        packets_nic_tx: 1100000
+                        packets_xdp_rx: 1180000
+                        packets_xdp_blocked: 80000
+                        request_count: 42000
+                        blocked_request_count: 1200
+                        traffic_l7_rx: 8192000
+                        traffic_l7_tx: 104857600
+                        cache_hit_count: 30000
+                        cache_miss_count: 8000
+                        code200: 38000
+                        edge_latency_hist: [3600, 2300, 1600, 1000, 700, 470, 240, 100, 30, 12, 8]
+                    - source: athens
+                      endpoint: site_traffic_stats
+                      timestamp: 1742800000
+                      interval_seconds: 60
+                      payload:
+                        timestamp: 1742800000
+                        site_traffic_stats:
+                          - site_id: 3
+                            request_count: 12000
+                            blocked_request_count: 400
+                            traffic_l7_tx: 31457280
+                            cache_hit_count: 9000
+                          - site_id: 7
+                            request_count: 8000
+                            blocked_request_count: 100
+                            traffic_l7_tx: 20971520
+              athensDimensions:
+                summary: Dimension + security Athens buckets
+                value:
+                  token: edge-auth-token
+                  command: report_edge_metrics
+                  reported_at: 1742800060
+                  interval_seconds: 60
+                  license_type: l7
+                  allows_l4: false
+                  allows_l7: true
+                  item_count: 2
+                  items:
+                    - source: athens
+                      endpoint: country_request_stats
+                      timestamp: 1742800000
+                      interval_seconds: 60
+                      payload:
+                        timestamp: 1742800000
+                        country_request_stats:
+                          - site_id: 3
+                            country_iso: US
+                            request_count: 5000
+                            block_count: 40
+                          - site_id: 3
+                            country_iso: DE
+                            request_count: 1200
+                            block_count: 10
+                    - source: athens
+                      endpoint: block_reason_stats
+                      timestamp: 1742800000
+                      interval_seconds: 60
+                      payload:
+                        timestamp: 1742800000
+                        block_reason_stats:
+                          - site_id: 3
+                            rule_type: anti-cc
+                            rule_id: "12"
+                            request_count: 800
+                            ip_count: 35
+                          - site_id: 3
+                            rule_type: temporary-block
+                            request_count: 200
+                            ip_count: 12
+      responses:
+        "200":
+          description: Metrics batch accepted (all items stored or idempotently skipped)
+        "4XX":
+          $ref: "#/components/responses/AgentError"
+
   /report_cache_hit:
     post:
       servers:
@@ -3029,6 +3251,388 @@ components:
           description: Requests with upstream_cache_status MISS or EXPIRED
         request_count:
           type: integer
+
+    EdgeMetricsEndpoint:
+      type: string
+      description: |
+        Metrics series name. Sparta uses `l4_traffic_stats` (alias
+        `l4_attack_stats`). Athens names match `:9000` paths.
+      enum:
+        - l4_traffic_stats
+        - l4_attack_stats
+        - server_traffic_stats
+        - site_traffic_stats
+        - ip_request_stats
+        - url_request_stats
+        - useragent_request_stats
+        - country_request_stats
+        - isp_request_stats
+        - referer_request_stats
+        - domain_request_stats
+        - content_type_request_stats
+        - cache_miss_url_stats
+        - block_reason_stats
+
+    EdgeMetricsSpartaStats:
+      type: object
+      description: Sparta TRAFFIC_STATS counters for one closed bucket (bytes / packets)
+      required: [total, allow, block, syn, ack, rst, tcp, udp, icmp, gre, other]
+      properties:
+        total: { type: integer, format: int64 }
+        allow: { type: integer, format: int64 }
+        block: { type: integer, format: int64 }
+        syn: { type: integer, format: int64 }
+        ack: { type: integer, format: int64 }
+        rst: { type: integer, format: int64 }
+        tcp: { type: integer, format: int64 }
+        udp: { type: integer, format: int64 }
+        icmp: { type: integer, format: int64 }
+        gre: { type: integer, format: int64 }
+        other: { type: integer, format: int64 }
+      additionalProperties:
+        type: integer
+        format: int64
+
+    EdgeMetricsSpartaPayload:
+      type: object
+      description: |
+        Sparta L4 traffic / attack bucket. Nested `stats` plus flat copies of
+        the same counters (panel may use either). Same numbers Athens used to
+        expose on GET `/l4_attack_stats`.
+      required: [timestamp, stats]
+      properties:
+        timestamp:
+          type: integer
+          format: int64
+        stats:
+          $ref: "#/components/schemas/EdgeMetricsSpartaStats"
+        total: { type: integer, format: int64 }
+        allow: { type: integer, format: int64 }
+        block: { type: integer, format: int64 }
+        syn: { type: integer, format: int64 }
+        ack: { type: integer, format: int64 }
+        rst: { type: integer, format: int64 }
+        tcp: { type: integer, format: int64 }
+        udp: { type: integer, format: int64 }
+        icmp: { type: integer, format: int64 }
+        gre: { type: integer, format: int64 }
+        other: { type: integer, format: int64 }
+        source_cli:
+          type: string
+          enum: [TRAFFIC_STATS]
+        endpoint_aliases:
+          type: array
+          items: { type: string }
+          example: [l4_traffic_stats, l4_attack_stats]
+
+    EdgeMetricsAthensL7Counters:
+      type: object
+      description: |
+        Shared L7 counter fields on server/site traffic buckets (bytes, counts,
+        cache statuses, origin codes, latency histograms). Matches Athens
+        Metrics API `L7Counters`.
+      additionalProperties: true
+      properties:
+        traffic_l7_rx: { type: number }
+        traffic_l7_tx: { type: number }
+        bandwidth_l7_rx: { type: number }
+        bandwidth_l7_tx: { type: number }
+        request_count: { type: integer }
+        response_count: { type: integer }
+        blocked_request_count: { type: integer }
+        ip_count: { type: integer }
+        blocked_ip_count: { type: integer }
+        cache_hit_count: { type: integer }
+        cache_stale_count: { type: integer }
+        cache_updating_count: { type: integer }
+        cache_revalidated_count: { type: integer }
+        cache_miss_count: { type: integer }
+        cache_expired_count: { type: integer }
+        cache_bypass_count: { type: integer }
+        cache_dynamic_count: { type: integer }
+        cache_hit_ratio: { type: number }
+        traffic_cached_tx: { type: number }
+        origin_request_count: { type: integer }
+        traffic_origin_rx: { type: number }
+        origin_code2xx: { type: integer }
+        origin_code3xx: { type: integer }
+        origin_code4xx: { type: integer }
+        origin_code5xx: { type: integer }
+        origin_timeout_count: { type: integer }
+        origin_error_count: { type: integer }
+        edge_latency_hist:
+          type: array
+          minItems: 11
+          maxItems: 11
+          items: { type: integer }
+        edge_latency_sum_ms: { type: number }
+        origin_latency_hist:
+          type: array
+          minItems: 11
+          maxItems: 11
+          items: { type: integer }
+        origin_latency_sum_ms: { type: number }
+        code200: { type: integer }
+        code403: { type: integer }
+        code404: { type: integer }
+        code499: { type: integer }
+        code500: { type: integer }
+        code502: { type: integer }
+        code503: { type: integer }
+        code504: { type: integer }
+        get_count: { type: integer }
+        post_count: { type: integer }
+        http1_1_count: { type: integer }
+        http2_count: { type: integer }
+        http3_count: { type: integer }
+
+    EdgeMetricsAthensServerPayload:
+      allOf:
+        - type: object
+          required: [timestamp]
+          properties:
+            timestamp: { type: integer, format: int64 }
+            traffic_nic_rx: { type: number }
+            traffic_nic_tx: { type: number }
+            bandwidth_nic_rx: { type: number }
+            bandwidth_nic_tx: { type: number }
+            packets_nic_rx: { type: number }
+            packets_nic_tx: { type: number }
+            pps_nic_rx: { type: number }
+            pps_nic_tx: { type: number }
+            packets_nic_dropped: { type: number }
+            pps_nic_dropped: { type: number }
+            packets_xdp_rx: { type: number }
+            pps_xdp_rx: { type: number }
+            packets_xdp_blocked: { type: number }
+            pps_xdp_blocked: { type: number }
+        - $ref: "#/components/schemas/EdgeMetricsAthensL7Counters"
+
+    EdgeMetricsAthensSitePayload:
+      type: object
+      required: [timestamp, site_traffic_stats]
+      properties:
+        timestamp: { type: integer, format: int64 }
+        site_id: { type: integer }
+        site_traffic_stats:
+          type: array
+          items:
+            allOf:
+              - type: object
+                required: [site_id]
+                properties:
+                  site_id: { type: integer }
+              - $ref: "#/components/schemas/EdgeMetricsAthensL7Counters"
+
+    EdgeMetricsAthensDimensionPayload:
+      type: object
+      description: |
+        Dimension / cache / security Athens responses. Always include
+        `timestamp` plus an array named after the endpoint
+        (`ip_request_stats`, `url_request_stats`, …).
+      required: [timestamp]
+      properties:
+        timestamp: { type: integer, format: int64 }
+        site_id: { type: integer }
+        ip_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, ip, request_count]
+            properties:
+              site_id: { type: integer }
+              ip: { type: string }
+              request_count: { type: integer }
+        url_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, url, request_count]
+            properties:
+              site_id: { type: integer }
+              url: { type: string }
+              request_count: { type: integer }
+        useragent_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, user_agent, request_count]
+            properties:
+              site_id: { type: integer }
+              user_agent: { type: string }
+              request_count: { type: integer }
+        country_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, country_iso, request_count]
+            properties:
+              site_id: { type: integer }
+              country_iso: { type: string }
+              request_count: { type: integer }
+              block_count: { type: integer }
+        isp_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, isp, request_count]
+            properties:
+              site_id: { type: integer }
+              isp: { type: string }
+              request_count: { type: integer }
+        referer_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, referer, request_count]
+            properties:
+              site_id: { type: integer }
+              referer: { type: string }
+              request_count: { type: integer }
+        domain_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, domain, request_count]
+            properties:
+              site_id: { type: integer }
+              domain: { type: string }
+              request_count: { type: integer }
+              traffic_l7_rx: { type: number }
+              traffic_l7_tx: { type: number }
+              bandwidth_l7_rx: { type: number }
+              bandwidth_l7_tx: { type: number }
+        content_type_request_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, content_type, request_count]
+            properties:
+              site_id: { type: integer }
+              content_type:
+                type: string
+                enum: [html, css, js, json, image, video, audio, font, document, binary, other]
+              request_count: { type: integer }
+              cached_request_count: { type: integer }
+              traffic_l7_tx: { type: number }
+              traffic_cached_tx: { type: number }
+              cache_hit_ratio: { type: number }
+        cache_miss_url_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, domain, url, miss_count, request_count]
+            properties:
+              site_id: { type: integer }
+              domain: { type: string }
+              url: { type: string }
+              miss_count: { type: integer }
+              request_count: { type: integer }
+        block_reason_stats:
+          type: array
+          items:
+            type: object
+            required: [site_id, rule_type, request_count]
+            properties:
+              site_id: { type: integer }
+              rule_type:
+                type: string
+                enum:
+                  - blacklist
+                  - geo
+                  - anti-cc
+                  - second-freq-limit
+                  - interval-freq-limit
+                  - user-agent
+                  - anti-header
+                  - response-freq
+                  - ip-reputation
+                  - temporary-block
+                  - other
+              rule_id: { type: string }
+              request_count: { type: integer }
+              ip_count: { type: integer }
+      additionalProperties: true
+
+    EdgeMetricsItem:
+      type: object
+      required: [source, endpoint, timestamp, payload]
+      description: One closed metrics bucket inside a batch report
+      properties:
+        source:
+          type: string
+          enum: [athens, sparta]
+        endpoint:
+          $ref: "#/components/schemas/EdgeMetricsEndpoint"
+        endpoint_aliases:
+          type: array
+          items: { type: string }
+          description: Alternate names the panel may index (e.g. l4_attack_stats)
+        timestamp:
+          type: integer
+          format: int64
+          description: Bucket start (unix seconds)
+        interval_seconds:
+          type: integer
+          description: Bucket width (default 60)
+        payload:
+          description: Endpoint-native JSON (Sparta or Athens shape)
+          oneOf:
+            - $ref: "#/components/schemas/EdgeMetricsSpartaPayload"
+            - $ref: "#/components/schemas/EdgeMetricsAthensServerPayload"
+            - $ref: "#/components/schemas/EdgeMetricsAthensSitePayload"
+            - $ref: "#/components/schemas/EdgeMetricsAthensDimensionPayload"
+
+    EdgeMetricsReport:
+      type: object
+      required: [token, command, reported_at, items]
+      description: |
+        Batched closed metrics from Sparta and/or Athens. Prefer `items[]`.
+        Top-level `source`/`endpoint`/`timestamp`/`payload` mirror `items[0]`.
+      properties:
+        token:
+          type: string
+          description: Edge auth token (same as other panel report APIs)
+        command:
+          type: string
+          enum: [report_edge_metrics]
+        reported_at:
+          type: integer
+          format: int64
+        interval_seconds:
+          type: integer
+          description: Default bucket width for items that omit their own
+        license_type:
+          type: string
+          description: Current edge license type (l4 / l7 / unified / trial)
+        allows_l4:
+          type: boolean
+        allows_l7:
+          type: boolean
+        item_count:
+          type: integer
+          description: len(items)
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/EdgeMetricsItem"
+        source:
+          type: string
+          enum: [athens, sparta]
+          description: Mirror of items[0].source
+        endpoint:
+          $ref: "#/components/schemas/EdgeMetricsEndpoint"
+        timestamp:
+          type: integer
+          format: int64
+        payload:
+          description: Mirror of items[0].payload
+          oneOf:
+            - $ref: "#/components/schemas/EdgeMetricsSpartaPayload"
+            - $ref: "#/components/schemas/EdgeMetricsAthensServerPayload"
+            - $ref: "#/components/schemas/EdgeMetricsAthensSitePayload"
+            - $ref: "#/components/schemas/EdgeMetricsAthensDimensionPayload"
 
     CacheHitReport:
       type: object

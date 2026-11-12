@@ -82,7 +82,7 @@ def health_check():
     else:
         try:
             proc = subprocess.run(
-                [systemctl_path, "status", "l7_firewall", "--no-pager"],
+                [systemctl_path, "status", config.L7_SERVICE, "--no-pager"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=5,
@@ -99,7 +99,7 @@ def health_check():
                     if "Active:" in line:
                         active_line = line.strip()
                         break
-                l7_reason = active_line or "l7_firewall is active (systemctl returned OK)"
+                l7_reason = active_line or f"{config.L7_SERVICE} is active (systemctl returned OK)"
             else:
                 l7_status = "failure"
                 active_line = None

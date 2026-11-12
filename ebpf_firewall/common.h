@@ -15,6 +15,7 @@
 #define FIFO_PATH                   "/tmp/firewall_to_api_parser.fifo"
 #define API_PARSER_UNIX_DGRAM_PATH  "/tmp/firewall_to_api_parser.sock"
 
+/* Unused by verifiers. The public key is license/embedded_pubkey.h. */
 #define PUBKEY_PATH                 "PUBKEY_PATH"
 #define LICENSE_PATH                "LICENSE_PATH"
 #define LICENSE_CHECK_INTERVAL      60

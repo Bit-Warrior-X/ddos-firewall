@@ -102,6 +102,8 @@ USR_CLIBIN   := $(BUILD_DIR)/sparta_cli
 USR_INC_DIR  := userspace/include
 
 USR_INCLUDES = -I$(USR_INC_DIR) -I. $(MODE_FLAGS) $(LIBBPF_USR_CFLAGS)
+# Release hardening for the customer binaries. The eBPF object is not linked this way.
+USR_HARDEN = -O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE -pie -Wl,-z,relro,-z,now
 
 INSTALL_DIR := /usr/local/share/dorian/sparta
 
@@ -142,15 +144,18 @@ $(KERNEL_OBJ): $(KERNEL_SRC) | $(BUILD_DIR)
 $(USR_BIN): $(USR_SRCS) | $(BUILD_DIR)
 	@echo ">> Linking userspace firewall"
 	@echo ">> LIBBPF_LIBS=$(LIBBPF_LIBS)"
-	$(GCC) -o $@ $^ $(USR_INCLUDES) $(USR_LIBS)
+	$(GCC) -o $@ $^ $(USR_INCLUDES) $(USR_HARDEN) $(USR_LIBS)
+	strip --strip-unneeded $@
 
 $(USR_CLIBIN): $(USR_CLI) | $(BUILD_DIR)
 	@echo ">> Linking userspace cli firewall"
-	$(GCC) -o $@ $^
+	$(GCC) -o $@ $^ $(USR_HARDEN)
+	strip --strip-unneeded $@
 
 $(USR_PROMBIN): $(USR_PROM) | $(BUILD_DIR)
 	@echo ">> Linking prometheus binary firewall"
-	$(GCC) -o $@ $^ $(USR_PROMLIBS)
+	$(GCC) -o $@ $^ $(USR_HARDEN) $(USR_PROMLIBS)
+	strip --strip-unneeded $@
 
 run: all
 	@cd $(BUILD_DIR) && ./sparta_user

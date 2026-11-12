@@ -6,12 +6,38 @@ import time
 import json
 import socket
 from queue import Queue, Full
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from core.api_client import APIClient
-from core.redis_client import RedisClient
 import config
 from utils.auth import get_token
-import maxminddb
+
+
+def parse_ttl_seconds(raw) -> int:
+    """Parse Sparta TTL values like '600', '600s', '1h' into seconds."""
+    if raw is None:
+        return int(config.DEFAULT_BLOCK_DURATION)
+    text = str(raw).strip().lower()
+    if not text:
+        return int(config.DEFAULT_BLOCK_DURATION)
+    mult = 1
+    if text.endswith("ms"):
+        try:
+            return max(1, int(text[:-2]) // 1000)
+        except ValueError:
+            return int(config.DEFAULT_BLOCK_DURATION)
+    if text.endswith("s"):
+        text = text[:-1]
+    elif text.endswith("m"):
+        text = text[:-1]
+        mult = 60
+    elif text.endswith("h"):
+        text = text[:-1]
+        mult = 3600
+    try:
+        return max(1, int(float(text) * mult))
+    except (TypeError, ValueError):
+        return int(config.DEFAULT_BLOCK_DURATION)
+
 
 def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     """Parses raw FIFO data into command dictionaries."""
@@ -40,7 +66,6 @@ def parse_fifo_message(raw_data: str) -> List[Dict[str, str]]:
     
     return commands
 
-_geoip_reader = None
 _cmd_queue = Queue(maxsize=20000)
 _critical_queue = Queue(maxsize=1000)
 _dgram_drop_count = 0
@@ -67,34 +92,6 @@ def _critical_worker() -> None:
             process_command(cmd, reliable=True)
         finally:
             _critical_queue.task_done()
-
-def _lookup_geo(ip: str) -> Tuple[str, str]:
-    global _geoip_reader
-
-    if not ip:
-        return "-", "-"
-
-    if _geoip_reader is None:
-        try:
-            db_path = config.GEOIP_MMDB_PATH
-            _geoip_reader = maxminddb.open_database(db_path)
-            print(f"[API_PARSER] MaxMind DB reader initialized with DB: {db_path}")
-        except Exception as e:
-            print(f"[API_PARSER] MaxMind DB init failed: {e}")
-            _geoip_reader = False
-            return "-", "-"
-
-    if _geoip_reader is False:
-        return "-", "-"
-
-    try:
-        record = _geoip_reader.get(ip)
-        country = record.get("country", {}).get("iso_code", "-")
-        city = record.get("city", {}).get("names", {}).get("en", "-")
-        return country, city
-    except Exception as e:
-        print(f"[API_PARSER] Geo lookup failed for ip={ip}: {e}")
-        return "-", "-"
 
 
 def _log_field(value) -> str:
@@ -208,49 +205,14 @@ def process_command(cmd: Dict[str, str], reliable: bool = False) -> None:
                 'time': str(cmd.get('time', 'unknown')),
                 'command': 'report_block_ip',
                 'ip': str(cmd.get('ip', 'unknown')),
-                'ttl': str(cmd.get('ttl', 'unknown')),
+                'ttl': str(parse_ttl_seconds(cmd.get('ttl'))),
                 'attack_type': str(cmd.get('attack_type', 'unknown')),
                 'req_id': str(cmd.get('req_id', '')),
                 'token': token
             }
             _copy_optional_alert_fields(cmd, payload)
             _deliver_report(payload, reliable)
-
-            # Also add this IP to temporaryblacklist in Redis (for L7 WAF), and publish.
-            ip = (cmd.get('ip') or '').strip()
-            ttl_raw = cmd.get('ttl') or ''
-            try:
-                ttl = int(ttl_raw)
-            except (TypeError, ValueError):
-                ttl = config.DEFAULT_BLOCK_DURATION
-
-            if ip and ttl > 0:
-                try:
-                    blocked_at = int(time.time())
-                    country, city = _lookup_geo(ip)
-                    entry = {
-                        "ip": ip,
-                        # Use a regex that matches any URI for this IP
-                        "url": ".*",
-                        "country": country,
-                        "city": city,
-                        "blocked_at": str(blocked_at),
-                        "ttl": ttl,
-                        # Mark that this came from L4 DDoS logic
-                        "trigger_rule": "l4ddos",
-                        "req_id": str(cmd.get("req_id", "")),
-                    }
-                    json_str = json.dumps(entry, ensure_ascii=False, separators=(",", ":")).replace("\\/", "/")
-
-                    rcli = RedisClient.get_client()
-                    key = f"temporaryblacklist:{ip}:{blocked_at}"
-                    rcli.set(key, json_str)
-                    rcli.expire(key, ttl)
-                    # Notify L7-side monitor & backend
-                    rcli.publish("temporaryblacklist:added", json_str)
-                    print(f"[API_PARSER] Added L4 temp blacklist entry key={key} ttl={ttl}")
-                except Exception as e:
-                    print(f"[API_PARSER] Failed to add L4 temp blacklist entry for ip={ip}: {e}")
+            # L4 blocks stay in Sparta only — no Redis temporaryblacklist bridge to Athens.
         else:
             print(f"[API_PARSER] Unknown command: {cmd['command']}")
     except Exception as e:

@@ -82,6 +82,10 @@ find "${SCRIPT_DIR}" -name "__init__.py" -type f \
     cp "${file}" "${PAYLOAD_DIR}/${rel_path}"
 done
 
+if command -v strip >/dev/null 2>&1; then
+  find "${PAYLOAD_DIR}" -name "*.so" -type f -exec strip --strip-unneeded {} +
+fi
+
 echo "Payload staging complete:"
 echo "  Python files: $(find "${PAYLOAD_DIR}" -name "*.py" -type f | wc -l)"
 echo "  .so files: $(find "${PAYLOAD_DIR}" -name "*.so" -type f | wc -l)"

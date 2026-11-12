@@ -14,10 +14,23 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import config
+from core import license_check as license_check_mod
 from core.api_client import APIClient
 from core.database import DatabaseManager
+from core.license_check import get_license_info
 from core.redis_client import RedisClient
 from utils.auth import get_token
+
+
+def _license():
+    info = license_check_mod.license_info
+    if info is None:
+        try:
+            info = get_license_info()
+            license_check_mod.license_info = info
+        except Exception:
+            return None
+    return info
 
 SYNC_INTERVAL_SEC = getattr(config, "EDGE_LIST_SYNC_INTERVAL", 60)
 INCLUDE_SSL_PEMS = bool(getattr(config, "EDGE_CONFIG_REPORT_INCLUDE_SSL_PEMS", False))
@@ -95,54 +108,68 @@ def _read_optional_file(path: Optional[str]) -> Optional[str]:
 
 
 def build_edge_configure_payload(token: str) -> Dict[str, Any]:
-    """Full L4 + L7 configure snapshot for the backend report API."""
-    whitelist = _normalize_whitelist_rows(DatabaseManager.get_whitelist())
-    blocklist = _normalize_blocklist_rows(DatabaseManager.get_blocklist())
+    """L4 and/or L7 configure snapshot — omit sections the license does not allow."""
+    info = _license()
+    allows_l4 = bool(info and info.allows_l4)
+    allows_l7 = bool(info and info.allows_l7)
 
-    fw_ok, fw_cfg = _read_firewall_config()
-    firewall_config = fw_cfg if fw_ok and isinstance(fw_cfg, dict) else {}
-    firewall_config_error = None if fw_ok else str(fw_cfg)
+    whitelist: List[Dict[str, Any]] = []
+    blocklist: List[Dict[str, Any]] = []
+    firewall_config: Dict[str, str] = {}
+    firewall_config_error = None
+    if allows_l4:
+        whitelist = _normalize_whitelist_rows(DatabaseManager.get_whitelist())
+        blocklist = _normalize_blocklist_rows(DatabaseManager.get_blocklist())
+        fw_ok, fw_cfg = _read_firewall_config()
+        firewall_config = fw_cfg if fw_ok and isinstance(fw_cfg, dict) else {}
+        firewall_config_error = None if fw_ok else str(fw_cfg)
 
-    try:
-        l7 = RedisClient.dump_l7_configure(include_ssl_pems=INCLUDE_SSL_PEMS)
-    except Exception as exc:
-        l7 = {
-            "edge": {},
-            "sites": {},
-            "meta": {"site_count": 0, "temporaryblacklist_count": 0, "error": str(exc)},
-        }
-
-    ports_conf = _read_optional_file(getattr(config, "L7_DEFAULT_PORTS_CONF", None))
+    l7 = {"edge": {}, "sites": {}, "meta": {"site_count": 0, "temporaryblacklist_count": 0}}
+    ports_conf = None
+    if allows_l7:
+        try:
+            l7 = RedisClient.dump_l7_configure(include_ssl_pems=INCLUDE_SSL_PEMS)
+        except Exception as exc:
+            l7 = {
+                "edge": {},
+                "sites": {},
+                "meta": {"site_count": 0, "temporaryblacklist_count": 0, "error": str(exc)},
+            }
+        ports_conf = _read_optional_file(getattr(config, "L7_DEFAULT_PORTS_CONF", None))
 
     l7_meta = dict(l7.get("meta") or {})
     sites = l7.get("sites") or {}
 
-    return {
+    payload: Dict[str, Any] = {
         "token": token,
         "command": "report_edge_configure",
         "reported_at": int(time.time()),
-        "l4": {
+        "whitelist": whitelist,
+        "blocklist": blocklist,
+        "whitelist_count": len(whitelist),
+        "blocklist_count": len(blocklist),
+        "site_count": int(l7_meta.get("site_count") or len(sites)) if allows_l7 else 0,
+        "temporaryblacklist_count": int(l7_meta.get("temporaryblacklist_count") or 0)
+        if allows_l7
+        else 0,
+        "include_ssl_pems": INCLUDE_SSL_PEMS,
+    }
+    if allows_l4:
+        payload["l4"] = {
             "firewall_config": firewall_config,
             "firewall_config_error": firewall_config_error,
             "whitelist": whitelist,
             "blocklist": blocklist,
-        },
-        "l7": {
+        }
+    if allows_l7:
+        payload["l7"] = {
             "edge": l7.get("edge") or {},
             "sites": sites,
             "files": {
                 "server_default_ports_conf": ports_conf,
             },
-        },
-        # Keep flat counts for simple backend logging / older parsers.
-        "whitelist": whitelist,
-        "blocklist": blocklist,
-        "whitelist_count": len(whitelist),
-        "blocklist_count": len(blocklist),
-        "site_count": int(l7_meta.get("site_count") or len(sites)),
-        "temporaryblacklist_count": int(l7_meta.get("temporaryblacklist_count") or 0),
-        "include_ssl_pems": INCLUDE_SSL_PEMS,
-    }
+        }
+    return payload
 
 
 # Back-compat alias used by earlier revision.

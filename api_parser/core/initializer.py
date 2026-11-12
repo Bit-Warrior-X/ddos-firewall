@@ -5,7 +5,7 @@ from utils.auth import get_token
 from core.api_client import APIClient
 from core.backend_whitelist import ensure_backend_ips_whitelisted
 from core.database import DatabaseManager
-from core.firewall import firewall_control
+from core.firewall import firewall_control, health_check
 
 
 def _read_firewall_config():
@@ -56,7 +56,7 @@ def panel_list(data):
 
 def sync_l4_lists_and_start_firewall():
     """
-    At API parser startup:
+    At API parser startup (L4-licensed only):
       - Call backend /api/get_blocklist_ips and /api/get_whitelist_ips first.
       - Only if we get success response(s): init DB, clear tables, then store
         the response data. On API failure we do not clear or overwrite the DB.
@@ -114,7 +114,8 @@ def sync_l4_lists_and_start_firewall():
     except Exception as exc:
         print(f"[INIT] Backend whitelist inject failed: {exc}", flush=True)
 
-    # Start L4 firewall via CLI, regardless of API sync success
+    # Start L4 only if it is down. A full RESTART_FW wipes Sparta's in-memory
+    # TRAFFIC_STATS ring and stalls panel L4 charts until the ring fills again.
     ok, fw_cfg = _read_firewall_config()
     if not ok:
         print(f"[INIT] Skipping firewall start: {fw_cfg}", flush=True)
@@ -128,6 +129,15 @@ def sync_l4_lists_and_start_firewall():
         return
 
     try:
+        health = health_check()
+        if health.get("status") == "success":
+            print(
+                "[INIT] L4 firewall already healthy; skipping RESTART_FW "
+                "(preserves TRAFFIC_STATS history)",
+                flush=True,
+            )
+            return
+
         result = firewall_control("restart", interface, attach_mode)
         status = result.get("status")
         message = result.get("message", "")

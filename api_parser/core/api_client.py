@@ -242,3 +242,36 @@ class APIClient:
                 flush=True,
             )
             return False
+
+    @staticmethod
+    def report_edge_metrics(payload: Dict[str, Any]) -> bool:
+        """Push one closed metrics bucket (athens or sparta) to the panel."""
+        headers = {"Content-Type": "application/json"}
+        token = payload.get("token") or get_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        url = getattr(config, "EDGE_METRICS_REPORT_URL", None) or (
+            f"{config.API_BASE_URL}/report_edge_metrics"
+        )
+        try:
+            response = _session().post(
+                url,
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+            response.raise_for_status()
+            return True
+        except requests.exceptions.RequestException as e:
+            body = ""
+            resp = getattr(e, "response", None)
+            if resp is not None and getattr(resp, "text", None):
+                body = resp.text.replace("\n", " ")[:500]
+            print(
+                f"[METRICS_SYNC] report_edge_metrics "
+                f"source={payload.get('source')} endpoint={payload.get('endpoint')} "
+                f"ts={payload.get('timestamp')} failed: {e}"
+                + (f" body={body}" if body else ""),
+                flush=True,
+            )
+            return False

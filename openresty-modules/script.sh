@@ -281,8 +281,8 @@ if [[ "${SKIP_RECOMPILE}" == "1" ]]; then
 else
   apply_nginx_patches
 
-  OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib -Wl,-rpath,${INSTALL_PREFIX}/lib -Wl,-rpath,${INSTALL_PREFIX}/luajit/lib"
-  OPENRESTY_CC_OPT="-I${LIB_REDIS_ADAPTER}/include"
+  OPENRESTY_LD_OPT="-L${LIB_REDIS_ADAPTER}/lib -Wl,-rpath,${INSTALL_PREFIX}/lib -Wl,-rpath,${INSTALL_PREFIX}/luajit/lib -Wl,-z,relro,-z,now"
+  OPENRESTY_CC_OPT="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2 -I${LIB_REDIS_ADAPTER}/include"
   if [[ "${DDOS_FW_CI_PAYLOAD_ONLY:-}" == "1" ]]; then
     OPENRESTY_LD_OPT="${OPENRESTY_LD_OPT} -Wl,-rpath,${LIB_REDIS_ADAPTER}/lib"
   fi
@@ -339,6 +339,9 @@ else
   else
     make install
     INSTALL_ROOT="${INSTALL_PREFIX}"
+  fi
+  if [[ -x "${INSTALL_ROOT}/nginx/sbin/nginx" ]]; then
+    strip --strip-unneeded "${INSTALL_ROOT}/nginx/sbin/nginx"
   fi
 fi
 
